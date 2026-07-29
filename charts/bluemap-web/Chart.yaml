@@ -1,0 +1,15 @@
+apiVersion: v2
+name: bluemap-web
+description: Standalone BlueMap web UI with optional scalable SQL data service
+type: application
+version: 0.1.0
+appVersion: "dev"
+home: https://github.com/BlueMap-Minecraft/BlueMap
+sources:
+  - https://github.com/BlueMap-Minecraft/BlueMap
+keywords:
+  - bluemap
+  - minecraft
+  - map
+maintainers:
+  - name: BlueMap contributors

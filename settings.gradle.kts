@@ -29,6 +29,7 @@ implementation("neoforge")
 implementation("paper")
 implementation("spigot")
 implementation("sponge")
+implementation("webserver")
 
 fun implementation(name: String) {
     val project = ":$name"

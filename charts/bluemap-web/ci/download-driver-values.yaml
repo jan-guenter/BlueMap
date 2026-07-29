@@ -1,0 +1,15 @@
+storage:
+  id: sql
+  type: sql
+  sql:
+    databaseType: mariadb
+    host: database.example
+    database: bluemap
+    credentials:
+      username: bluemap
+      password: test-only
+    driver:
+      className: org.mariadb.jdbc.Driver
+      download:
+        url: https://example.com/mariadb-java-client.jar
+        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

@@ -39,6 +39,14 @@ Here you can see how many servers are using BlueMap:
 
 [![BlueMap Graph](https://metrics.bluecolored.de/bluemap/graph.php?1)](https://metrics.bluecolored.de/)
 
+### Standalone web deployment
+
+The standalone [BlueMap Web container](docker/web/README.md) serves the web UI
+and map data from file or SQL storage without running a renderer or Minecraft
+server. A [Helm chart](charts/bluemap-web/README.md) is available for Kubernetes
+deployments, including an optional independently scalable
+[PHP-FPM SQL data tier](docker/php/README.md).
+
 ## Development
 ### Clone
 If you have git installed, simply use the command `git clone --recursive https://github.com/BlueMap-Minecraft/BlueMap.git` to clone BlueMap.

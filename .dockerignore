@@ -1,2 +1,13 @@
 *
 !build/
+!common/
+common/*
+!common/webapp/
+common/webapp/*
+!common/webapp/public/
+common/webapp/public/*
+!common/webapp/public/sql.php
+!docker/
+docker/*
+!docker/php/
+!docker/php/**

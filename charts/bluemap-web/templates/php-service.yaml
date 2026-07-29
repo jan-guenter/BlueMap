@@ -1,0 +1,21 @@
+{{- if .Values.phpFpm.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bluemap-web.phpFullname" . }}
+  labels:
+    {{- include "bluemap-web.phpLabels" . | nindent 4 }}
+  {{- with .Values.phpFpm.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.phpFpm.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.phpFpm.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "bluemap-web.phpSelectorLabels" . | nindent 4 }}
+{{- end }}

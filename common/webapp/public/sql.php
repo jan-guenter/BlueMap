@@ -1,13 +1,19 @@
 <?php
 
 // !!! SET YOUR SQL-CONNECTION SETTINGS HERE: !!!
+// Environment variables override these defaults when they are present.
 
-$driver   = 'mysql'; // 'mysql' (MySQL) or 'pgsql' (PostgreSQL)
-$hostname = '127.0.0.1';
-$port     = 3306;
-$username = 'root';
-$password = '';
-$database = 'bluemap';
+function envOrDefault($name, $fallback) {
+    $value = getenv($name);
+    return $value === false ? $fallback : $value;
+}
+
+$driver   = envOrDefault('BLUEMAP_SQL_PDO_DRIVER', 'mysql'); // 'mysql' (MySQL/MariaDB) or 'pgsql' (PostgreSQL)
+$hostname = envOrDefault('BLUEMAP_SQL_HOST', '127.0.0.1');
+$port     = intval(envOrDefault('BLUEMAP_SQL_PORT', '3306'));
+$username = envOrDefault('BLUEMAP_SQL_USERNAME', 'root');
+$password = envOrDefault('BLUEMAP_SQL_PASSWORD', '');
+$database = envOrDefault('BLUEMAP_SQL_DATABASE', 'bluemap');
 
 // !!! END - DONT CHANGE ANYTHING AFTER THIS LINE !!!
 
