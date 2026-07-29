@@ -26,7 +26,7 @@ package de.bluecolored.bluemap.forge;
 
 import de.bluecolored.bluemap.common.serverinterface.ServerWorld;
 import de.bluecolored.bluemap.core.util.Key;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.storage.LevelResource;
@@ -34,7 +34,6 @@ import net.minecraft.world.level.storage.LevelResource;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.nio.file.Path;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -48,11 +47,11 @@ public class ForgeWorld implements ServerWorld {
     public ForgeWorld(ServerLevel delegate) {
         this.delegate = new WeakReference<>(delegate);
 
-        MinecraftServer server = Objects.requireNonNull(delegate.getServer());
-        this.worldFolder = server.getServerDirectory()
+        MinecraftServer server = delegate.getServer();
+        this.worldFolder = delegate.getServer().getServerDirectory()
                 .resolve(server.getWorldPath(LevelResource.ROOT));
 
-        Identifier id = delegate.dimension().identifier();
+        ResourceLocation id = delegate.dimension().location();
         this.dimension = new Key(id.getNamespace(), id.getPath());
     }
 

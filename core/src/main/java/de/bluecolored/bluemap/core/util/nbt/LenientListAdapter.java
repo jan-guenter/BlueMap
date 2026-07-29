@@ -46,7 +46,7 @@ public class LenientListAdapter<E> implements TypeAdapter<List<E>> {
         this.entrySerializer = nbt.getTypeSerializer(entryType);
         this.entryDeserializer = nbt.getTypeDeserializer(entryType);
         this.constructor = nbt.getInstanceCreator(new TypeToken<>() {});
-        this.errorHandler = errorHandler != null ? errorHandler : _ -> {};
+        this.errorHandler = errorHandler != null ? errorHandler : ignored -> {};
     }
 
     @Override

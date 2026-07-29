@@ -31,7 +31,6 @@ import de.bluecolored.bluemap.common.serverinterface.Player;
 import de.bluecolored.bluemap.common.serverinterface.ServerWorld;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
@@ -145,17 +144,15 @@ public class ForgePlayer extends Player {
 
         this.name = Text.of(player.getName().getString());
 
-        Vec3 pos = player.position();
+        Vec3 pos = player.getPosition(1f);
         this.position = new Vector3d(pos.x(), pos.y(), pos.z());
         this.rotation = new Vector3d(player.getXRot(), player.getYHeadRot(), 0);
         this.sneaking = player.isCrouching();
 
-        ServerLevel world = player.level();
+        this.skyLight = player.level().getChunkSource().getLightEngine().getLayerListener(LightLayer.SKY).getLightValue(new BlockPos(player.getBlockX(), player.getBlockY(), player.getBlockZ()));
+        this.blockLight = player.level().getChunkSource().getLightEngine().getLayerListener(LightLayer.BLOCK).getLightValue(new BlockPos(player.getBlockX(), player.getBlockY(), player.getBlockZ()));
 
-        this.skyLight = world.getChunkSource().getLightEngine().getLayerListener(LightLayer.SKY).getLightValue(new BlockPos(player.getBlockX(), player.getBlockY(), player.getBlockZ()));
-        this.blockLight = world.getChunkSource().getLightEngine().getLayerListener(LightLayer.BLOCK).getLightValue(new BlockPos(player.getBlockX(), player.getBlockY(), player.getBlockZ()));
-
-        this.world = mod.getServerWorld(world);
+        this.world = mod.getServerWorld(player.serverLevel());
     }
 
 }

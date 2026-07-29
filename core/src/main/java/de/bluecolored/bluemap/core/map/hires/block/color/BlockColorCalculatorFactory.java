@@ -61,12 +61,12 @@ public interface BlockColorCalculatorFactory {
 
     static BlockColorCalculatorFactory fixed(Color color) {
         BlockColorCalculator calculator = new FixedBlockColorCalculator(color);
-        return _ -> calculator;
+        return ignored -> calculator;
     }
 
     static BlockColorCalculatorFactory biome(Function<Biome, Color>  biomeColorFunction) {
         BlockColorCalculator calculator = new BiomeBlockColorCalculator(biomeColorFunction);
-        return _ -> calculator;
+        return ignored -> calculator;
     }
 
     static BlockColorCalculatorFactory colorMap(Key colorMapKey, Color defaultColor) {
