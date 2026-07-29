@@ -1,0 +1,13 @@
+{{- if not .Values.config.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bluemap-web.configMapName" . }}
+  labels:
+    {{- include "bluemap-web.labels" . | nindent 4 }}
+data:
+  {{- range $path, $content := .Values.config.files }}
+  {{ $path | replace "/" "__" }}: |
+    {{- tpl $content $ | nindent 4 }}
+  {{- end }}
+{{- end }}

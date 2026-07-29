@@ -1,0 +1,198 @@
+{{- include "bluemap-web.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bluemap-web.fullname" . }}
+  labels:
+    {{- include "bluemap-web.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- toYaml .Values.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "bluemap-web.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        checksum/storage: {{ include (print $.Template.BasePath "/storage-configmap.yaml") . | sha256sum }}
+        checksum/sql-secret: {{ include (print $.Template.BasePath "/sql-secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "bluemap-web.webSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "bluemap-web.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.storage.sql.driver.download.url }}
+      initContainers:
+        - name: download-jdbc-driver
+          image: "{{ .Values.storage.sql.driver.download.image.repository }}:{{ .Values.storage.sql.driver.download.image.tag }}"
+          imagePullPolicy: {{ .Values.storage.sql.driver.download.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              curl --fail --location --show-error --silent \
+                --retry 3 --output /drivers/jdbc-driver.jar "${DRIVER_URL}"
+              if [ -n "${DRIVER_SHA256}" ]; then
+                echo "${DRIVER_SHA256}  /drivers/jdbc-driver.jar" | sha256sum -c -
+              fi
+          env:
+            - name: DRIVER_URL
+              value: {{ .Values.storage.sql.driver.download.url | quote }}
+            - name: DRIVER_SHA256
+              value: {{ .Values.storage.sql.driver.download.sha256 | quote }}
+          volumeMounts:
+            - name: jdbc-driver
+              mountPath: /drivers
+            - name: tmp
+              mountPath: /tmp
+      {{- end }}
+      containers:
+        - name: bluemap-web
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8100
+              protocol: TCP
+          {{- if or (and (eq .Values.storage.type "sql") (ne .Values.storage.sql.databaseType "sqlite")) .Values.extraEnv }}
+          env:
+            {{- if and (eq .Values.storage.type "sql") (ne .Values.storage.sql.databaseType "sqlite") }}
+            - name: BLUEMAP_SQL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "bluemap-web.sqlCredentialsSecretName" . }}
+                  key: {{ .Values.storage.sql.credentials.usernameKey }}
+            - name: BLUEMAP_SQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "bluemap-web.sqlCredentialsSecretName" . }}
+                  key: {{ .Values.storage.sql.credentials.passwordKey }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            {{- if include "bluemap-web.sqlDriverEnabled" . }}
+            - name: jdbc-driver
+              mountPath: /drivers
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - configMap:
+                  name: {{ include "bluemap-web.configMapName" . }}
+                  {{- if .Values.config.existingConfigMap }}
+                  items:
+                    {{- toYaml .Values.config.items | nindent 20 }}
+                  {{- else }}
+                  items:
+                    {{- range $path, $_ := .Values.config.files }}
+                    - key: {{ $path | replace "/" "__" | quote }}
+                      path: {{ $path | quote }}
+                    {{- end }}
+                  {{- end }}
+              {{- if or .Values.secretConfig.existingSecret .Values.secretConfig.files }}
+              - secret:
+                  name: {{ include "bluemap-web.secretName" . }}
+                  {{- if .Values.secretConfig.existingSecret }}
+                  items:
+                    {{- toYaml .Values.secretConfig.items | nindent 20 }}
+                  {{- else }}
+                  items:
+                    {{- range $path, $_ := .Values.secretConfig.files }}
+                    - key: {{ $path | replace "/" "__" | quote }}
+                      path: {{ $path | quote }}
+                    {{- end }}
+                  {{- end }}
+              {{- end }}
+              - configMap:
+                  name: {{ include "bluemap-web.storageConfigName" . }}
+                  items:
+                    - key: storage.conf
+                      path: {{ printf "storages/%s.conf" .Values.storage.id | quote }}
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "bluemap-web.fullname" .) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- if include "bluemap-web.sqlDriverEnabled" . }}
+        - name: jdbc-driver
+          {{- if .Values.storage.sql.driver.existingConfigMap.name }}
+          configMap:
+            name: {{ .Values.storage.sql.driver.existingConfigMap.name }}
+            items:
+              - key: {{ .Values.storage.sql.driver.existingConfigMap.key | quote }}
+                path: jdbc-driver.jar
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

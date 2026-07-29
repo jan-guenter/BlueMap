@@ -1,0 +1,216 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/bluemap-minecraft/bluemap-web
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+
+service:
+  type: ClusterIP
+  port: 8100
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: bluemap.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+strategy:
+  type: Recreate
+
+# One storage configuration is generated as storages/<id>.conf. Map
+# configurations under config.files should reference this id.
+storage:
+  id: file
+  type: file
+  compression: gzip
+  file:
+    root: /data/maps
+  sql:
+    databaseType: mariadb
+    host: ""
+    port: 3306
+    database: bluemap
+    connectionUrl: ""
+    maxConnections: 10
+    properties: {}
+    credentials:
+      existingSecret: ""
+      usernameKey: username
+      passwordKey: password
+      username: ""
+      password: ""
+    driver:
+      className: ""
+      existingConfigMap:
+        name: ""
+        key: ""
+      download:
+        url: ""
+        sha256: ""
+        image:
+          repository: curlimages/curl
+          tag: "8.21.0"
+          pullPolicy: IfNotPresent
+
+config:
+  existingConfigMap: ""
+  items: []
+  files:
+    core.conf: |
+      accept-download: false
+      data: "/data"
+      render-thread-count: 1
+      scan-for-mod-resources: false
+      log: {}
+    webapp.conf: |
+      enabled: true
+      webroot: "/data/web"
+      update-settings-file: true
+    webserver.conf: |
+      enabled: true
+      webroot: "/data/web"
+      ip: "0.0.0.0"
+      port: 8100
+      sse-enabled: false
+      log: {}
+    maps/world.conf: |
+      name: "World"
+      storage: {{ .Values.storage.id | quote }}
+
+secretConfig:
+  existingSecret: ""
+  items: []
+  files: {}
+
+# Optional horizontally scalable HTTP data tier backed by BlueMap's sql.php.
+# It uses an NGINX sidecar because PHP-FPM itself speaks FastCGI, not HTTP.
+phpFpm:
+  enabled: false
+  replicaCount: 2
+  image:
+    repository: ghcr.io/bluemap-minecraft/bluemap-web-php
+    tag: ""
+    pullPolicy: IfNotPresent
+  nginx:
+    image:
+      repository: nginxinc/nginx-unprivileged
+      tag: "1.31-alpine"
+      pullPolicy: IfNotPresent
+    resources: {}
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+  ingress:
+    path: /maps
+    pathType: Prefix
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext:
+    fsGroup: 82
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  phpSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 82
+    runAsGroup: 82
+  nginxSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 101
+  resources: {}
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 2
+    periodSeconds: 5
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+persistence:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+resources: {}
+
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 5
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

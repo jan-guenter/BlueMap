@@ -1,0 +1,12 @@
+BlueMap Web is available inside the cluster at:
+  http://{{ include "bluemap-web.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Health endpoints:
+  /health/live
+  /health/ready
+{{- if .Values.phpFpm.enabled }}
+
+SQL map data is served by {{ include "bluemap-web.phpFullname" . }} with
+{{ .Values.phpFpm.replicaCount }} PHP-FPM replica(s). The chart ingress routes
+{{ .Values.phpFpm.ingress.path }} to that Service.
+{{- end }}

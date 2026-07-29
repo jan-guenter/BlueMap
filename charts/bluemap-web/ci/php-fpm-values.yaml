@@ -1,0 +1,24 @@
+storage:
+  id: sql
+  type: sql
+  sql:
+    databaseType: postgresql
+    host: database.example
+    port: 5432
+    database: bluemap
+    credentials:
+      existingSecret: bluemap-database
+      usernameKey: username
+      passwordKey: password
+    driver:
+      className: org.postgresql.Driver
+      download:
+        url: https://example.com/postgresql.jar
+        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+phpFpm:
+  enabled: true
+  replicaCount: 3
+
+ingress:
+  enabled: true

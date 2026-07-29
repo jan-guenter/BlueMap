@@ -1,0 +1,37 @@
+{{- if .Values.phpFpm.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bluemap-web.phpFullname" . }}-nginx
+  labels:
+    {{- include "bluemap-web.phpLabels" . | nindent 4 }}
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      server_name _;
+      root /var/www/html;
+
+      location = /healthz {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /var/www/html/health.php;
+        fastcgi_param SCRIPT_NAME /health.php;
+        fastcgi_pass 127.0.0.1:9000;
+      }
+
+      location ^~ {{ .Values.phpFpm.ingress.path | trimSuffix "/" }}/ {
+        try_files $uri @bluemap_sql;
+      }
+
+      location / {
+        return 404;
+      }
+
+      location @bluemap_sql {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /var/www/html/sql.php;
+        fastcgi_param SCRIPT_NAME {{ printf "%s/sql.php" (.Values.phpFpm.ingress.path | trimSuffix "/maps") }};
+        fastcgi_pass 127.0.0.1:9000;
+      }
+    }
+{{- end }}
