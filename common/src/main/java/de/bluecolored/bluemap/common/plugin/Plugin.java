@@ -355,7 +355,7 @@ public class Plugin implements ServerEventListener {
                 //periodically update all (non frozen) maps
                 Duration fullUpdateInterval = coreConfig.getFullUpdateInterval();
                 Instant nextUpdate = pluginState.getLastFullUpdate().plus(fullUpdateInterval);
-                Duration delay = Instant.now().until(nextUpdate);
+                Duration delay = Duration.between(Instant.now(), nextUpdate);
                 if (delay.isNegative()) delay = Duration.ZERO;
                 if (fullUpdateInterval.isPositive()) {
                     TimerTask updateAllMapsTask = new TimerTask() {

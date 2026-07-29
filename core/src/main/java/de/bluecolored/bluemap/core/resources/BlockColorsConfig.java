@@ -84,7 +84,7 @@ public class BlockColorsConfig {
 
             BlockColorCalculator calculator = calculators.computeIfAbsent(value, valueDeserializer);
             BlockStateMapping<BlockColorCalculator> mapping = new BlockStateMapping<>(blockState, calculator);
-            mappings.computeIfAbsent(blockState.getId(), _ -> new ArrayList<>(1)).add(mapping);
+            mappings.computeIfAbsent(blockState.getId(), ignored -> new ArrayList<>(1)).add(mapping);
         }
 
         return new BlockColorCalculator() {

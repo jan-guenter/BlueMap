@@ -25,17 +25,12 @@
 package de.bluecolored.bluemap.forge;
 
 import com.flowpowered.math.vector.Vector3d;
-import com.google.gson.JsonElement;
-import com.mojang.serialization.JsonOps;
 import de.bluecolored.bluemap.common.commands.TextFormat;
 import de.bluecolored.bluemap.common.serverinterface.CommandSource;
 import de.bluecolored.bluemap.common.serverinterface.ServerWorld;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import net.minecraft.commands.CommandSourceStack;
-import net.minecraft.network.chat.ComponentSerialization;
-import net.minecraft.server.permissions.LevelBasedPermissionSet;
-import net.minecraft.server.permissions.Permissions;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -55,31 +50,28 @@ public class ForgeCommandSource implements CommandSource {
         if (TextFormat.lineCount(text) > 1)
             text = Component.newline().append(text).appendNewline();
 
-        JsonElement textJson = GsonComponentSerializer.gson().serializeToTree(text.compact());
-        net.minecraft.network.chat.Component minecraftText = ComponentSerialization.CODEC.parse(JsonOps.INSTANCE, textJson).getOrThrow();
-        delegate.sendSystemMessage(minecraftText);
+        delegate.sendSystemMessage(Objects.requireNonNull(net.minecraft.network.chat.Component.Serializer
+                .fromJson(GsonComponentSerializer.gson().serialize(text.compact()), delegate.registryAccess())));
     }
 
     @Override
     public boolean hasPermission(String permission) {
-        return delegate.permissions().hasPermission(Permissions.COMMANDS_MODERATOR);
+        return delegate.hasPermission(1);
     }
 
     @Override
     public Optional<Vector3d> getPosition() {
         if (!delegate.isPlayer() && delegate.getTextName().equals("Server")) return Optional.empty();
 
-        //noinspection OptionalOfNullableMisuse
-        return Optional.ofNullable(delegate.getPosition())
-                .map(pos -> new Vector3d(pos.x, pos.y, pos.z));
+        var pos = delegate.getPosition();
+        return Optional.of(new Vector3d(pos.x, pos.y, pos.z));
     }
 
     @Override
     public Optional<ServerWorld> getWorld() {
         if (!delegate.isPlayer() && delegate.getTextName().equals("Server")) return Optional.empty();
 
-        //noinspection OptionalOfNullableMisuse
-        return Optional.ofNullable(delegate.getLevel())
+        return Optional.of(delegate.getLevel())
                 .map(mod::getServerWorld);
     }
 

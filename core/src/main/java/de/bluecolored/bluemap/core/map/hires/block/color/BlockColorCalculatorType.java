@@ -59,7 +59,7 @@ public interface BlockColorCalculatorType extends Keyed, BlockColorCalculatorFac
             .blended()
     );
 
-    BlockColorCalculatorType REDSTONE = new Impl(Key.minecraft("redstone"), _ ->
+    BlockColorCalculatorType REDSTONE = new Impl(Key.minecraft("redstone"), ignored ->
             new RedstoneBlockColorCalculator()
     );
 
