@@ -31,7 +31,9 @@ spec:
               python -m pip install --disable-pip-version-check --no-cache-dir \
                 -r /opt/bluemap-importer/requirements.txt
               exec python /opt/bluemap-importer/import_snapshot.py \
-                /snapshot/bluemap/web --target-compression zstd
+                /snapshot/bluemap/web --target-compression zstd \
+                --players-fixture /fixtures/players.json \
+                --markers-fixture /fixtures/markers.json
           env:
             - name: DB_BACKEND
               value: mariadb
@@ -68,6 +70,9 @@ spec:
             - name: importer
               mountPath: /opt/bluemap-importer
               readOnly: true
+            - name: fixtures
+              mountPath: /fixtures
+              readOnly: true
             - name: database-ca
               mountPath: /etc/bluemap-database/ca
               readOnly: true
@@ -77,11 +82,14 @@ spec:
       volumes:
         - name: snapshot
           persistentVolumeClaim:
-            claimName: minecraft-data
+            claimName: bluemap-perf-snapshot
             readOnly: true
         - name: importer
           configMap:
             name: bluemap-perf-importer
+        - name: fixtures
+          configMap:
+            name: bluemap-perf-live-fixtures
         - name: database-ca
           secret:
             secretName: bluemap-perf-mariadb-ca
@@ -125,7 +133,9 @@ spec:
               python -m pip install --disable-pip-version-check --no-cache-dir \
                 -r /opt/bluemap-importer/requirements.txt
               exec python /opt/bluemap-importer/import_snapshot.py \
-                /snapshot/bluemap/web --target-compression zstd
+                /snapshot/bluemap/web --target-compression zstd \
+                --players-fixture /fixtures/players.json \
+                --markers-fixture /fixtures/markers.json
           env:
             - name: DB_BACKEND
               value: postgresql
@@ -161,17 +171,23 @@ spec:
             - name: importer
               mountPath: /opt/bluemap-importer
               readOnly: true
+            - name: fixtures
+              mountPath: /fixtures
+              readOnly: true
             - name: database-ca
               mountPath: /etc/bluemap-database/ca
               readOnly: true
       volumes:
         - name: snapshot
           persistentVolumeClaim:
-            claimName: minecraft-data
+            claimName: bluemap-perf-snapshot
             readOnly: true
         - name: importer
           configMap:
             name: bluemap-perf-importer
+        - name: fixtures
+          configMap:
+            name: bluemap-perf-live-fixtures
         - name: database-ca
           secret:
             secretName: bluemap-perf-postgres-ca

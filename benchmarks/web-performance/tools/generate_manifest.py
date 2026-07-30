@@ -33,6 +33,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Output file. Defaults to stdout.",
     )
+    parser.add_argument(
+        "--players-fixture",
+        type=Path,
+        help="override live players expectations without modifying the webroot",
+    )
+    parser.add_argument(
+        "--markers-fixture",
+        type=Path,
+        help="override live marker expectations without modifying the webroot",
+    )
     return parser.parse_args()
 
 
@@ -93,9 +103,21 @@ def expectation(path: Path) -> dict[str, object]:
     }
 
 
+def identity_expectation(path: Path) -> dict[str, object]:
+    payload = path.read_bytes()
+    return {
+        "decodedSha256": hashlib.sha256(payload).hexdigest(),
+        "decodedSize": len(payload),
+        "sourceEncoding": "identity",
+        "sourceSize": len(payload),
+    }
+
+
 def generate(
     webroot: Path,
     requested_map_ids: list[str] | None = None,
+    players_fixture: Path | None = None,
+    markers_fixture: Path | None = None,
 ) -> dict[str, object]:
     webroot = webroot.resolve()
     maps_root = webroot / "maps"
@@ -153,6 +175,11 @@ def generate(
     if not map_directories:
         raise ValueError("No map directories were selected")
 
+    fixture_paths = {
+        "players": players_fixture.resolve(strict=True) if players_fixture else None,
+        "markers": markers_fixture.resolve(strict=True) if markers_fixture else None,
+    }
+
     for map_root in map_directories:
         for path in regular_files(map_root / "tiles"):
             route = url_path(path, webroot, strip_compression=True)
@@ -189,18 +216,28 @@ def generate(
             expected[route] = expectation(path)
 
         player_path = map_root / "live" / "players.json"
-        if player_path.is_file():
+        if player_path.is_file() or fixture_paths["players"] is not None:
             route = url_path(player_path, webroot)
             players.append(route)
-            object_sizes.append((player_path.stat().st_size, route))
-            expected[route] = expectation(player_path)
+            source = fixture_paths["players"] or player_path
+            object_sizes.append((source.stat().st_size, route))
+            expected[route] = (
+                identity_expectation(source)
+                if fixture_paths["players"] is not None
+                else expectation(source)
+            )
 
         marker_path = map_root / "live" / "markers.json"
-        if marker_path.is_file():
+        if marker_path.is_file() or fixture_paths["markers"] is not None:
             route = url_path(marker_path, webroot)
             markers.append(route)
-            object_sizes.append((marker_path.stat().st_size, route))
-            expected[route] = expectation(marker_path)
+            source = fixture_paths["markers"] or marker_path
+            object_sizes.append((source.stat().st_size, route))
+            expected[route] = (
+                identity_expectation(source)
+                if fixture_paths["markers"] is not None
+                else expectation(source)
+            )
 
     if not tiles:
         raise ValueError("No map tiles were found")
@@ -239,13 +276,29 @@ def generate(
             "players": len(set(players)),
             "markers": len(set(markers)),
         },
+        "fixtures": {
+            kind: (
+                {
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "bytes": path.stat().st_size,
+                }
+                if path is not None
+                else None
+            )
+            for kind, path in fixture_paths.items()
+        },
     }
 
 
 def main() -> None:
     args = parse_args()
     manifest = json.dumps(
-        generate(args.webroot, args.map_ids),
+        generate(
+            args.webroot,
+            args.map_ids,
+            args.players_fixture,
+            args.markers_fixture,
+        ),
         indent=2,
         sort_keys=True,
     )

@@ -1,0 +1,15 @@
+# Project the same deterministic live-data fixtures used by the SQL importer
+# over the immutable file snapshot. The PVC itself remains untouched.
+extraVolumes:
+  - name: benchmark-live-fixtures
+    configMap:
+      name: bluemap-perf-live-fixtures
+extraVolumeMounts:
+  - name: benchmark-live-fixtures
+    mountPath: /data/web/maps/world/live/players.json
+    subPath: players.json
+    readOnly: true
+  - name: benchmark-live-fixtures
+    mountPath: /data/web/maps/world/live/markers.json
+    subPath: markers.json
+    readOnly: true

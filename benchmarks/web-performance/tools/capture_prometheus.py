@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -25,8 +26,8 @@ ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Capture exact-pod cAdvisor and PostgreSQL metrics with bounded "
-            "Prometheus query_range calls."
+            "Capture exact-pod, exact-node, and PostgreSQL metrics with "
+            "bounded Prometheus query_range calls."
         )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -53,6 +54,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="ROLE=POD",
         help="exact target Pod and its role; repeat for all targets",
+    )
+    capture_parser.add_argument(
+        "--node",
+        action="append",
+        default=[],
+        help="exact Kubernetes node hosting a selected Pod; repeat as needed",
+    )
+    capture_parser.add_argument(
+        "--phase-events",
+        required=True,
+        type=Path,
+        help="runner phases.ndjson used for per-repetition noise assessment",
+    )
+    capture_parser.add_argument(
+        "--max-non-target-node-cpu-range-cores",
+        default=0.5,
+        type=float,
+    )
+    capture_parser.add_argument(
+        "--max-non-target-node-cpu-mean-cores",
+        default=2.0,
+        type=float,
+    )
+    capture_parser.add_argument(
+        "--max-non-target-node-cpu-maximum-cores",
+        default=3.0,
+        type=float,
     )
     capture_parser.add_argument("--output", required=True, type=Path)
     capture_parser.add_argument("--timeout", default=60, type=int)
@@ -129,17 +157,33 @@ def parse_pod_targets(values: Sequence[str]) -> list[dict[str, str]]:
     return targets
 
 
+def parse_nodes(values: Sequence[str]) -> list[str]:
+    if not values:
+        raise ValueError("At least one exact --node target is required")
+    nodes = sorted(set(values))
+    if len(nodes) != len(values):
+        raise ValueError("Duplicate --node targets are not allowed")
+    for node in nodes:
+        if not KUBERNETES_NAME.fullmatch(node):
+            raise ValueError(f"Invalid Kubernetes node name {node!r}")
+    return nodes
+
+
 def promql_string(value: str) -> str:
     """Return a PromQL-compatible quoted string."""
 
     return json.dumps(value, ensure_ascii=True)
 
 
-def exact_pod_regex(pods: Sequence[str]) -> str:
-    if not pods:
-        raise ValueError("At least one Pod is required for a Prometheus query")
-    escaped = [re.sub(r"([\\.^$|?*+()[\]{}])", r"\\\1", pod) for pod in pods]
+def exact_label_regex(values: Sequence[str], label: str) -> str:
+    if not values:
+        raise ValueError(f"At least one {label} is required for a Prometheus query")
+    escaped = [re.sub(r"([\\.^$|?*+()[\]{}])", r"\\\1", value) for value in values]
     return rf"^(?:{'|'.join(escaped)})$"
+
+
+def exact_pod_regex(pods: Sequence[str]) -> str:
+    return exact_label_regex(pods, "Pod")
 
 
 def metric_selector(
@@ -160,13 +204,32 @@ def metric_selector(
 def build_queries(
     namespace: str,
     targets: Sequence[dict[str, str]],
+    nodes: Sequence[str],
 ) -> list[dict[str, str]]:
     all_pods = [target["pod"] for target in targets]
     database_pods = [
         target["pod"] for target in targets if target["role"] == "database"
     ]
+    postgres_pods = [pod for pod in database_pods if "postgres" in pod]
     all_selector = metric_selector(namespace, all_pods, containers=True)
     network_selector = metric_selector(namespace, all_pods)
+    node_regex = promql_string(exact_label_regex(nodes, "node"))
+    all_pod_regex = promql_string(exact_pod_regex(all_pods))
+    node_container_selector = (
+        "{"
+        f'node=~{node_regex},container!="",container!="POD"'
+        "}"
+    )
+    non_target_node_container_selector = (
+        "{"
+        f'node=~{node_regex},pod!~{all_pod_regex},'
+        'container!="",container!="POD"'
+        "}"
+    )
+    node_network_selector = (
+        "{" f'node=~{node_regex},namespace!=""' "}"
+    )
+    uname_selector = "node_uname_info{" f"nodename=~{node_regex}" "}"
 
     queries = [
         {
@@ -222,12 +285,129 @@ def build_queries(
                 f"(rate(container_network_transmit_bytes_total{network_selector}[1m]))"
             ),
         },
+        {
+            "name": "node_container_cpu_cores",
+            "scope": "selected-nodes",
+            "query": (
+                "sum by (node) "
+                "(rate(container_cpu_usage_seconds_total"
+                f"{node_container_selector}[1m]))"
+            ),
+        },
+        {
+            "name": "node_non_target_container_cpu_cores",
+            "scope": "selected-nodes-excluding-target-pods",
+            "query": (
+                "sum by (node) "
+                "(rate(container_cpu_usage_seconds_total"
+                f"{non_target_node_container_selector}[1m]))"
+            ),
+        },
+        {
+            "name": "node_container_cpu_throttled_seconds_rate",
+            "scope": "selected-nodes",
+            "query": (
+                "sum by (node) "
+                "(rate(container_cpu_cfs_throttled_seconds_total"
+                f"{node_container_selector}[1m]))"
+            ),
+        },
+        {
+            "name": "node_container_cpu_throttled_period_ratio",
+            "scope": "selected-nodes",
+            "query": (
+                "(sum by (node) "
+                "(rate(container_cpu_cfs_throttled_periods_total"
+                f"{node_container_selector}[1m]))) / "
+                "(sum by (node) "
+                "(rate(container_cpu_cfs_periods_total"
+                f"{node_container_selector}[1m])))"
+            ),
+        },
+        {
+            "name": "node_container_network_receive_bytes_rate",
+            "scope": "selected-nodes",
+            "query": (
+                "sum by (node) "
+                "(rate(container_network_receive_bytes_total"
+                f"{node_network_selector}[1m]))"
+            ),
+        },
+        {
+            "name": "node_container_network_transmit_bytes_rate",
+            "scope": "selected-nodes",
+            "query": (
+                "sum by (node) "
+                "(rate(container_network_transmit_bytes_total"
+                f"{node_network_selector}[1m]))"
+            ),
+        },
+        {
+            "name": "node_cpu_idle_steal_cores",
+            "scope": "selected-node-exporters",
+            "query": (
+                "sum by (instance, nodename, mode) ("
+                'rate(node_cpu_seconds_total{mode=~"^(?:idle|steal)$"}[1m]) '
+                "* on(instance) group_left(nodename) "
+                f"{uname_selector})"
+            ),
+        },
+        {
+            "name": "node_disk_read_bytes_rate",
+            "scope": "selected-node-exporters",
+            "query": (
+                "sum by (instance, nodename, device) ("
+                "rate(node_disk_read_bytes_total[1m]) "
+                "* on(instance) group_left(nodename) "
+                f"{uname_selector})"
+            ),
+        },
+        {
+            "name": "node_disk_written_bytes_rate",
+            "scope": "selected-node-exporters",
+            "query": (
+                "sum by (instance, nodename, device) ("
+                "rate(node_disk_written_bytes_total[1m]) "
+                "* on(instance) group_left(nodename) "
+                f"{uname_selector})"
+            ),
+        },
+        {
+            "name": "node_disk_io_seconds_rate",
+            "scope": "selected-node-exporters",
+            "query": (
+                "sum by (instance, nodename, device) ("
+                "rate(node_disk_io_time_seconds_total[1m]) "
+                "* on(instance) group_left(nodename) "
+                f"{uname_selector})"
+            ),
+        },
+        {
+            "name": "node_network_receive_bytes_rate",
+            "scope": "selected-node-exporters",
+            "query": (
+                "sum by (instance, nodename, device) ("
+                'rate(node_network_receive_bytes_total{device!="lo"}[1m]) '
+                "* on(instance) group_left(nodename) "
+                f"{uname_selector})"
+            ),
+        },
+        {
+            "name": "node_network_transmit_bytes_rate",
+            "scope": "selected-node-exporters",
+            "query": (
+                "sum by (instance, nodename, device) ("
+                'rate(node_network_transmit_bytes_total{device!="lo"}[1m]) '
+                "* on(instance) group_left(nodename) "
+                f"{uname_selector})"
+            ),
+        },
     ]
 
-    if not database_pods:
+    if not postgres_pods:
         return queries
 
-    database_selector = metric_selector(namespace, database_pods)
+    database_selector = metric_selector(namespace, postgres_pods)
     postgres_metrics = [
         ("postgres_connections", "pg_stat_database_numbackends", "gauge"),
         ("postgres_xact_commit_rate", "pg_stat_database_xact_commit", "rate"),
@@ -325,6 +505,158 @@ def atomic_write_json(path: Path, value: Any) -> None:
         raise
 
 
+def parse_timestamp(value: str) -> float:
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    return datetime.fromisoformat(normalized).timestamp()
+
+
+def measurement_windows(path: Path) -> list[dict[str, Any]]:
+    events: dict[int, dict[str, float]] = {}
+    with path.open(encoding="utf-8") as source:
+        for line_number, line in enumerate(source, start=1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid phase event JSON on line {line_number}: {error}"
+                ) from error
+            if event.get("phase") != "measurement":
+                continue
+            repetition = event.get("repetition")
+            event_name = event.get("event")
+            if (
+                not isinstance(repetition, int)
+                or repetition < 1
+                or event_name not in {"start", "end"}
+                or not isinstance(event.get("timestamp"), str)
+            ):
+                raise ValueError(f"Invalid measurement phase event on line {line_number}")
+            repetition_events = events.setdefault(repetition, {})
+            if event_name in repetition_events:
+                raise ValueError(
+                    f"Duplicate measurement {event_name} for repetition {repetition}"
+                )
+            repetition_events[event_name] = parse_timestamp(event["timestamp"])
+
+    windows = []
+    for repetition, repetition_events in sorted(events.items()):
+        if set(repetition_events) != {"start", "end"}:
+            raise ValueError(
+                f"Incomplete measurement phase events for repetition {repetition}"
+            )
+        if repetition_events["end"] <= repetition_events["start"]:
+            raise ValueError(
+                f"Invalid measurement time range for repetition {repetition}"
+            )
+        windows.append(
+            {
+                "repetition": repetition,
+                "start": repetition_events["start"],
+                "end": repetition_events["end"],
+            }
+        )
+    if not windows:
+        raise ValueError("No complete measurement phase windows were recorded")
+    return windows
+
+
+def assess_node_noise(
+    results: Sequence[dict[str, Any]],
+    nodes: Sequence[str],
+    windows: Sequence[dict[str, Any]],
+    maximum_range_cores: float,
+    maximum_mean_cores: float,
+    maximum_level_cores: float,
+) -> dict[str, Any]:
+    if min(maximum_range_cores, maximum_mean_cores, maximum_level_cores) <= 0:
+        raise ValueError("Non-target node CPU thresholds must be positive")
+    query = next(
+        (
+            result
+            for result in results
+            if result["name"] == "node_non_target_container_cpu_cores"
+        ),
+        None,
+    )
+    if query is None:
+        raise ValueError("Non-target node CPU query is missing")
+
+    series_by_node: dict[str, list[tuple[float, float]]] = {
+        node: [] for node in nodes
+    }
+    response_series = query["response"].get("data", {}).get("result", [])
+    for series in response_series:
+        node = series.get("metric", {}).get("node")
+        if node not in series_by_node:
+            continue
+        for raw_timestamp, raw_value in series.get("values", []):
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value):
+                continue
+            series_by_node[node].append((float(raw_timestamp), value))
+
+    repetitions = []
+    noisy_repetitions = []
+    for window in windows:
+        node_results = []
+        repetition_noisy = False
+        for node in nodes:
+            values = [
+                value
+                for timestamp, value in series_by_node[node]
+                if window["start"] <= timestamp <= window["end"]
+            ]
+            complete = len(values) >= 2
+            observed_range = max(values) - min(values) if values else None
+            observed_mean = sum(values) / len(values) if values else None
+            observed_maximum = max(values) if values else None
+            noisy = not complete or (
+                observed_range is not None
+                and (
+                    observed_range > maximum_range_cores
+                    or observed_mean > maximum_mean_cores
+                    or observed_maximum > maximum_level_cores
+                )
+            )
+            repetition_noisy = repetition_noisy or noisy
+            node_results.append(
+                {
+                    "node": node,
+                    "samples": len(values),
+                    "minimumCores": min(values) if values else None,
+                    "maximumCores": max(values) if values else None,
+                    "meanCores": observed_mean,
+                    "rangeCores": observed_range,
+                    "complete": complete,
+                    "noisy": noisy,
+                }
+            )
+        if repetition_noisy:
+            noisy_repetitions.append(window["repetition"])
+        repetitions.append(
+            {
+                **window,
+                "nodes": node_results,
+                "noisy": repetition_noisy,
+            }
+        )
+
+    return {
+        "metric": "node_non_target_container_cpu_cores",
+        "maximumRangeCores": maximum_range_cores,
+        "maximumMeanCores": maximum_mean_cores,
+        "maximumLevelCores": maximum_level_cores,
+        "repetitions": repetitions,
+        "noisyRepetitions": noisy_repetitions,
+        "passed": not noisy_repetitions,
+    }
+
+
 def capture(args: argparse.Namespace) -> None:
     inspected = inspect_url(args.base_url)
     source = inspect_url(args.source_url) if args.source_url else inspected
@@ -341,8 +673,17 @@ def capture(args: argparse.Namespace) -> None:
     if not 1 <= args.timeout <= 600:
         raise ValueError("Prometheus timeout must be between 1 and 600 seconds")
 
+    if min(
+        args.max_non_target_node_cpu_range_cores,
+        args.max_non_target_node_cpu_mean_cores,
+        args.max_non_target_node_cpu_maximum_cores,
+    ) <= 0:
+        raise ValueError("Non-target node CPU thresholds must be positive")
+
     targets = parse_pod_targets(args.pod)
-    queries = build_queries(args.namespace, targets)
+    nodes = parse_nodes(args.node)
+    windows = measurement_windows(args.phase_events)
+    queries = build_queries(args.namespace, targets, nodes)
     results = []
     for query in queries:
         results.append(
@@ -369,6 +710,15 @@ def capture(args: argparse.Namespace) -> None:
         },
         "namespace": args.namespace,
         "targets": targets,
+        "nodes": nodes,
+        "nodeNoise": assess_node_noise(
+            results,
+            nodes,
+            windows,
+            args.max_non_target_node_cpu_range_cores,
+            args.max_non_target_node_cpu_mean_cores,
+            args.max_non_target_node_cpu_maximum_cores,
+        ),
         "queries": results,
     }
     atomic_write_json(args.output, bundle)

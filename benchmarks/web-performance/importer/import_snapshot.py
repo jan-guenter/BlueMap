@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import json
 import os
 import re
 import ssl
@@ -20,6 +21,7 @@ import zstandard
 
 GRID_PATH = re.compile(r"^x(-?\d+)z(-?\d+)$")
 COMPRESSED_SUFFIXES = (".gz", ".zst", ".deflate", ".lz4")
+FIXTURE_UPDATED_AT_MS = 1_700_000_000_000
 
 
 @dataclass(frozen=True)
@@ -36,11 +38,24 @@ class DatabaseConfig:
     client_key: str | None
 
 
+@dataclass(frozen=True)
+class LiveFixture:
+    payload: bytes
+    sha256: str
+
+
 class Importer:
-    def __init__(self, connection, backend: str, target_compression: str):
+    def __init__(
+        self,
+        connection,
+        backend: str,
+        target_compression: str,
+        live_fixtures: dict[str, LiveFixture] | None = None,
+    ):
         self.connection = connection
         self.backend = backend
         self.target_compression = target_compression
+        self.live_fixtures = live_fixtures or {}
         self.cursor = connection.cursor()
         self.rows_since_commit = 0
         self.bytes_since_commit = 0
@@ -110,18 +125,24 @@ class Importer:
             item_candidates.append((path, f"bluemap:asset/{asset_name}", "none"))
 
         for path, storage_key, compression in item_candidates:
-            if not path.is_file():
-                continue
-            if compression == "none":
-                payload = path.read_bytes()
+            fixture = self.live_fixtures.get(storage_key)
+            if fixture is not None:
+                payload = fixture.payload
+                updated_at = FIXTURE_UPDATED_AT_MS
             else:
-                payload = compress(read_uncompressed(path), compression)
+                if not path.is_file():
+                    continue
+                if compression == "none":
+                    payload = path.read_bytes()
+                else:
+                    payload = compress(read_uncompressed(path), compression)
+                updated_at = modification_time_ms(path)
             self.write_item(
                 map_key,
                 self.lookup_id("bluemap_item_storage", "key", storage_key),
                 self.lookup_id("bluemap_compression", "key", f"bluemap:{compression}"),
                 payload,
-                modification_time_ms(path),
+                updated_at,
             )
 
     def lookup_id(self, table: str, key_column: str, value: str) -> int:
@@ -243,7 +264,51 @@ def parse_args() -> argparse.Namespace:
         choices=("gzip", "zstd", "deflate", "none"),
         default="zstd",
     )
+    parser.add_argument(
+        "--players-fixture",
+        type=Path,
+        help="deterministic players JSON to inject into every imported map",
+    )
+    parser.add_argument(
+        "--markers-fixture",
+        type=Path,
+        help="deterministic markers JSON to inject into every imported map",
+    )
     return parser.parse_args()
+
+
+def load_live_fixture(path: Path, kind: str) -> LiveFixture:
+    payload = path.read_bytes()
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{kind} fixture is not valid JSON: {error}") from error
+
+    if kind == "players":
+        players = parsed.get("players") if isinstance(parsed, dict) else None
+        if not isinstance(players, list) or len(players) < 8:
+            raise ValueError("players fixture must contain at least eight players")
+        required = {"uuid", "name", "foreign", "position", "rotation"}
+        if any(
+            not isinstance(player, dict) or not required <= player.keys()
+            for player in players
+        ):
+            raise ValueError("players fixture contains an invalid player object")
+    elif kind == "markers":
+        if not isinstance(parsed, dict) or not parsed:
+            raise ValueError("markers fixture must contain at least one marker set")
+        marker_count = sum(
+            len(marker_set.get("markers", {}))
+            for marker_set in parsed.values()
+            if isinstance(marker_set, dict)
+            and isinstance(marker_set.get("markers"), dict)
+        )
+        if marker_count < 8:
+            raise ValueError("markers fixture must contain at least eight markers")
+    else:
+        raise ValueError(f"Unknown live fixture kind: {kind}")
+
+    return LiveFixture(payload, hashlib.sha256(payload).hexdigest())
 
 
 def load_database_config() -> DatabaseConfig:
@@ -542,10 +607,30 @@ def main() -> int:
         return 2
 
     start = time.monotonic()
+    live_fixtures: dict[str, LiveFixture] = {}
+    for storage_key, kind, path in (
+        ("bluemap:players", "players", args.players_fixture),
+        ("bluemap:markers", "markers", args.markers_fixture),
+    ):
+        if path is None:
+            continue
+        fixture = load_live_fixture(path, kind)
+        live_fixtures[storage_key] = fixture
+        print(
+            f"Using {kind} fixture sha256={fixture.sha256} "
+            f"bytes={len(fixture.payload)}",
+            flush=True,
+        )
+
     config = load_database_config()
     connection = connect(config)
     try:
-        importer = Importer(connection, config.backend, args.target_compression)
+        importer = Importer(
+            connection,
+            config.backend,
+            args.target_compression,
+            live_fixtures,
+        )
         importer.initialize_schema()
         importer.import_webroot(webroot)
     finally:

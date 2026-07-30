@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -25,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=float, default=120)
     parser.add_argument("--expected-status", type=int, default=200)
     parser.add_argument("--expected-sha256")
+    parser.add_argument("--expected-length", type=int)
     parser.add_argument("--accept-encoding", default="zstd")
     parser.add_argument("--user-agent", default="BlueMap-Slow-Reader/local")
     parser.add_argument("--ready-file", type=Path, required=True)
@@ -62,6 +64,15 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--initial-delay-seconds must not be negative")
     if args.timeout_seconds <= 0:
         raise ValueError("--timeout-seconds must be positive")
+    if args.expected_sha256 is None and args.expected_length is None:
+        raise ValueError("--expected-sha256 or --expected-length is required")
+    if (
+        args.expected_sha256 is not None
+        and re.fullmatch(r"[0-9a-fA-F]{64}", args.expected_sha256) is None
+    ):
+        raise ValueError("--expected-sha256 must contain 64 hexadecimal characters")
+    if args.expected_length is not None and args.expected_length < 0:
+        raise ValueError("--expected-length must not be negative")
 
     recorded_url = safe_url(args.url)
     request = urllib.request.Request(
@@ -96,6 +107,12 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             "contentLength": content_length,
             "contentEncoding": response.headers.get("Content-Encoding", "identity"),
             "etag": response.headers.get("ETag"),
+            "expectedLength": args.expected_length,
+            "expectedSha256": (
+                args.expected_sha256.lower()
+                if args.expected_sha256 is not None
+                else None
+            ),
             "readyAtEpochSeconds": time.time(),
         }
         if status != args.expected_status:
@@ -129,6 +146,11 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     if content_length is not None and byte_count != content_length:
         raise RuntimeError(
             f"incomplete response: expected {content_length} bytes, received {byte_count}"
+        )
+    if args.expected_length is not None and byte_count != args.expected_length:
+        raise RuntimeError(
+            f"incomplete response: expected {args.expected_length} verified bytes, "
+            f"received {byte_count}"
         )
     if (
         args.expected_sha256 is not None

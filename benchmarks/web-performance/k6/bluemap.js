@@ -2,12 +2,16 @@ import http from "k6/http";
 import { check } from "k6";
 import { Counter, Rate, Trend } from "k6/metrics";
 import { SharedArray } from "k6/data";
+import exec from "k6/execution";
 
 const BASE_URL = requiredEnv("BASE_URL").replace(/\/+$/, "");
 const PROFILE = __ENV.PROFILE || "map-data-mixed";
 const RATE = positiveInteger(__ENV.RATE || "100", "RATE");
 const DURATION = __ENV.DURATION || "5m";
-const PRE_ALLOCATED_VUS = positiveInteger(__ENV.PRE_ALLOCATED_VUS || "32", "PRE_ALLOCATED_VUS");
+const PRE_ALLOCATED_VUS = positiveInteger(
+  __ENV.PRE_ALLOCATED_VUS || "32",
+  "PRE_ALLOCATED_VUS",
+);
 const MAX_VUS = positiveInteger(__ENV.MAX_VUS || "512", "MAX_VUS");
 const VIEWERS = positiveInteger(__ENV.VIEWERS || "100", "VIEWERS");
 const MARKER_INTERVAL_SECONDS = positiveInteger(
@@ -18,10 +22,36 @@ const MIN_ACHIEVED_RATE_RATIO = ratio(
   __ENV.MIN_ACHIEVED_RATE_RATIO || "0.99",
   "MIN_ACHIEVED_RATE_RATIO",
 );
+const TRACE_SEED = __ENV.TRACE_SEED || "bluemap-web-performance-v1";
+const LATENCY_P95_MS = positiveNumber(
+  __ENV.LATENCY_P95_MS || "500",
+  "LATENCY_P95_MS",
+);
+const LATENCY_P99_MS = positiveNumber(
+  __ENV.LATENCY_P99_MS || "1000",
+  "LATENCY_P99_MS",
+);
+const LARGE_OBJECT_LATENCY_P95_MS = optionalPositiveNumber(
+  __ENV.LARGE_OBJECT_LATENCY_P95_MS,
+  "LARGE_OBJECT_LATENCY_P95_MS",
+);
+const LARGE_OBJECT_LATENCY_P99_MS = optionalPositiveNumber(
+  __ENV.LARGE_OBJECT_LATENCY_P99_MS,
+  "LARGE_OBJECT_LATENCY_P99_MS",
+);
+const ENFORCE_LATENCY_GATES = booleanValue(
+  __ENV.ENFORCE_LATENCY_GATES || "true",
+  "ENFORCE_LATENCY_GATES",
+);
 const EXPERIMENT_ID = requiredEnv("EXPERIMENT_ID");
 const ACCEPT_ENCODING = __ENV.ACCEPT_ENCODING || "zstd";
 const CONTRACT_MODE = __ENV.CONTRACT_MODE || "enhanced";
 
+if (TRACE_SEED.length > 128 || /[\r\n\0]/.test(TRACE_SEED)) {
+  throw new Error(
+    "TRACE_SEED must be at most 128 characters without control line breaks",
+  );
+}
 if (!["enhanced", "legacy"].includes(CONTRACT_MODE)) {
   throw new Error("CONTRACT_MODE must be 'enhanced' or 'legacy'");
 }
@@ -44,8 +74,10 @@ const manifest = new SharedArray("bluemap-request-manifest", () => {
     if (!Array.isArray(parsed[key])) {
       throw new Error(`Manifest field '${key}' must be an array`);
     }
+    requireSortedUniqueStrings(parsed[key], `manifest.${key}`);
   }
-  if (parsed.mapIds.length === 0) throw new Error("Manifest selects no map ids");
+  if (parsed.mapIds.length === 0)
+    throw new Error("Manifest selects no map ids");
   if (new Set(parsed.mapIds).size !== parsed.mapIds.length) {
     throw new Error("Manifest mapIds contains duplicates");
   }
@@ -82,9 +114,9 @@ export function setup() {
   if (PROFILE !== "conditional") return {};
 
   const path = manifest.hotTile;
-  const response = timedGet(path, "conditional-seed", requestParams);
-  recordStatus(response, [200]);
-  const etag = response.headers.ETag || response.headers.Etag || response.headers.etag;
+  const response = timedGet(path, "conditional-seed", requestParams, "setup");
+  const etag =
+    response.headers.ETag || response.headers.Etag || response.headers.etag;
   if (response.status !== 200 || !etag) {
     throw new Error(
       `${path}: conditional pre-seed requires a 200 response with an ETag`,
@@ -96,22 +128,30 @@ export function setup() {
 export default function (setupData) {
   switch (PROFILE) {
     case "static":
-      request(randomEntry(manifest.static), "static", [200]);
+      request(deterministicEntry(manifest.static, "static"), "static", [200]);
       break;
     case "hot-tile":
       request(manifest.hotTile, "tile-hot", [200]);
       break;
     case "random-tiles":
-      request(randomEntry(manifest.tiles), "tile-random", [200]);
+      request(
+        deterministicEntry(manifest.tiles, "random-tile"),
+        "tile-random",
+        [200],
+      );
       break;
     case "large-tile":
       request(manifest.largeTile, "tile-large", [200]);
       break;
     case "settings":
-      request(randomEntry(manifest.settings), "settings", [200]);
+      request(deterministicEntry(manifest.settings, "settings"), "settings", [
+        200,
+      ]);
       break;
     case "textures":
-      request(randomEntry(manifest.textures), "textures", [200]);
+      request(deterministicEntry(manifest.textures, "textures"), "textures", [
+        200,
+      ]);
       break;
     case "large-object":
       request(manifest.largeObject, "object-large", [200]);
@@ -134,11 +174,11 @@ export default function (setupData) {
 }
 
 export function pollPlayers() {
-  request(randomEntry(manifest.players), "players", [200]);
+  request(deterministicEntry(manifest.players, "players"), "players", [200]);
 }
 
 export function pollMarkers() {
-  request(randomEntry(manifest.markers), "markers", [200]);
+  request(deterministicEntry(manifest.markers, "markers"), "markers", [200]);
 }
 
 function buildOptions() {
@@ -154,9 +194,18 @@ function buildOptions() {
   ];
   const commonThresholds = {
     bluemap_unexpected_status: ["rate==0"],
-    http_req_failed: ["rate<0.001"],
+    "http_req_failed{traffic:workload}": ["rate<0.001"],
+    "data_received{traffic:workload}": ["count>=0"],
+    "data_sent{traffic:workload}": ["count>=0"],
     dropped_iterations: ["count==0"],
   };
+  if (ENFORCE_LATENCY_GATES) {
+    const latency = effectiveLatencyGates();
+    commonThresholds["http_req_duration{traffic:workload}"] = [
+      `p(95)<${latency.p95}`,
+      `p(99)<${latency.p99}`,
+    ];
+  }
 
   if (PROFILE === "live-viewers") {
     const scenarios = {
@@ -221,8 +270,13 @@ function buildOptions() {
 }
 
 function browserMixedIteration() {
-  if (Math.random() < 0.15 && manifest.static.length > 0) {
-    request(randomEntry(manifest.static), "static", [200]);
+  if (
+    deterministicUnitInterval("browser-class") < 0.15 &&
+    manifest.static.length > 0
+  ) {
+    request(deterministicEntry(manifest.static, "browser-static"), "static", [
+      200,
+    ]);
     return;
   }
   mapDataMixedIteration();
@@ -238,11 +292,15 @@ function mapDataMixedIteration() {
   addWeighted(available, manifest.markers, "markers", 2);
 
   const totalWeight = available.reduce((sum, entry) => sum + entry.weight, 0);
-  let sample = Math.random() * totalWeight;
+  let sample = deterministicUnitInterval("map-data-class") * totalWeight;
   for (const entry of available) {
     sample -= entry.weight;
     if (sample < 0) {
-      request(randomEntry(entry.paths), entry.endpointClass, [200]);
+      request(
+        deterministicEntry(entry.paths, `map-data-path:${entry.endpointClass}`),
+        entry.endpointClass,
+        [200],
+      );
       return;
     }
   }
@@ -256,7 +314,8 @@ function addWeighted(target, paths, endpointClass, weight) {
 }
 
 function conditionalRequest(path, etag) {
-  if (!etag) throw new Error("Conditional workload did not receive its pre-seeded ETag");
+  if (!etag)
+    throw new Error("Conditional workload did not receive its pre-seeded ETag");
   const headers = { ...requestParams.headers, "If-None-Match": etag };
   const response = timedGet(path, "conditional", { ...requestParams, headers });
   recordStatus(response, [304]);
@@ -267,17 +326,23 @@ function request(path, endpointClass, expectedStatuses) {
   recordStatus(response, expectedStatuses);
 }
 
-function timedGet(path, endpointClass, params) {
+function timedGet(path, endpointClass, params, traffic = "workload") {
   const response = http.get(`${BASE_URL}${normalizePath(path)}`, {
     ...params,
     tags: {
+      ...(params.tags || {}),
       endpoint_class: endpointClass,
       profile: PROFILE,
       contract_mode: CONTRACT_MODE,
       experiment_id: EXPERIMENT_ID,
+      traffic,
     },
   });
-  if (response.timings && Number.isFinite(response.timings.waiting)) {
+  if (
+    traffic === "workload" &&
+    response.timings &&
+    Number.isFinite(response.timings.waiting)
+  ) {
     requestTtfb.add(response.timings.waiting, {
       endpoint_class: endpointClass,
       profile: PROFILE,
@@ -323,9 +388,21 @@ function requireProfileInputs() {
   };
   for (const key of requiredLists[PROFILE] || []) {
     if (manifest[key].length === 0) {
-      throw new Error(`Profile '${PROFILE}' requires non-empty manifest.${key}`);
+      throw new Error(
+        `Profile '${PROFILE}' requires non-empty manifest.${key}`,
+      );
     }
   }
+}
+
+function effectiveLatencyGates() {
+  if (PROFILE === "large-object") {
+    return {
+      p95: LARGE_OBJECT_LATENCY_P95_MS || LATENCY_P95_MS,
+      p99: LARGE_OBJECT_LATENCY_P99_MS || LATENCY_P99_MS,
+    };
+  }
+  return { p95: LATENCY_P95_MS, p99: LATENCY_P99_MS };
 }
 
 function validateMapRoutes(parsed) {
@@ -353,14 +430,53 @@ function validateMapRoutes(parsed) {
   for (const field of ["hotTile", "largeTile", "largeObject", "missingTile"]) {
     const path = parsed[field];
     if (!prefixes.some((prefix) => path.startsWith(prefix))) {
-      throw new Error(`Manifest route '${path}' in ${field} does not belong to mapIds`);
+      throw new Error(
+        `Manifest route '${path}' in ${field} does not belong to mapIds`,
+      );
     }
   }
 }
 
-function randomEntry(values) {
-  if (values.length === 0) throw new Error("Cannot select from an empty manifest list");
-  return values[Math.floor(Math.random() * values.length)];
+function deterministicEntry(values, stream) {
+  if (values.length === 0)
+    throw new Error("Cannot select from an empty manifest list");
+  return values[deterministicHash(stream) % values.length];
+}
+
+function deterministicUnitInterval(stream) {
+  return deterministicHash(stream) / 0x100000000;
+}
+
+function deterministicHash(stream) {
+  const input = [
+    TRACE_SEED,
+    PROFILE,
+    exec.scenario.name,
+    String(exec.scenario.iterationInTest),
+    stream,
+  ].join("\u001f");
+
+  // FNV-1a with explicit 32-bit multiplication is stable across k6 VUs and
+  // independent of VU scheduling, candidate variant, phase, and repetition.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function requireSortedUniqueStrings(values, name) {
+  let previous;
+  for (const value of values) {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`${name} must contain only non-empty strings`);
+    }
+    if (previous !== undefined && value <= previous) {
+      throw new Error(`${name} must be sorted and contain no duplicates`);
+    }
+    previous = value;
+  }
 }
 
 function normalizePath(path) {
@@ -379,6 +495,25 @@ function positiveInteger(value, name) {
     throw new Error(`${name} must be a positive integer`);
   }
   return parsed;
+}
+
+function positiveNumber(value, name) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive number`);
+  }
+  return parsed;
+}
+
+function optionalPositiveNumber(value, name) {
+  if (value === undefined || value === "") return null;
+  return positiveNumber(value, name);
+}
+
+function booleanValue(value, name) {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${name} must be true or false`);
 }
 
 function ratio(value, name) {

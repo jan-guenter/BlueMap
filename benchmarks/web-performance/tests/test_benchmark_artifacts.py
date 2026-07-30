@@ -8,8 +8,10 @@ import sys
 import tempfile
 import threading
 import unittest
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 BENCHMARK_ROOT = Path(__file__).parents[1]
@@ -17,6 +19,9 @@ TOOLS_DIR = BENCHMARK_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
 import capture_prometheus
+import configmap_references
+import generate_schedule
+import probe_delivery_cache
 import sanitize_kubernetes_resource
 import sanitize_configmap
 import slow_reader
@@ -167,7 +172,67 @@ class PrometheusCaptureTests(unittest.TestCase):
                 "namespace": "cattle-monitoring-system",
                 "port": 9090,
                 "path": "",
+                },
+            )
+
+    def test_derives_standard_pod_configmap_references(self) -> None:
+        resource = {
+            "kind": "Deployment",
+            "spec": {
+                "template": {
+                    "spec": {
+                        "volumes": [
+                            {"configMap": {"name": "bluemap-perf-direct"}},
+                            {
+                                "projected": {
+                                    "sources": [
+                                        {
+                                            "configMap": {
+                                                "name": "bluemap-perf-projected"
+                                            }
+                                        },
+                                        {"configMap": {"name": "kube-root-ca.crt"}},
+                                    ]
+                                }
+                            },
+                        ],
+                        "initContainers": [
+                            {
+                                "envFrom": [
+                                    {
+                                        "configMapRef": {
+                                            "name": "bluemap-perf-init-env"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        "containers": [
+                            {
+                                "env": [
+                                    {
+                                        "valueFrom": {
+                                            "configMapKeyRef": {
+                                                "name": "bluemap-perf-key"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                }
             },
+        }
+
+        self.assertEqual(
+            configmap_references.references(resource),
+            [
+                "bluemap-perf-direct",
+                "bluemap-perf-init-env",
+                "bluemap-perf-key",
+                "bluemap-perf-projected",
+            ],
         )
 
         with self.assertRaisesRegex(ValueError, "must not contain credentials"):
@@ -181,7 +246,11 @@ class PrometheusCaptureTests(unittest.TestCase):
                 "database=bluemap-perf-postgres-0",
             ]
         )
-        queries = capture_prometheus.build_queries("minecraft", targets)
+        queries = capture_prometheus.build_queries(
+            "minecraft",
+            targets,
+            ["contabo1", "contabo2"],
+        )
         cpu_query = next(
             query["query"]
             for query in queries
@@ -203,6 +272,19 @@ class PrometheusCaptureTests(unittest.TestCase):
             database_query,
         )
         self.assertNotIn("bluemap-perf-web", database_query)
+        node_cpu_query = next(
+            query["query"]
+            for query in queries
+            if query["name"] == "node_non_target_container_cpu_cores"
+        )
+        node_disk_query = next(
+            query["query"]
+            for query in queries
+            if query["name"] == "node_disk_read_bytes_rate"
+        )
+        self.assertIn(r'node=~"^(?:contabo1|contabo2)$"', node_cpu_query)
+        self.assertIn(r'pod!~"^(?:bluemap-perf-loadgen|', node_cpu_query)
+        self.assertIn(r'nodename=~"^(?:contabo1|contabo2)$"', node_disk_query)
 
     def test_captures_every_query_for_the_exact_requested_range(self) -> None:
         requests: list[dict[str, list[str]]] = []
@@ -234,6 +316,14 @@ class PrometheusCaptureTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "prometheus.json"
+                phases = Path(directory) / "phases.ndjson"
+                phases.write_text(
+                    '{"timestamp":"2026-07-30T00:00:10Z","repetition":1,'
+                    '"phase":"measurement","event":"start"}\n'
+                    '{"timestamp":"2026-07-30T00:04:50Z","repetition":1,'
+                    '"phase":"measurement","event":"end"}\n',
+                    encoding="utf-8",
+                )
                 capture_prometheus.capture(
                     argparse.Namespace(
                         base_url=f"http://127.0.0.1:{server.server_port}",
@@ -247,6 +337,11 @@ class PrometheusCaptureTests(unittest.TestCase):
                             "web=bluemap-perf-web-abc",
                             "database=bluemap-perf-postgres-0",
                         ],
+                        node=["contabo1"],
+                        phase_events=phases,
+                        max_non_target_node_cpu_range_cores=0.5,
+                        max_non_target_node_cpu_mean_cores=2.0,
+                        max_non_target_node_cpu_maximum_cores=3.0,
                         output=output,
                         timeout=5,
                     )
@@ -257,7 +352,7 @@ class PrometheusCaptureTests(unittest.TestCase):
             server.server_close()
             server_thread.join()
 
-        self.assertGreaterEqual(len(requests), 10)
+        self.assertGreaterEqual(len(requests), 20)
         self.assertEqual(paths, ["/api/v1/query_range"] * len(requests))
         for request in requests:
             self.assertEqual(request["start"], ["1785369600"])
@@ -269,6 +364,47 @@ class PrometheusCaptureTests(unittest.TestCase):
             bundle["prometheus"]["baseUrl"],
             "http://prometheus.monitoring.svc:9090",
         )
+        self.assertEqual(bundle["nodes"], ["contabo1"])
+        self.assertFalse(bundle["nodeNoise"]["passed"])
+
+    def test_node_noise_is_assessed_per_measurement_repetition(self) -> None:
+        query_results = [
+            {
+                "name": "node_non_target_container_cpu_cores",
+                "response": {
+                    "data": {
+                        "result": [
+                            {
+                                "metric": {"node": "contabo1"},
+                                "values": [
+                                    [10, "0.20"],
+                                    [20, "0.25"],
+                                    [110, "0.20"],
+                                    [120, "1.10"],
+                                    [210, "2.50"],
+                                    [220, "2.60"],
+                                ],
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+        assessment = capture_prometheus.assess_node_noise(
+            query_results,
+            ["contabo1"],
+            [
+                {"repetition": 1, "start": 1, "end": 30},
+                {"repetition": 2, "start": 100, "end": 130},
+                {"repetition": 3, "start": 200, "end": 230},
+            ],
+            0.5,
+            2.0,
+            3.0,
+        )
+
+        self.assertEqual(assessment["noisyRepetitions"], [2, 3])
+        self.assertFalse(assessment["passed"])
 
 
 class OriginRunnerStaticTests(unittest.TestCase):
@@ -286,6 +422,70 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("--map-id", result.stdout)
         self.assertIn("--configmap", result.stdout)
         self.assertIn("--min-achieved-rate-ratio", result.stdout)
+        self.assertIn("--trace-seed", result.stdout)
+        self.assertIn("--latency-p95-ms", result.stdout)
+        self.assertIn("--max-non-target-node-cpu-range-cores", result.stdout)
+        self.assertIn("--schedule-entry", result.stdout)
+        self.assertIn("--variant-id", result.stdout)
+        self.assertIn("--implementation", result.stdout)
+        self.assertIn("--storage-type", result.stdout)
+        self.assertIn("--database-backend", result.stdout)
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+        self.assertIn("configmap_references.py", runner)
+        self.assertIn("DESIRED_WEB_REPLICA_COUNT", runner)
+
+    def test_formal_schedule_is_seeded_balanced_and_tamper_evident(self) -> None:
+        matrix_path = BENCHMARK_ROOT / "matrix.example.json"
+        matrix = generate_schedule.load_json(matrix_path)
+        digest = generate_schedule.matrix_sha256(matrix_path)
+        first = generate_schedule.build_schedule(matrix, digest)
+        second = generate_schedule.build_schedule(matrix, digest)
+
+        self.assertEqual(first, second)
+        generate_schedule.validate_schedule(matrix, digest, first)
+        counts = {}
+        for entry in first["entries"]:
+            key = (
+                entry["block"],
+                entry["matrixCaseId"],
+                entry["variantId"],
+            )
+            counts[key] = counts.get(key, 0) + 1
+            variant = next(
+                item
+                for item in matrix["variants"]
+                if item["id"] == entry["variantId"]
+            )
+            self.assertEqual(entry["implementation"], variant["implementation"])
+            self.assertEqual(entry["storageType"], variant["storageType"])
+            self.assertEqual(
+                entry["databaseBackend"],
+                variant["databaseBackend"],
+            )
+            self.assertEqual(entry["replicaCount"], variant["replicaCount"])
+        self.assertTrue(all(count == 1 for count in counts.values()))
+
+        for case in matrix["cases"]:
+            for variant_id in case["variants"]:
+                positions = Counter(
+                    entry["ordinalWithinCase"]
+                    for entry in first["entries"]
+                    if entry["matrixCaseId"] == case["id"]
+                    and entry["variantId"] == variant_id
+                )
+                counts_by_position = [
+                    positions.get(position, 0)
+                    for position in range(1, len(case["variants"]) + 1)
+                ]
+                self.assertLessEqual(
+                    max(counts_by_position) - min(counts_by_position),
+                    1,
+                )
+
+        tampered = json.loads(json.dumps(first))
+        tampered["entries"][0]["variantId"] = "tampered"
+        with self.assertRaisesRegex(ValueError, "does not exactly match"):
+            generate_schedule.validate_schedule(matrix, digest, tampered)
 
     def test_k6_workload_has_formal_arrival_and_exact_status_gates(self) -> None:
         script = (BENCHMARK_ROOT / "k6" / "bluemap.js").read_text(encoding="utf-8")
@@ -298,6 +498,42 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn('recordStatus(response, [304])', script)
         self.assertIn("playerPolling", script)
         self.assertIn("markerPolling", script)
+        self.assertIn("exec.scenario.iterationInTest", script)
+        self.assertIn("TRACE_SEED", script)
+        self.assertIn("http_req_duration", script)
+        self.assertNotIn("Math.random()", script)
+
+    def test_file_cases_do_not_require_a_database_target(self) -> None:
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn("At least one --database-pod is required", runner)
+        self.assertIn('json_array "${DATABASE_PODS[@]}"', runner)
+        self.assertIn("sample_service_endpoints", runner)
+        self.assertIn('if [[ "$phase" == */measurement ]]', runner)
+        self.assertIn('$phase-end"', runner)
+
+    def test_imports_use_disposable_snapshot_and_live_fixtures(self) -> None:
+        imports = (
+            BENCHMARK_ROOT / "kubernetes" / "import-jobs.yaml"
+        ).read_text(encoding="utf-8")
+        snapshot = (
+            BENCHMARK_ROOT / "kubernetes" / "snapshot-copy.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("claimName: minecraft-data", imports)
+        self.assertIn("claimName: bluemap-perf-snapshot", imports)
+        self.assertIn("--players-fixture /fixtures/players.json", imports)
+        self.assertIn("claimName: minecraft-data", snapshot)
+        self.assertIn("readOnly: true", snapshot)
+        self.assertIn("claimName: bluemap-perf-snapshot", snapshot)
+
+    def test_documented_slow_reader_supplies_verified_expectations(self) -> None:
+        readme = (BENCHMARK_ROOT / "README.md").read_text(encoding="utf-8")
+        section = readme.split("## Graceful-drain slow-reader check", maxsplit=1)[1]
+
+        self.assertIn("--expected-length \"$EXPECTED_LENGTH\"", section)
+        self.assertIn("--expected-sha256 \"$EXPECTED_SHA256\"", section)
+        self.assertIn("bluemap-slow-reader.expected.json", section)
 
 
 class SlowReaderTests(unittest.TestCase):
@@ -332,6 +568,7 @@ class SlowReaderTests(unittest.TestCase):
                         timeout_seconds=5,
                         expected_status=200,
                         expected_sha256=hashlib.sha256(body).hexdigest(),
+                        expected_length=len(body),
                         accept_encoding="zstd",
                         user_agent="BlueMap-Slow-Reader/test",
                         ready_file=root / "ready.json",
@@ -347,6 +584,186 @@ class SlowReaderTests(unittest.TestCase):
         self.assertTrue(result["complete"])
         self.assertEqual(result["bytesRead"], len(body))
         self.assertEqual(ready["contentLength"], len(body))
+
+    def test_requires_an_independent_length_or_hash_expectation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "is required"):
+            slow_reader.execute(
+                argparse.Namespace(
+                    url="http://127.0.0.1:1/large",
+                    bytes_per_second=1024,
+                    chunk_size=1024,
+                    initial_delay_seconds=0,
+                    timeout_seconds=1,
+                    expected_status=200,
+                    expected_sha256=None,
+                    expected_length=None,
+                    accept_encoding="zstd",
+                    user_agent="BlueMap-Slow-Reader/test",
+                    ready_file=Path("/tmp/unused-ready.json"),
+                    output=Path("/tmp/unused-output.json"),
+                )
+            )
+
+
+class DeliveryCacheProbeTests(unittest.TestCase):
+    def test_records_cold_warm_and_revalidated_delivery(self) -> None:
+        request_counts: dict[str, int] = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                path = urlsplit(self.path).path
+                request_counts[path] = request_counts.get(path, 0) + 1
+                etag = f'"{hashlib.sha256(path.encode()).hexdigest()}"'
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    body = b""
+                else:
+                    self.send_response(200)
+                    body = path.encode()
+                self.send_header("ETag", etag)
+                self.send_header(
+                    "Cache-Control",
+                    (
+                        "private,no-store,no-transform"
+                        if path.endswith("players.json")
+                        else "public,max-age=60,must-revalidate,no-transform"
+                    ),
+                )
+                self.send_header(
+                    "CF-Cache-Status",
+                    (
+                        "DYNAMIC"
+                        if path.endswith("players.json")
+                        else "MISS" if request_counts[path] == 1 else "HIT"
+                    ),
+                )
+                if request_counts[path] > 1 and not path.endswith("players.json"):
+                    self.send_header("Age", "1")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = root / "manifest.json"
+                manifest.write_text(
+                    json.dumps(
+                        {
+                            "hotTile": "/maps/world/tiles/0/x0z0.prbm",
+                            "settings": ["/maps/world/settings.json"],
+                            "markers": [],
+                            "players": ["/maps/world/live/players.json"],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                result = probe_delivery_cache.execute(
+                    argparse.Namespace(
+                        base_url=f"http://127.0.0.1:{server.server_port}",
+                        manifest=manifest,
+                        probe_id="unit-test",
+                        accept_encoding="zstd",
+                        user_agent="BlueMap-Cache-Probe/test",
+                        require_cloudflare_cache=True,
+                        timeout=5,
+                    )
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join()
+
+        self.assertTrue(result["passed"], result["errors"])
+        self.assertEqual(result["targets"][0]["cold"]["cfCacheStatus"], "MISS")
+        self.assertEqual(result["targets"][0]["warm"]["cfCacheStatus"], "HIT")
+        self.assertEqual(result["targets"][0]["revalidated"]["status"], 304)
+
+    def test_rejects_any_cached_player_response(self) -> None:
+        def response(
+            *,
+            status: int = 200,
+            body_sha: str = "body",
+            transferred_bytes: int = 4,
+            cache_status: str | None = "DYNAMIC",
+            age: str | None = None,
+            cache_control: str = "public,max-age=60",
+        ) -> dict[str, object]:
+            return {
+                "status": status,
+                "durationMilliseconds": 1.0,
+                "transferredBytes": transferred_bytes,
+                "transferredSha256": body_sha,
+                "age": age,
+                "cfCacheStatus": cache_status,
+                "etag": '"stable"',
+                "lastModified": None,
+                "cacheControl": cache_control,
+                "contentEncoding": "zstd",
+                "contentLength": str(transferred_bytes),
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "hotTile": "/maps/world/tiles/0/x0z0.prbm",
+                        "settings": [],
+                        "markers": [],
+                        "players": ["/maps/world/live/players.json"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                probe_delivery_cache,
+                "request",
+                side_effect=[
+                    response(),
+                    response(),
+                    response(status=304, body_sha="empty", transferred_bytes=0),
+                    response(cache_control="private,no-store"),
+                    response(
+                        cache_status="HIT",
+                        cache_control="private,no-store",
+                    ),
+                    response(
+                        status=304,
+                        body_sha="empty",
+                        transferred_bytes=0,
+                        age="0",
+                        cache_control="private,no-store",
+                    ),
+                ],
+            ):
+                result = probe_delivery_cache.execute(
+                    argparse.Namespace(
+                        base_url="http://example.invalid",
+                        manifest=manifest,
+                        probe_id="unit-test",
+                        accept_encoding="zstd",
+                        user_agent="BlueMap-Cache-Probe/test",
+                        require_cloudflare_cache=False,
+                        timeout=5,
+                    )
+                )
+
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "players: CF-Cache-Status was HIT for warm",
+            result["errors"],
+        )
+        self.assertIn(
+            "players: Age was present for revalidated",
+            result["errors"],
+        )
 
 
 if __name__ == "__main__":

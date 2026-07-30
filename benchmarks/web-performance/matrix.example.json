@@ -1,0 +1,103 @@
+{
+  "formatVersion": 1,
+  "repetitions": 5,
+  "scheduleSeed": "bluemap-web-performance-schedule-v1",
+  "traceSeed": "bluemap-web-performance-v1",
+  "manifestSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "mapIds": ["world"],
+  "controls": {
+    "warmupDuration": "2m",
+    "measurementDuration": "5m",
+    "cooldownSeconds": 60,
+    "minimumAchievedRateRatio": 0.99,
+    "preAllocatedVUs": 32,
+    "maxVUs": 512
+  },
+  "variants": [
+    {
+      "id": "php-postgresql",
+      "contractMode": "legacy",
+      "implementation": "php",
+      "storageType": "sql",
+      "databaseBackend": "postgresql",
+      "replicaCount": 1
+    },
+    {
+      "id": "java-old-postgresql",
+      "contractMode": "legacy",
+      "implementation": "java",
+      "storageType": "sql",
+      "databaseBackend": "postgresql",
+      "replicaCount": 1
+    },
+    {
+      "id": "java-new-postgresql",
+      "contractMode": "enhanced",
+      "implementation": "java",
+      "storageType": "sql",
+      "databaseBackend": "postgresql",
+      "replicaCount": 1
+    },
+    {
+      "id": "rust-postgresql",
+      "contractMode": "enhanced",
+      "implementation": "rust",
+      "storageType": "sql",
+      "databaseBackend": "postgresql",
+      "replicaCount": 1
+    }
+  ],
+  "cases": [
+    {
+      "id": "map-mixed-r100",
+      "profile": "map-data-mixed",
+      "rate": 100,
+      "viewers": 100,
+      "markerIntervalSeconds": 10,
+      "acceptEncoding": "zstd",
+      "storedEncoding": "zstd",
+      "latencyP95Milliseconds": 500,
+      "latencyP99Milliseconds": 1000,
+      "variants": [
+        "php-postgresql",
+        "java-old-postgresql",
+        "java-new-postgresql",
+        "rust-postgresql"
+      ]
+    },
+    {
+      "id": "live-viewers-r100",
+      "profile": "live-viewers",
+      "rate": 100,
+      "viewers": 100,
+      "markerIntervalSeconds": 10,
+      "acceptEncoding": "zstd",
+      "storedEncoding": "zstd",
+      "latencyP95Milliseconds": 500,
+      "latencyP99Milliseconds": 1000,
+      "variants": [
+        "php-postgresql",
+        "java-old-postgresql",
+        "java-new-postgresql",
+        "rust-postgresql"
+      ]
+    },
+    {
+      "id": "large-object-r5",
+      "profile": "large-object",
+      "rate": 5,
+      "viewers": 100,
+      "markerIntervalSeconds": 10,
+      "acceptEncoding": "zstd",
+      "storedEncoding": "zstd",
+      "latencyP95Milliseconds": 2000,
+      "latencyP99Milliseconds": 5000,
+      "variants": [
+        "php-postgresql",
+        "java-old-postgresql",
+        "java-new-postgresql",
+        "rust-postgresql"
+      ]
+    }
+  ]
+}
