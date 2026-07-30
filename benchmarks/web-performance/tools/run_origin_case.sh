@@ -11,9 +11,11 @@ LOADGEN_POD="bluemap-perf-loadgen"
 K6_SCRIPT="$BENCHMARK_ROOT/k6/bluemap.js"
 CONTRACT_SCRIPT="$BENCHMARK_ROOT/tools/check_http_contract.py"
 ARTIFACT_ROOT="$BENCHMARK_ROOT/artifacts"
-PROFILE="browser-mixed"
+PROFILE="map-data-mixed"
 RATE="100"
 VIEWERS="100"
+MARKER_INTERVAL_SECONDS="10"
+MIN_ACHIEVED_RATE_RATIO="0.99"
 PRE_ALLOCATED_VUS="32"
 MAX_VUS="512"
 ACCEPT_ENCODING="zstd"
@@ -22,7 +24,7 @@ CONTRACT_MODE="enhanced"
 WARMUP_DURATION="2m"
 MEASUREMENT_DURATION="5m"
 COOLDOWN_SECONDS="60"
-REPETITIONS="5"
+REPETITIONS="1"
 METRICS_INTERVAL_SECONDS="5"
 PROMETHEUS_URL="${PROMETHEUS_URL:-}"
 PROMETHEUS_STEP_SECONDS="${PROMETHEUS_STEP_SECONDS:-15}"
@@ -35,6 +37,8 @@ MANIFEST=""
 declare -a WEB_DEPLOYMENTS=()
 declare -a WEB_PODS=()
 declare -a DATABASE_PODS=()
+declare -a EXPECTED_MAP_IDS=()
+declare -a CONFIGMAPS=()
 declare -a SAMPLE_TARGETS=()
 declare -a ALL_PODS=()
 
@@ -50,6 +54,9 @@ CASE_START_EPOCH=""
 CASE_START_TIMESTAMP=""
 CASE_END_EPOCH=""
 CASE_END_TIMESTAMP=""
+MANIFEST_MAP_IDS_JSON=""
+CONFIGMAPS_JSON=""
+EXPECTED_ITERATION_RATE=""
 
 usage() {
     cat <<'EOF'
@@ -59,6 +66,8 @@ Usage:
     --service bluemap-perf-SERVICE \
     --service-port PORT \
     --manifest MANIFEST.json \
+    --map-id world \
+    --configmap bluemap-perf-CONFIGMAP \
     --web-deployment bluemap-perf-DEPLOYMENT \
     --web-pod bluemap-perf-WEB-POD \
     --database-pod bluemap-perf-DATABASE-POD [options]
@@ -68,9 +77,11 @@ start with "bluemap-perf-". The runner only performs Kubernetes get, get
 --raw, exec into bluemap-perf-loadgen, and port-forward operations.
 
 Workload options:
-  --profile NAME                  k6 profile (default: browser-mixed)
+  --profile NAME                  k6 profile (default: map-data-mixed)
   --rate N                        offered requests/second (default: 100)
-  --viewers N                     live-viewers VUs (default: 100)
+  --viewers N                     player polls/second in live-viewers (default: 100)
+  --marker-interval-seconds N     per-viewer marker interval (default: 10)
+  --min-achieved-rate-ratio R     formal arrival-rate gate (default: 0.99)
   --pre-allocated-vus N           k6 preallocated VUs (default: 32)
   --max-vus N                     k6 maximum VUs (default: 512)
   --accept-encoding NAME          request encoding (default: zstd)
@@ -79,7 +90,7 @@ Workload options:
   --warmup DURATION               k6 warmup duration (default: 2m)
   --measurement DURATION          measured duration (default: 5m)
   --cooldown-seconds N            no-request cooldown (default: 60)
-  --repetitions N                 repetitions (default: 5)
+  --repetitions N                 repetitions in this case (formal default: 1)
   --metrics-interval-seconds N    metrics.k8s.io interval (default: 5)
   --prometheus-url URL            optional Prometheus base URL
   --prometheus-step-seconds N     query_range step (default: 15)
@@ -91,6 +102,8 @@ Path/cluster options:
   --python COMMAND                 Python with zstandard installed
   --kubeconfig FILE
   --namespace NAME                default: minecraft
+  --map-id NAME                   selected manifest map id; repeatable
+  --configmap NAME                non-secret rendered config; repeatable
   --web-deployment NAME           repeatable
   --web-pod NAME                  repeatable
   --database-pod NAME             repeatable
@@ -157,6 +170,14 @@ while (($# > 0)); do
             DATABASE_PODS+=("${2:-}")
             shift 2
             ;;
+        --map-id)
+            EXPECTED_MAP_IDS+=("${2:-}")
+            shift 2
+            ;;
+        --configmap)
+            CONFIGMAPS+=("${2:-}")
+            shift 2
+            ;;
         --profile)
             PROFILE="${2:-}"
             shift 2
@@ -167,6 +188,14 @@ while (($# > 0)); do
             ;;
         --viewers)
             VIEWERS="${2:-}"
+            shift 2
+            ;;
+        --marker-interval-seconds)
+            MARKER_INTERVAL_SECONDS="${2:-}"
+            shift 2
+            ;;
+        --min-achieved-rate-ratio)
+            MIN_ACHIEVED_RATE_RATIO="${2:-}"
             shift 2
             ;;
         --pre-allocated-vus)
@@ -261,6 +290,8 @@ done
 ((${#WEB_DEPLOYMENTS[@]} > 0)) || die "At least one --web-deployment is required"
 ((${#WEB_PODS[@]} > 0)) || die "At least one --web-pod is required"
 ((${#DATABASE_PODS[@]} > 0)) || die "At least one --database-pod is required"
+((${#EXPECTED_MAP_IDS[@]} > 0)) || die "At least one --map-id is required"
+((${#CONFIGMAPS[@]} > 0)) || die "At least one --configmap is required"
 
 validate_prefixed_name "Service" "$SERVICE"
 validate_prefixed_name "load-generator Pod" "$LOADGEN_POD"
@@ -275,11 +306,19 @@ for name in "${DATABASE_PODS[@]}"; do
     validate_prefixed_name "database Pod" "$name"
     [[ "$name" != "$LOADGEN_POD" ]] || die "The load-generator Pod cannot be a database Pod"
 done
+for name in "${CONFIGMAPS[@]}"; do
+    validate_prefixed_name "ConfigMap" "$name"
+done
+for map_id in "${EXPECTED_MAP_IDS[@]}"; do
+    [[ "$map_id" =~ ^[A-Za-z0-9_.-]+$ ]] ||
+        die "map id '$map_id' contains unsupported characters"
+done
 
 validate_positive_integer "service port" "$SERVICE_PORT"
 ((SERVICE_PORT <= 65535)) || die "service port must not exceed 65535"
 validate_positive_integer "rate" "$RATE"
 validate_positive_integer "viewers" "$VIEWERS"
+validate_positive_integer "marker interval seconds" "$MARKER_INTERVAL_SECONDS"
 validate_positive_integer "pre-allocated VUs" "$PRE_ALLOCATED_VUS"
 validate_positive_integer "maximum VUs" "$MAX_VUS"
 validate_positive_integer "cooldown seconds" "$COOLDOWN_SECONDS"
@@ -290,8 +329,18 @@ validate_positive_integer "Prometheus step" "$PROMETHEUS_STEP_SECONDS"
     die "Prometheus step must not exceed 3600 seconds"
 validate_k6_duration "warmup" "$WARMUP_DURATION"
 validate_k6_duration "measurement" "$MEASUREMENT_DURATION"
+[[ "$MIN_ACHIEVED_RATE_RATIO" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] ||
+    die "--min-achieved-rate-ratio must be greater than zero and at most one"
+[[ "$MIN_ACHIEVED_RATE_RATIO" != "0" &&
+   "$MIN_ACHIEVED_RATE_RATIO" != "0.0" &&
+   "$MIN_ACHIEVED_RATE_RATIO" != "0.00" ]] ||
+    die "--min-achieved-rate-ratio must be greater than zero"
 [[ "$CONTRACT_MODE" == "enhanced" || "$CONTRACT_MODE" == "legacy" ]] ||
     die "--contract-mode must be enhanced or legacy"
+[[ "$PROFILE" =~ ^(static|hot-tile|random-tiles|large-tile|settings|textures|large-object|missing-tile|conditional|live-viewers|map-data-mixed|browser-mixed)$ ]] ||
+    die "--profile is not a supported benchmark profile"
+[[ "$PROFILE" != "conditional" || "$CONTRACT_MODE" == "enhanced" ]] ||
+    die "The conditional profile requires --contract-mode enhanced"
 [[ "$STORED_ENCODING" =~ ^(gzip|zstd|deflate|identity)$ ]] ||
     die "--stored-encoding must be gzip, zstd, deflate, or identity"
 [[ -f "$MANIFEST" ]] || die "Manifest '$MANIFEST' is not a regular file"
@@ -301,6 +350,10 @@ validate_k6_duration "measurement" "$MEASUREMENT_DURATION"
     die "Kubernetes snapshot helper is unavailable"
 [[ -f "$SCRIPT_DIR/capture_prometheus.py" ]] ||
     die "Prometheus capture helper is unavailable"
+[[ -f "$SCRIPT_DIR/sanitize_configmap.py" ]] ||
+    die "ConfigMap snapshot helper is unavailable"
+[[ -f "$SCRIPT_DIR/slow_reader.py" ]] ||
+    die "Slow-reader helper is unavailable"
 [[ -f "$KUBECONFIG_PATH" ]] || die "Kubeconfig '$KUBECONFIG_PATH' is not a regular file"
 
 for command in kubectl jq sha256sum tee diff; do
@@ -315,6 +368,49 @@ if [[ -n "$PROMETHEUS_URL" ]]; then
 fi
 "$PYTHON_BIN" -c 'import zstandard' >/dev/null 2>&1 ||
     die "The local Python environment needs the zstandard module for contract checks"
+jq -en --arg ratio "$MIN_ACHIEVED_RATE_RATIO" \
+    '($ratio | tonumber) as $value | $value > 0 and $value <= 1' >/dev/null ||
+    die "--min-achieved-rate-ratio must be greater than zero and at most one"
+
+EXPECTED_MAP_IDS_JSON="$(
+    printf '%s\n' "${EXPECTED_MAP_IDS[@]}" |
+        jq -Rsc 'split("\n")[:-1] | sort | unique'
+)"
+if ((${#EXPECTED_MAP_IDS[@]} != $(jq 'length' <<<"$EXPECTED_MAP_IDS_JSON"))); then
+    die "Repeated --map-id values must be unique"
+fi
+MANIFEST_MAP_IDS_JSON="$(
+    jq -ce '
+        .mapIds
+        | if type != "array"
+             or length == 0
+             or any(.[]; type != "string" or length == 0)
+             or length != (unique | length)
+          then error("mapIds must be a non-empty string array")
+          else sort | unique
+          end
+    ' "$MANIFEST"
+)" || die "Manifest mapIds validation failed"
+[[ "$MANIFEST_MAP_IDS_JSON" == "$EXPECTED_MAP_IDS_JSON" ]] ||
+    die "Manifest mapIds do not exactly match the repeated --map-id arguments"
+
+CONFIGMAPS_JSON="$(
+    printf '%s\n' "${CONFIGMAPS[@]}" |
+        jq -Rsc 'split("\n")[:-1] | sort | unique'
+)"
+if ((${#CONFIGMAPS[@]} != $(jq 'length' <<<"$CONFIGMAPS_JSON"))); then
+    die "Repeated --configmap names must be unique"
+fi
+
+EXPECTED_ITERATION_RATE="$RATE"
+if [[ "$PROFILE" == "live-viewers" ]]; then
+    marker_count="$(jq '.markers | length' "$MANIFEST")"
+    EXPECTED_ITERATION_RATE="$(
+        "$PYTHON_BIN" -c \
+            'import sys; viewers=int(sys.argv[1]); interval=int(sys.argv[2]); markers=int(sys.argv[3]); print(viewers + (viewers / interval if markers else 0))' \
+            "$VIEWERS" "$MARKER_INTERVAL_SECONDS" "$marker_count"
+    )"
+fi
 
 umask 077
 mkdir -p -- "$ARTIFACT_ROOT"
@@ -400,6 +496,75 @@ validate_available_deployment() {
         die "Deployment '$deployment' does not have all requested replicas available"
 }
 
+verify_service_endpoints() {
+    local label="$1"
+    local destination="$ARTIFACT_DIR/cluster/endpoints-$label.json"
+    local payload
+    local expected_pods_json
+    expected_pods_json="$(
+        printf '%s\n' "${WEB_PODS[@]}" |
+            jq -Rsc 'split("\n")[:-1] | sort | unique'
+    )"
+    payload="$(
+        kube get endpointslice \
+            --selector "kubernetes.io/service-name=$SERVICE" \
+            -o json
+    )" || return 1
+
+    jq \
+        --arg capturedAt "$(timestamp)" \
+        --arg service "$SERVICE" \
+        --argjson expected "$expected_pods_json" \
+        '{
+            capturedAt: $capturedAt,
+            service: $service,
+            expectedReadyPods: $expected,
+            allReadyEndpointsReferencePods: (
+                all(
+                    .items[].endpoints[]?
+                    | select(
+                        .conditions.ready == true
+                        and (.conditions.serving // true) == true
+                        and (.conditions.terminating // false) == false
+                    );
+                    .targetRef.kind == "Pod"
+                    and (.targetRef.name | type) == "string"
+                )
+            ),
+            endpointSlices: [
+                .items[] | {
+                    name: .metadata.name,
+                    addressType,
+                    endpoints: [
+                        .endpoints[]? | {
+                            targetKind: .targetRef.kind,
+                            targetName: .targetRef.name,
+                            conditions
+                        }
+                    ]
+                }
+            ],
+            readyPods: (
+                [
+                    .items[].endpoints[]?
+                    | select(
+                        .conditions.ready == true
+                        and (.conditions.serving // true) == true
+                        and (.conditions.terminating // false) == false
+                    )
+                    | select(.targetRef.kind == "Pod")
+                    | .targetRef.name
+                ]
+                | sort
+                | unique
+            )
+        }' <<<"$payload" > "$destination"
+    jq -e '
+        .allReadyEndpointsReferencePods == true
+        and .readyPods == .expectedReadyPods
+    ' "$destination" >/dev/null
+}
+
 snapshot_resource() {
     local kind="$1"
     local name="$2"
@@ -410,6 +575,46 @@ snapshot_resource() {
         "$PYTHON_BIN" "$SCRIPT_DIR/sanitize_kubernetes_resource.py" \
             --captured-at "$captured_at" > "$destination" ||
         return 1
+}
+
+snapshot_configmap() {
+    local name="$1"
+    local destination="$2"
+    local captured_at
+    captured_at="$(timestamp)"
+    kube get configmap "$name" -o json |
+        "$PYTHON_BIN" "$SCRIPT_DIR/sanitize_configmap.py" \
+            --captured-at "$captured_at" > "$destination"
+}
+
+capture_configmap_set() {
+    local label="$1"
+    local directory="$ARTIFACT_DIR/cluster/$label"
+    local digest_items="$ARTIFACT_DIR/cluster/.config-digests-$label.ndjson"
+    : > "$digest_items"
+
+    for configmap in "${CONFIGMAPS[@]}"; do
+        local snapshot_file="$directory/configmap-$configmap.json"
+        local digest
+        snapshot_configmap "$configmap" "$snapshot_file" || return 1
+        digest="$(
+            jq -cS '.resource.data' "$snapshot_file" |
+                sha256sum |
+                awk '{print $1}'
+        )" || return 1
+        jq -nc \
+            --arg name "$configmap" \
+            --arg sha256 "$digest" \
+            '{name: $name, sanitizedDataSha256: $sha256}' \
+            >> "$digest_items" || return 1
+    done
+
+    jq -s \
+        --arg capturedAt "$(timestamp)" \
+        '{capturedAt: $capturedAt, configMaps: (sort_by(.name))}' \
+        "$digest_items" > "$ARTIFACT_DIR/cluster/config-digests-$label.json" ||
+        return 1
+    rm -f -- "$digest_items"
 }
 
 capture_snapshot_set() {
@@ -429,6 +634,7 @@ capture_snapshot_set() {
         snapshot_resource pod "$pod" "$directory/pod-$pod.json" ||
             return 1
     done
+    capture_configmap_set "$label" || return 1
 
     jq -s '{
         pods: map(.resource | {
@@ -748,6 +954,35 @@ copy_remote_file() {
     [[ -s "$local_file" ]]
 }
 
+validate_arrival_gate() {
+    local summary="$1"
+    local destination="$2"
+    local minimum_rate
+    minimum_rate="$(
+        "$PYTHON_BIN" -c \
+            'import sys; print(float(sys.argv[1]) * float(sys.argv[2]))' \
+            "$EXPECTED_ITERATION_RATE" "$MIN_ACHIEVED_RATE_RATIO"
+    )" || return 1
+
+    jq \
+        --argjson offeredIterationsPerSecond "$EXPECTED_ITERATION_RATE" \
+        --argjson minimumAchievedRatio "$MIN_ACHIEVED_RATE_RATIO" \
+        --argjson minimumIterationsPerSecond "$minimum_rate" \
+        '{
+            offeredIterationsPerSecond: $offeredIterationsPerSecond,
+            minimumAchievedRateRatio: $minimumAchievedRatio,
+            minimumIterationsPerSecond: $minimumIterationsPerSecond,
+            achievedIterationsPerSecond: .metrics.iterations.values.rate,
+            droppedIterations: (.metrics.dropped_iterations.values.count // 0),
+            passed: (
+                (.metrics.dropped_iterations.values.count // 0) == 0
+                and .metrics.iterations.values.rate >= $minimumIterationsPerSecond
+            )
+        }' "$summary" > "$destination" || return 1
+
+    jq -e '.passed == true' "$destination" >/dev/null
+}
+
 run_k6_phase() {
     local repetition="$1"
     local phase="$2"
@@ -782,8 +1017,11 @@ run_k6_phase() {
         -e "PRE_ALLOCATED_VUS=$PRE_ALLOCATED_VUS" \
         -e "MAX_VUS=$MAX_VUS" \
         -e "VIEWERS=$VIEWERS" \
+        -e "MARKER_INTERVAL_SECONDS=$MARKER_INTERVAL_SECONDS" \
+        -e "MIN_ACHIEVED_RATE_RATIO=$MIN_ACHIEVED_RATE_RATIO" \
         -e "EXPERIMENT_ID=$CASE_ID-r$repetition_name-$phase" \
         -e "ACCEPT_ENCODING=$ACCEPT_ENCODING" \
+        -e "CONTRACT_MODE=$CONTRACT_MODE" \
         "/artifacts/$CASE_ID/inputs/bluemap.js" \
         2>&1 | tee "$local_dir/console.log"
     local status="${PIPESTATUS[0]}"
@@ -799,6 +1037,14 @@ run_k6_phase() {
     if ! copy_remote_file "$remote_raw" "$local_dir/raw.ndjson"; then
         record_failure \
             "Repetition $repetition $phase: raw k6 metric output is missing"
+        artifact_failure=1
+    fi
+    if [[ -s "$local_dir/summary.json" ]] &&
+        ! validate_arrival_gate \
+            "$local_dir/summary.json" \
+            "$local_dir/arrival-gate.json"; then
+        record_failure \
+            "Repetition $repetition $phase: offered/achieved-rate or dropped-iteration gate failed"
         artifact_failure=1
     fi
 
@@ -844,8 +1090,11 @@ write_workload_metadata() {
         --arg profile "$PROFILE" \
         --argjson rate "$RATE" \
         --argjson viewers "$VIEWERS" \
+        --argjson markerIntervalSeconds "$MARKER_INTERVAL_SECONDS" \
         --argjson preAllocatedVUs "$PRE_ALLOCATED_VUS" \
         --argjson maxVUs "$MAX_VUS" \
+        --argjson minimumAchievedRateRatio "$MIN_ACHIEVED_RATE_RATIO" \
+        --argjson offeredIterationsPerSecond "$EXPECTED_ITERATION_RATE" \
         --arg acceptEncoding "$ACCEPT_ENCODING" \
         --arg storedEncoding "$STORED_ENCODING" \
         --arg contractMode "$CONTRACT_MODE" \
@@ -863,6 +1112,10 @@ write_workload_metadata() {
         --arg k6ScriptSha256 "$(sha256sum "$K6_SCRIPT" | awk '{print $1}')" \
         --arg contractScriptSha256 "$(sha256sum "$CONTRACT_SCRIPT" | awk '{print $1}')" \
         --arg runnerSha256 "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')" \
+        --arg configSanitizerSha256 "$(sha256sum "$SCRIPT_DIR/sanitize_configmap.py" | awk '{print $1}')" \
+        --arg slowReaderSha256 "$(sha256sum "$SCRIPT_DIR/slow_reader.py" | awk '{print $1}')" \
+        --argjson mapIds "$MANIFEST_MAP_IDS_JSON" \
+        --argjson configMaps "$CONFIGMAPS_JSON" \
         --argjson webDeployments "$web_deployments_json" \
         --argjson webPods "$web_pods_json" \
         --argjson databasePods "$database_pods_json" \
@@ -879,8 +1132,11 @@ write_workload_metadata() {
                 profile: $profile,
                 rate: $rate,
                 viewers: $viewers,
+                markerIntervalSeconds: $markerIntervalSeconds,
                 preAllocatedVUs: $preAllocatedVUs,
                 maxVUs: $maxVUs,
+                minimumAchievedRateRatio: $minimumAchievedRateRatio,
+                offeredIterationsPerSecond: $offeredIterationsPerSecond,
                 acceptEncoding: $acceptEncoding,
                 storedEncoding: $storedEncoding,
                 contractMode: $contractMode,
@@ -909,6 +1165,8 @@ write_workload_metadata() {
                 pythonCommand: $pythonCommand
             },
             targets: {
+                mapIds: $mapIds,
+                configMaps: $configMaps,
                 webDeployments: $webDeployments,
                 webPods: $webPods,
                 databasePods: $databasePods
@@ -918,7 +1176,9 @@ write_workload_metadata() {
                 manifestSha256: $manifestSha256,
                 k6ScriptSha256: $k6ScriptSha256,
                 contractScriptSha256: $contractScriptSha256,
-                runnerSha256: $runnerSha256
+                runnerSha256: $runnerSha256,
+                configSanitizerSha256: $configSanitizerSha256,
+                slowReaderSha256: $slowReaderSha256
             }
         }' > "$ARTIFACT_DIR/inputs/workload.json"
 }
@@ -949,6 +1209,9 @@ done
 for pod in "${WEB_PODS[@]}" "${DATABASE_PODS[@]}"; do
     validate_ready_pod "$pod"
 done
+for configmap in "${CONFIGMAPS[@]}"; do
+    kube get configmap "$configmap" -o name >/dev/null
+done
 
 cp -- "$MANIFEST" "$ARTIFACT_DIR/inputs/manifest.json"
 cp -- "$K6_SCRIPT" "$ARTIFACT_DIR/inputs/bluemap.js"
@@ -956,8 +1219,12 @@ cp -- "$CONTRACT_SCRIPT" "$ARTIFACT_DIR/inputs/check_http_contract.py"
 cp -- "${BASH_SOURCE[0]}" "$ARTIFACT_DIR/inputs/run_origin_case.sh"
 cp -- "$SCRIPT_DIR/sanitize_kubernetes_resource.py" \
     "$ARTIFACT_DIR/inputs/sanitize_kubernetes_resource.py"
+cp -- "$SCRIPT_DIR/sanitize_configmap.py" \
+    "$ARTIFACT_DIR/inputs/sanitize_configmap.py"
 cp -- "$SCRIPT_DIR/capture_prometheus.py" \
     "$ARTIFACT_DIR/inputs/capture_prometheus.py"
+cp -- "$SCRIPT_DIR/slow_reader.py" \
+    "$ARTIFACT_DIR/inputs/slow_reader.py"
 write_workload_metadata
 (
     cd -- "$ARTIFACT_DIR/inputs"
@@ -967,7 +1234,9 @@ write_workload_metadata
         check_http_contract.py \
         run_origin_case.sh \
         sanitize_kubernetes_resource.py \
+        sanitize_configmap.py \
         capture_prometheus.py \
+        slow_reader.py \
         workload.json > SHA256SUMS
 )
 
@@ -990,6 +1259,8 @@ kube exec -i "pod/$LOADGEN_POD" -c k6 -- \
     sh "$REMOTE_ROOT/inputs/bluemap.js" < "$K6_SCRIPT"
 
 capture_snapshot_set before
+verify_service_endpoints before ||
+    die "Ready EndpointSlice Pod targets do not exactly match --web-pod targets"
 capture_restart_counts "$ARTIFACT_DIR/cluster/restarts-case-before.json"
 
 CASE_START_EPOCH="$(date -u +%s)"
@@ -1006,12 +1277,19 @@ for ((repetition = 1; repetition <= REPETITIONS; repetition++)); do
     mkdir -- "$repetition_dir"
     capture_restart_counts "$repetition_dir/restarts-before.json"
 
+    if ! verify_service_endpoints "repetition-$repetition_name-before"; then
+        record_failure \
+            "Repetition $repetition: ready EndpointSlice targets changed"
+        case_failed=1
+    fi
+
     set_phase "$repetition" "correctness"
     record_phase_event "$repetition" "correctness" "start"
-    if ! run_contract_check "$repetition" "$repetition_dir"; then
+    if ((case_failed == 0)) &&
+        ! run_contract_check "$repetition" "$repetition_dir"; then
         record_phase_event "$repetition" "correctness" "failed"
         case_failed=1
-    else
+    elif ((case_failed == 0)); then
         record_phase_event "$repetition" "correctness" "end"
     fi
 
@@ -1032,6 +1310,11 @@ for ((repetition = 1; repetition <= REPETITIONS; repetition++)); do
     fi
 
     capture_restart_counts "$repetition_dir/restarts-after.json"
+    if ! verify_service_endpoints "repetition-$repetition_name-after"; then
+        record_failure \
+            "Repetition $repetition: ready EndpointSlice targets changed"
+        case_failed=1
+    fi
     if ! diff -u \
         <(normalized_restarts "$repetition_dir/restarts-before.json") \
         <(normalized_restarts "$repetition_dir/restarts-after.json") \
@@ -1061,6 +1344,10 @@ if ! capture_snapshot_set after; then
     record_failure "Final Kubernetes resource snapshot failed"
     case_failed=1
 fi
+if ! verify_service_endpoints after; then
+    record_failure "Ready EndpointSlice targets changed by the end of the case"
+    case_failed=1
+fi
 if ! capture_restart_counts "$ARTIFACT_DIR/cluster/restarts-case-after.json"; then
     record_failure "Final restart-count snapshot failed"
     case_failed=1
@@ -1070,6 +1357,13 @@ if ! diff -u \
     <(normalized_restarts "$ARTIFACT_DIR/cluster/restarts-case-after.json") \
     > "$ARTIFACT_DIR/cluster/restarts-case.diff"; then
     record_failure "A selected container restarted during the case"
+    case_failed=1
+fi
+if ! diff -u \
+    <(jq -S '.configMaps' "$ARTIFACT_DIR/cluster/config-digests-before.json") \
+    <(jq -S '.configMaps' "$ARTIFACT_DIR/cluster/config-digests-after.json") \
+    > "$ARTIFACT_DIR/cluster/config-digests.diff"; then
+    record_failure "A selected rendered ConfigMap changed during the case"
     case_failed=1
 fi
 

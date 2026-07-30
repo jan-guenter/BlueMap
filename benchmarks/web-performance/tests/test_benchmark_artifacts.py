@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -17,6 +18,8 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 import capture_prometheus
 import sanitize_kubernetes_resource
+import sanitize_configmap
+import slow_reader
 
 
 class KubernetesSnapshotTests(unittest.TestCase):
@@ -101,6 +104,52 @@ class KubernetesSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Refusing"):
             sanitize_kubernetes_resource.snapshot(
                 {"apiVersion": "v1", "kind": "Secret", "metadata": {}},
+                "2026-07-30T00:00:00.000Z",
+            )
+
+
+class ConfigMapSnapshotTests(unittest.TestCase):
+    def test_preserves_non_secret_config_and_redacts_credentials(self) -> None:
+        result = sanitize_configmap.snapshot(
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "bluemap-perf-web", "namespace": "minecraft"},
+                "data": {
+                    "webserver.conf": (
+                        "port = 8100\n"
+                        "password = literal-secret\n"
+                        "url = postgresql://user:literal-secret@db/bluemap\n"
+                    ),
+                    "client-secret": "literal-secret",
+                },
+            },
+            "2026-07-30T00:00:00.000Z",
+        )
+
+        data = result["resource"]["data"]
+        self.assertIn("port = 8100", data["webserver.conf"])
+        self.assertNotIn("literal-secret", json.dumps(data))
+        self.assertEqual(data["client-secret"], "<redacted>")
+
+    def test_refuses_private_keys_and_binary_data(self) -> None:
+        with self.assertRaisesRegex(ValueError, "private-key"):
+            sanitize_configmap.snapshot(
+                {
+                    "kind": "ConfigMap",
+                    "metadata": {},
+                    "data": {"tls.key": "-----BEGIN PRIVATE KEY-----\nvalue"},
+                },
+                "2026-07-30T00:00:00.000Z",
+            )
+
+        with self.assertRaisesRegex(ValueError, "binaryData"):
+            sanitize_configmap.snapshot(
+                {
+                    "kind": "ConfigMap",
+                    "metadata": {},
+                    "binaryData": {"blob": "AA=="},
+                },
                 "2026-07-30T00:00:00.000Z",
             )
 
@@ -234,6 +283,70 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("--database-pod", result.stdout)
         self.assertIn("--prometheus-url", result.stdout)
         self.assertIn("--python", result.stdout)
+        self.assertIn("--map-id", result.stdout)
+        self.assertIn("--configmap", result.stdout)
+        self.assertIn("--min-achieved-rate-ratio", result.stdout)
+
+    def test_k6_workload_has_formal_arrival_and_exact_status_gates(self) -> None:
+        script = (BENCHMARK_ROOT / "k6" / "bluemap.js").read_text(encoding="utf-8")
+
+        self.assertIn('dropped_iterations: ["count==0"]', script)
+        self.assertIn("MIN_ACHIEVED_RATE_RATIO", script)
+        self.assertIn('case "missing-tile":', script)
+        self.assertIn('request(manifest.missingTile, "tile-missing", [204])', script)
+        self.assertIn("conditional-seed", script)
+        self.assertIn('recordStatus(response, [304])', script)
+        self.assertIn("playerPolling", script)
+        self.assertIn("markerPolling", script)
+
+
+class SlowReaderTests(unittest.TestCase):
+    def test_reads_and_hashes_the_complete_transferred_representation(self) -> None:
+        body = b"BlueMap large response" * 4096
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Encoding", "zstd")
+                self.send_header("ETag", '"test"')
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = slow_reader.execute(
+                    argparse.Namespace(
+                        url=f"http://127.0.0.1:{server.server_port}/large",
+                        bytes_per_second=100_000_000,
+                        chunk_size=4096,
+                        initial_delay_seconds=0,
+                        timeout_seconds=5,
+                        expected_status=200,
+                        expected_sha256=hashlib.sha256(body).hexdigest(),
+                        accept_encoding="zstd",
+                        user_agent="BlueMap-Slow-Reader/test",
+                        ready_file=root / "ready.json",
+                        output=root / "result.json",
+                    )
+                )
+                ready = json.loads((root / "ready.json").read_text(encoding="utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join()
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["bytesRead"], len(body))
+        self.assertEqual(ready["contentLength"], len(body))
 
 
 if __name__ == "__main__":

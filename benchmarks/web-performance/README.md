@@ -27,6 +27,24 @@ Database, webserver, ingress, load-generator, Secret, ConfigMap, and temporary
 PVC resources created by the experiment are disposable. Delete them by their
 exact experiment label after evidence has been copied out.
 
+## Immutable snapshot prerequisite
+
+A comparison matrix is valid only while the source and imported database
+snapshot are immutable. Before generating a manifest or starting a case:
+
+1. finish the snapshot import jobs and verify that they succeeded;
+2. ensure no Minecraft/BlueMap writer, importer, migration, or cleanup process
+   can write to either benchmark database;
+3. keep the source `minecraft-data` mount read-only;
+4. generate the request manifest once, archive its SHA-256, and reuse that
+   exact file for every variant and repetition;
+5. use the same already-imported database instance for every SQL variant in
+   one matrix. Do not re-import between variants.
+
+The runner records the manifest digest and selected map IDs, but it cannot
+prove that an external database writer is absent. That operational freeze is a
+prerequisite, not an assumption the results can repair afterwards.
+
 ## Provisioning the disposable databases
 
 Generate the short-lived PostgreSQL test certificates, then create the
@@ -66,6 +84,21 @@ The jobs mount `minecraft-data` read-only and import only
 zstd representation and copy uncompressed low-resolution PNGs, settings,
 assets, markers, and player data. Database credentials and TLS material are
 mounted from operator-generated Secrets and are never written to artifacts.
+
+Generate one single-map manifest after the source snapshot is frozen. Selecting
+`world` avoids false 404s from benchmarking maps that a candidate was not
+configured to serve:
+
+```shell
+python3 benchmarks/web-performance/tools/generate_manifest.py \
+  /mnt/minecraft/bluemap/web \
+  --map-id world \
+  --output benchmarks/web-performance/artifacts/snapshot/manifest.json
+sha256sum benchmarks/web-performance/artifacts/snapshot/manifest.json
+```
+
+The manifest records `"mapIds": ["world"]`; both the runner and k6 reject map
+routes outside that set.
 
 ## Unchanged PHP/PostgreSQL baseline
 
@@ -123,10 +156,27 @@ Each measured case has:
 2. two minutes of JVM/database warm-up;
 3. a five-minute measurement;
 4. a one-minute cool-down;
-5. five repetitions in randomized variant order.
+5. one measured repetition per runner invocation.
 
 Short exploratory runs may be used to find saturation points, but they are
 not included in final comparative statistics.
+
+Run the five formal repetitions as interleaved blocks. For each workload and
+offered rate, create a deterministic randomized order of the variants for
+block 1, run each variant exactly once with `--repetitions 1`, then repeat with
+a newly randomized order for blocks 2 through 5. Keep the one-minute cool-down
+between every case. For example:
+
+```text
+block 1: rust-r1, java-new-r1, php-r1, java-old-r1
+block 2: java-old-r2, rust-r2, java-new-r2, php-r2
+...
+block 5: php-r5, java-new-r5, java-old-r5, rust-r5
+```
+
+Archive the generated schedule before block 1 and do not reorder it in
+response to intermediate results. This interleaving limits time-of-day,
+database-cache, and cluster-background-load bias.
 
 ### Profiles
 
@@ -136,14 +186,30 @@ not included in final comparative statistics.
 | `hot-tile` | Repeated access to one representative tile |
 | `random-tiles` | Broad tile set to reduce application/DB page-cache locality |
 | `large-tile` | Large hires payload and slow-client sensitivity |
-| `conditional` | Initial `200`, followed by `If-None-Match` revalidation |
-| `live-viewers` | Player polling every second and marker polling every ten seconds |
-| `browser-mixed` | Weighted static, map metadata, tile, asset, and live traffic |
+| `settings` | Settings objects only |
+| `textures` | Texture manifests only, isolated from small settings objects |
+| `large-object` | Largest non-tile map object, normally the texture manifest |
+| `missing-tile` | Known-absent tile; every request must be exactly `204` |
+| `conditional` | One pre-seeded `200`, then workload requests exactly `304` |
+| `live-viewers` | Separate evenly scheduled player and marker polling |
+| `map-data-mixed` | SQL-comparable map data only; no static web assets |
+| `browser-mixed` | Static UI plus the weighted map-data workload |
 
 The harness uses an open-model constant-arrival-rate executor for throughput
 profiles so a slow server does not silently reduce offered load. The
-`live-viewers` profile uses constant virtual users because its unit is a
-viewer with fixed polling intervals.
+`live-viewers` profile uses separate constant-arrival-rate scenarios: player
+polls are spread across every second, while marker polls are spread across the
+configured interval and start 500 ms later. This avoids synchronized polling
+bursts.
+
+All routes known to exist require exactly `200`; random tiles no longer accept
+`204`, and ordinary GETs no longer accept `304`. The missing-tile profile alone
+requires `204`. The conditional profile performs one setup request per k6
+phase, requires its ETag, and sends that validator on every workload request.
+
+`map-data-mixed` is the common PHP/Java/Rust origin comparison. The unchanged
+PHP endpoint cannot serve the static web UI and therefore must not be compared
+with `browser-mixed` or `static`.
 
 ## Metrics
 
@@ -174,6 +240,10 @@ directory. Do not commit credentials or unredacted cluster Secrets.
 `bluemap-perf-*` Service. It requires the existing
 `bluemap-perf-loadgen` Pod and explicit names for every web Deployment, web
 Pod, and database Pod; it does not discover targets through broad selectors.
+It also requires the exact map IDs recorded in the manifest and the names of
+all non-secret ConfigMaps that render the tested server configuration. Before
+and after every repetition it verifies that the Service's ready EndpointSlice
+Pod set exactly equals the named web Pods.
 
 The runner does not apply, patch, scale, restart, delete, or replace Kubernetes
 resources. It only reads exact resources and `metrics.k8s.io`, opens a local
@@ -187,14 +257,17 @@ Use a unique case ID and current, exact Pod names:
 ```shell
 BENCHMARK_PYTHON=/path/to/venv/bin/python \
 benchmarks/web-performance/tools/run_origin_case.sh \
-  --case-id java-postgresql-browser-mixed-001 \
+  --case-id java-postgresql-map-data-mixed-r1 \
   --service bluemap-perf-java \
   --service-port 8100 \
   --manifest benchmarks/web-performance/artifacts/snapshot/manifest.json \
+  --map-id world \
+  --configmap bluemap-perf-java-config \
+  --configmap bluemap-perf-java-storage \
   --web-deployment bluemap-perf-java \
   --web-pod bluemap-perf-java-POD-SUFFIX \
   --database-pod bluemap-perf-postgres-0 \
-  --profile browser-mixed \
+  --profile map-data-mixed \
   --rate 100 \
   --accept-encoding zstd \
   --stored-encoding zstd \
@@ -202,17 +275,20 @@ benchmarks/web-performance/tools/run_origin_case.sh \
   --warmup 2m \
   --measurement 5m \
   --cooldown-seconds 60 \
-  --repetitions 5 \
+  --repetitions 1 \
   --prometheus-url \
     http://rancher-monitoring-prometheus.cattle-monitoring-system.svc:9090 \
   --prometheus-step-seconds 15
 ```
 
-Repeat `--web-deployment`, `--web-pod`, or `--database-pod` for a
-horizontally scaled case. Use `--contract-mode legacy` only for the unchanged
-PHP baseline, which intentionally lacks the enhanced validator contract.
-Variant ordering is randomized by the matrix operator outside this
-single-case runner.
+Repeat `--web-deployment`, `--web-pod`, `--database-pod`, `--map-id`, or
+`--configmap` when a case needs more than one. ConfigMaps are accepted only
+when explicitly named; binary data and private keys are refused, obvious
+credential fields are redacted, and the sanitized data hash must remain
+unchanged for the whole case. Use `--contract-mode legacy` only for the
+unchanged PHP baseline, which intentionally lacks the enhanced validator
+contract. Variant ordering comes from the pre-recorded interleaved schedule
+outside this single-case runner.
 
 The selected Python must have the `zstandard` package used by the HTTP contract
 gate. Set `BENCHMARK_PYTHON`, pass `--python /path/to/venv/bin/python`, or
@@ -229,6 +305,10 @@ The local `artifacts/<case-id>/` directory contains:
 - exact copies and SHA-256 hashes of the manifest, k6/contract scripts,
   runner helpers, and workload parameters;
 - sanitized before/after Service, Deployment, and Pod specs;
+- sanitized explicitly selected ConfigMaps, their content hashes, and a
+  before/after immutability check;
+- the expected and actual ready EndpointSlice Pod set before and after each
+  repetition;
 - resolved container image IDs/digests and per-repetition restart counts;
 - timestamped CPU and memory samples for the load generator and every selected
   web/database Pod, read directly from `metrics.k8s.io`;
@@ -242,11 +322,14 @@ The local `artifacts/<case-id>/` directory contains:
 - phase timestamps, explicit failure messages, and a final `result.json`.
 
 Literal sensitive environment values and credential-like command arguments are
-redacted while Secret references remain visible. Secrets and ConfigMaps are
-refused by the snapshot helper. A result is failed if the HTTP contract fails,
-k6 reports a failed check or threshold, an expected artifact is missing, a
-metrics sample fails, a configured Prometheus capture fails, a selected
-container restarts, or fewer than the requested repetitions complete. An empty
+redacted while Secret references remain visible. Secrets are refused by the
+general snapshot helper; explicitly selected ConfigMaps use the stricter
+non-secret configuration sanitizer. A result is failed if the HTTP contract
+fails, k6 reports a failed check or threshold, an expected artifact is missing,
+a metrics sample fails, a configured Prometheus capture fails, the achieved
+iteration rate is below the configured fraction of offered load, k6 drops an
+iteration, a selected container restarts, a ConfigMap changes, an EndpointSlice
+target differs, or fewer than the requested repetitions complete. An empty
 PostgreSQL series is retained as a valid result because exporter metric names
 vary; it is not silently substituted with a broader query.
 
@@ -269,6 +352,15 @@ Performance results are rejected unless the variant passes:
 - health transition during database loss and recovery;
 - clean draining of an in-flight large response on SIGTERM.
 
+Legacy and enhanced correctness are intentionally separate. The unchanged PHP
+baseline's `legacy` gate verifies byte-equivalent bodies and exact `200`/`204`
+routing for tiles, settings, textures, assets, players, and markers. It does
+not pretend that PHP implements validators, encoding negotiation, privacy, or
+the new cache policy. The Java/Rust `enhanced` gate includes those
+requirements, including HEAD metadata, ETag and Last-Modified behavior, 304
+precedence, 406 negotiation, and cache directives. The `conditional` profile
+is rejected in legacy mode.
+
 ## Low-level k6 invocation
 
 Generate a non-sensitive request manifest for the selected data snapshot, then
@@ -279,12 +371,75 @@ k6 run \
   --summary-export artifacts/EXPERIMENT_ID/summary.json \
   -e BASE_URL=http://SERVICE.NAMESPACE.svc:PORT \
   -e MANIFEST=artifacts/EXPERIMENT_ID/manifest.json \
-  -e PROFILE=browser-mixed \
+  -e PROFILE=map-data-mixed \
   -e RATE=100 \
   -e DURATION=5m \
+  -e CONTRACT_MODE=enhanced \
+  -e MIN_ACHIEVED_RATE_RATIO=0.99 \
   -e EXPERIMENT_ID=EXPERIMENT_ID \
   benchmarks/web-performance/k6/bluemap.js
 ```
+
+Every arrival-rate run has two independent saturation gates:
+`dropped_iterations` must be zero and the achieved iteration rate must be at
+least `MIN_ACHIEVED_RATE_RATIO` (0.99 by default) times the offered rate. The
+runner independently rechecks both values in k6's exported summary and writes
+`arrival-gate.json`.
+
+## Graceful-drain slow-reader check
+
+The origin runner stays read-only. Run the destructive Pod-termination check
+separately against one exact disposable `bluemap-perf-*` Pod. This procedure
+holds a large response open, sends SIGTERM through normal Kubernetes Pod
+deletion, and requires the transferred representation to finish:
+
+```shell
+WEB_DEPLOYMENT=bluemap-perf-WEB-DEPLOYMENT
+WEB_POD=bluemap-perf-WEB-POD
+LARGE_OBJECT=$(jq -r '.largeObject' \
+  benchmarks/web-performance/artifacts/snapshot/manifest.json)
+rm -f /tmp/bluemap-slow-reader.ready.json \
+  /tmp/bluemap-slow-reader.result.json
+
+kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
+  port-forward "pod/$WEB_POD" 18100:8100 \
+  > /tmp/bluemap-slow-reader-port-forward.log 2>&1 &
+PORT_FORWARD_PID=$!
+
+python3 benchmarks/web-performance/tools/slow_reader.py \
+  "http://127.0.0.1:18100$LARGE_OBJECT" \
+  --accept-encoding zstd \
+  --bytes-per-second 1048576 \
+  --initial-delay-seconds 2 \
+  --timeout-seconds 90 \
+  --ready-file /tmp/bluemap-slow-reader.ready.json \
+  --output /tmp/bluemap-slow-reader.result.json &
+SLOW_READER_PID=$!
+
+while test ! -s /tmp/bluemap-slow-reader.ready.json; do
+  if ! kill -0 "$SLOW_READER_PID" 2>/dev/null; then
+    wait "$SLOW_READER_PID"
+    exit 1
+  fi
+  sleep 0.1
+done
+kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
+  delete pod "$WEB_POD" --grace-period=30 --wait=false
+
+wait "$SLOW_READER_PID"
+jq -e '.complete == true' /tmp/bluemap-slow-reader.result.json
+kill "$PORT_FORWARD_PID" 2>/dev/null || true
+wait "$PORT_FORWARD_PID" 2>/dev/null || true
+kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
+  rollout status "deployment/$WEB_DEPLOYMENT" --timeout=120s
+```
+
+Choose a byte rate that makes the response last several seconds but complete
+comfortably inside both the application and Kubernetes grace periods. Archive
+the ready/result JSON, Pod events, termination timestamps, and server logs.
+Wait for the replacement Deployment to become fully available before a
+measured case. Never run this procedure against `deployment/minecraft` or any
+non-disposable Pod.
 
 For public delivery tests, use
 `https://bluemap-test.guenter.cloud` and a unique experiment ID. Any temporary

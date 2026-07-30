@@ -7,16 +7,27 @@ import argparse
 import gzip
 import hashlib
 import json
+import re
 import zlib
 from pathlib import Path
 
 
 COMPRESSION_SUFFIXES = (".gz", ".zst", ".deflate", ".lz4")
+MAP_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("webroot", type=Path)
+    parser.add_argument(
+        "--map-id",
+        action="append",
+        dest="map_ids",
+        help=(
+            "Include exactly this map id. Repeat for more than one map. "
+            "If omitted, all maps are included."
+        ),
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -82,7 +93,10 @@ def expectation(path: Path) -> dict[str, object]:
     }
 
 
-def generate(webroot: Path) -> dict[str, object]:
+def generate(
+    webroot: Path,
+    requested_map_ids: list[str] | None = None,
+) -> dict[str, object]:
     webroot = webroot.resolve()
     maps_root = webroot / "maps"
     if not (webroot / "index.html").is_file():
@@ -106,12 +120,39 @@ def generate(webroot: Path) -> dict[str, object]:
 
     tiles: list[str] = []
     tile_sizes: list[tuple[int, str]] = []
-    metadata: list[str] = []
+    settings: list[str] = []
+    textures: list[str] = []
+    object_sizes: list[tuple[int, str]] = []
     assets: list[str] = []
     players: list[str] = []
     markers: list[str] = []
 
-    map_directories = sorted(path for path in maps_root.iterdir() if path.is_dir())
+    available_map_directories = {
+        path.name: path
+        for path in maps_root.iterdir()
+        if path.is_dir() and not path.is_symlink()
+    }
+    if requested_map_ids:
+        requested = sorted(set(requested_map_ids))
+        invalid = [
+            map_id for map_id in requested if MAP_ID_PATTERN.fullmatch(map_id) is None
+        ]
+        if invalid:
+            raise ValueError(f"Invalid map ids: {', '.join(invalid)}")
+        missing = [
+            map_id for map_id in requested if map_id not in available_map_directories
+        ]
+        if missing:
+            raise ValueError(f"Requested map ids do not exist: {', '.join(missing)}")
+        map_directories = [available_map_directories[map_id] for map_id in requested]
+    else:
+        map_directories = [
+            available_map_directories[map_id]
+            for map_id in sorted(available_map_directories)
+        ]
+    if not map_directories:
+        raise ValueError("No map directories were selected")
+
     for map_root in map_directories:
         for path in regular_files(map_root / "tiles"):
             route = url_path(path, webroot, strip_compression=True)
@@ -119,30 +160,46 @@ def generate(webroot: Path) -> dict[str, object]:
             tile_sizes.append((path.stat().st_size, route))
             expected[route] = expectation(path)
 
-        for name in ("settings.json", "textures.json", "textures.json.gz", "textures.json.zst",
-                     "textures.json.deflate", "textures.json.lz4"):
+        settings_path = map_root / "settings.json"
+        if settings_path.is_file():
+            route = url_path(settings_path, webroot)
+            settings.append(route)
+            object_sizes.append((settings_path.stat().st_size, route))
+            expected[route] = expectation(settings_path)
+
+        for name in (
+            "textures.json",
+            "textures.json.gz",
+            "textures.json.zst",
+            "textures.json.deflate",
+            "textures.json.lz4",
+        ):
             path = map_root / name
             if path.is_file():
                 route = url_path(path, webroot, strip_compression=True)
-                if route not in metadata:
-                    metadata.append(route)
+                if route not in textures:
+                    textures.append(route)
+                    object_sizes.append((path.stat().st_size, route))
                     expected[route] = expectation(path)
 
         for path in regular_files(map_root / "assets"):
             route = url_path(path, webroot)
             assets.append(route)
+            object_sizes.append((path.stat().st_size, route))
             expected[route] = expectation(path)
 
         player_path = map_root / "live" / "players.json"
         if player_path.is_file():
             route = url_path(player_path, webroot)
             players.append(route)
+            object_sizes.append((player_path.stat().st_size, route))
             expected[route] = expectation(player_path)
 
         marker_path = map_root / "live" / "markers.json"
         if marker_path.is_file():
             route = url_path(marker_path, webroot)
             markers.append(route)
+            object_sizes.append((marker_path.stat().st_size, route))
             expected[route] = expectation(marker_path)
 
     if not tiles:
@@ -151,16 +208,23 @@ def generate(webroot: Path) -> dict[str, object]:
     tile_sizes.sort()
     median_tile = tile_sizes[len(tile_sizes) // 2][1]
     largest_tile = tile_sizes[-1][1]
+    if not object_sizes:
+        raise ValueError("No map-data objects were found")
+    object_sizes.sort()
+    largest_object = object_sizes[-1][1]
 
     return {
+        "mapIds": [path.name for path in map_directories],
         "static": sorted(set(static)),
         "tiles": sorted(set(tiles)),
-        "metadata": sorted(set(metadata)),
+        "settings": sorted(set(settings)),
+        "textures": sorted(set(textures)),
         "assets": sorted(set(assets)),
         "players": sorted(set(players)),
         "markers": sorted(set(markers)),
         "hotTile": median_tile,
         "largeTile": largest_tile,
+        "largeObject": largest_object,
         "missingTile": (
             f"/maps/{map_directories[0].name}"
             "/tiles/0/x2147483647/z2147483647.prbm"
@@ -169,7 +233,8 @@ def generate(webroot: Path) -> dict[str, object]:
         "counts": {
             "static": len(set(static)),
             "tiles": len(set(tiles)),
-            "metadata": len(set(metadata)),
+            "settings": len(set(settings)),
+            "textures": len(set(textures)),
             "assets": len(set(assets)),
             "players": len(set(players)),
             "markers": len(set(markers)),
@@ -179,7 +244,11 @@ def generate(webroot: Path) -> dict[str, object]:
 
 def main() -> None:
     args = parse_args()
-    manifest = json.dumps(generate(args.webroot), indent=2, sort_keys=True)
+    manifest = json.dumps(
+        generate(args.webroot, args.map_ids),
+        indent=2,
+        sort_keys=True,
+    )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(f"{manifest}\n", encoding="utf-8")

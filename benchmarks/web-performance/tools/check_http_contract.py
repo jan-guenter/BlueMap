@@ -7,6 +7,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -17,6 +18,8 @@ from email.message import Message
 from pathlib import Path
 
 import zstandard
+
+HTTP_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,7 @@ def fetch(
     url = urllib.parse.urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/"))
     request = urllib.request.Request(url, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with HTTP_OPENER.open(request, timeout=20) as response:
             return Response(response.status, response.headers, response.read())
     except urllib.error.HTTPError as error:
         return Response(error.code, error.headers, error.read())
@@ -103,6 +106,63 @@ def check_body(response: Response, expected: dict[str, object], path: str) -> No
     )
 
 
+def check_strong_sha256_etag(response: Response, etag: str, path: str) -> None:
+    match = re.fullmatch(r'"([0-9a-fA-F]{64})"', etag)
+    if match is None:
+        return
+    transferred_digest = hashlib.sha256(response.body).hexdigest()
+    require(
+        transferred_digest == match.group(1).lower(),
+        f"{path}: strong SHA-256 ETag differs from transferred representation",
+    )
+
+
+def validate_manifest(manifest: dict[str, object]) -> None:
+    map_ids = manifest.get("mapIds")
+    require(
+        isinstance(map_ids, list)
+        and bool(map_ids)
+        and all(isinstance(map_id, str) and map_id for map_id in map_ids),
+        "manifest mapIds must be a non-empty string array",
+    )
+    require(len(map_ids) == len(set(map_ids)), "manifest mapIds contains duplicates")
+    prefixes = tuple(f"/maps/{map_id}/" for map_id in map_ids)
+    for field in (
+        "tiles",
+        "settings",
+        "textures",
+        "assets",
+        "players",
+        "markers",
+    ):
+        paths = manifest.get(field)
+        require(isinstance(paths, list), f"manifest {field} must be an array")
+        require(
+            all(
+                isinstance(path, str) and path.startswith(prefixes)
+                for path in paths
+            ),
+            f"manifest {field} contains a route outside mapIds",
+        )
+    for field in ("hotTile", "largeTile", "largeObject", "missingTile"):
+        path = manifest.get(field)
+        require(
+            isinstance(path, str) and path.startswith(prefixes),
+            f"manifest {field} is missing or outside mapIds",
+        )
+    expected = manifest.get("expected")
+    require(isinstance(expected, dict), "manifest expected must be an object")
+    for path in (
+        list(manifest["tiles"])
+        + list(manifest["settings"])
+        + list(manifest["textures"])
+        + list(manifest["assets"])
+        + list(manifest["players"])
+        + list(manifest["markers"])
+    ):
+        require(path in expected, f"manifest has no body expectation for {path}")
+
+
 def check_enhanced_contract(
     base_url: str,
     manifest: dict[str, object],
@@ -130,6 +190,7 @@ def check_enhanced_contract(
     )
     cache_control = header_tokens(response, "Cache-Control")
     require("public" in cache_control, f"{tile}: tile response is not public-cacheable")
+    require("no-transform" in cache_control, f"{tile}: transformations are not forbidden")
     require(
         "must-revalidate" in cache_control,
         f"{tile}: tile response does not require stale revalidation",
@@ -139,6 +200,13 @@ def check_enhanced_contract(
     last_modified = response.headers.get("Last-Modified")
     require(bool(etag), f"{tile}: ETag is missing")
     require(bool(last_modified), f"{tile}: Last-Modified is missing")
+    check_strong_sha256_etag(response, str(etag), tile)
+    content_length = response.headers.get("Content-Length")
+    require(bool(content_length), f"{tile}: Content-Length is missing")
+    require(
+        int(str(content_length)) == len(response.body),
+        f"{tile}: Content-Length differs from the transferred representation",
+    )
 
     head = fetch(
         base_url,
@@ -149,6 +217,10 @@ def check_enhanced_contract(
     require(head.status == 200, f"{tile}: HEAD expected 200, got {head.status}")
     require(head.body == b"", f"{tile}: HEAD returned a body")
     require(head.headers.get("ETag") == etag, f"{tile}: HEAD ETag differs from GET")
+    require(
+        head.headers.get("Content-Length") == content_length,
+        f"{tile}: HEAD Content-Length differs from GET",
+    )
 
     not_modified = fetch(
         base_url,
@@ -171,6 +243,10 @@ def check_enhanced_contract(
     require(
         "accept-encoding" in header_tokens(not_modified, "Vary"),
         f"{tile}: 304 omitted Vary: Accept-Encoding",
+    )
+    require(
+        "no-transform" in header_tokens(not_modified, "Cache-Control"),
+        f"{tile}: 304 permits transformations",
     )
 
     weak_not_modified = fetch(
@@ -242,6 +318,10 @@ def check_enhanced_contract(
         f"{tile}: 406 is cacheable",
     )
     require(
+        "no-transform" in header_tokens(unsupported, "Cache-Control"),
+        f"{tile}: 406 permits transformations",
+    )
+    require(
         "accept-encoding" in header_tokens(unsupported, "Vary"),
         f"{tile}: 406 omitted Vary: Accept-Encoding",
     )
@@ -271,6 +351,10 @@ def check_enhanced_contract(
             {"private", "no-store"}.issubset(player_cache),
             f"{player}: player positions are not private, no-store",
         )
+        require(
+            "no-transform" in player_cache,
+            f"{player}: player response permits transformations",
+        )
 
     if manifest["markers"]:
         marker = str(manifest["markers"][0])
@@ -284,9 +368,38 @@ def check_enhanced_contract(
             f"{marker}: expected 200, got {marker_response.status}",
         )
         check_body(marker_response, manifest["expected"][marker], marker)
+        marker_cache = header_tokens(marker_response, "Cache-Control")
         require(
-            "no-cache" in header_tokens(marker_response, "Cache-Control"),
+            "no-cache" in marker_cache,
             f"{marker}: marker data is not revalidated",
+        )
+        require(
+            "no-transform" in marker_cache,
+            f"{marker}: marker response permits transformations",
+        )
+
+    for field in ("settings", "textures", "assets"):
+        if not manifest[field]:
+            continue
+        path = str(manifest[field][0])
+        data_response = fetch(
+            base_url,
+            path,
+            {**base_headers, "Accept-Encoding": stored_encoding},
+        )
+        require(
+            data_response.status == 200,
+            f"{path}: expected 200, got {data_response.status}",
+        )
+        check_body(data_response, manifest["expected"][path], path)
+        data_cache = header_tokens(data_response, "Cache-Control")
+        require(
+            "no-cache" in data_cache,
+            f"{path}: {field} data is not revalidated",
+        )
+        require(
+            "no-transform" in data_cache,
+            f"{path}: {field} response permits transformations",
         )
 
     missing = str(manifest["missingTile"])
@@ -303,6 +416,10 @@ def check_enhanced_contract(
         "no-store" in header_tokens(missing_response, "Cache-Control"),
         f"{missing}: missing tile result is cacheable",
     )
+    require(
+        "no-transform" in header_tokens(missing_response, "Cache-Control"),
+        f"{missing}: missing tile permits transformations",
+    )
 
     post = fetch(
         base_url,
@@ -317,7 +434,7 @@ def check_enhanced_contract(
     )
 
 
-def check_legacy_body(
+def check_legacy_contract(
     base_url: str,
     manifest: dict[str, object],
     stored_encoding: str,
@@ -332,12 +449,39 @@ def check_legacy_body(
     require(response.status == 200, f"{tile}: expected 200, got {response.status}")
     check_body(response, manifest["expected"][tile], tile)
 
+    for field in ("settings", "textures", "assets", "players", "markers"):
+        if not manifest[field]:
+            continue
+        path = str(manifest[field][0])
+        data_response = fetch(
+            base_url,
+            path,
+            {**base_headers, "Accept-Encoding": stored_encoding},
+        )
+        require(
+            data_response.status == 200,
+            f"{path}: expected 200, got {data_response.status}",
+        )
+        check_body(data_response, manifest["expected"][path], path)
+
+    missing = str(manifest["missingTile"])
+    missing_response = fetch(
+        base_url,
+        missing,
+        {**base_headers, "Accept-Encoding": stored_encoding},
+    )
+    require(
+        missing_response.status == 204,
+        f"{missing}: expected 204, got {missing_response.status}",
+    )
+
 
 def main() -> int:
     args = parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     headers = {"User-Agent": args.user_agent}
     try:
+        validate_manifest(manifest)
         if args.mode == "enhanced":
             check_enhanced_contract(
                 args.base_url,
@@ -346,7 +490,7 @@ def main() -> int:
                 headers,
             )
         else:
-            check_legacy_body(
+            check_legacy_contract(
                 args.base_url,
                 manifest,
                 args.stored_encoding,
