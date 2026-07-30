@@ -174,15 +174,15 @@ class MapStorageRequestHandlerTest {
     }
 
     @Test
-    void unsupportedEncodingReturnsOneNoTransformErrorWithoutReadingOnHead()
+    void unsupportedEncodingReturnsOneNoTransformErrorWithoutReadingStoredData()
             throws Exception {
         CountingItem item = new CountingItem(Compression.ZSTD);
         MapStorageRequestHandler handler =
                 new MapStorageRequestHandler(new TestMapStorage(item));
-        HttpRequest request = request("HEAD", "/settings.json");
-        request.addHeader("Accept-Encoding", "gzip");
+        HttpRequest get = request("GET", "/settings.json");
+        get.addHeader("Accept-Encoding", "gzip");
 
-        try (HttpResponse response = handler.handle(request)) {
+        try (HttpResponse response = handler.handle(get)) {
             assertEquals(HttpStatusCode.NOT_ACCEPTABLE, response.getStatusCode());
             assertEquals(
                     "no-store,no-transform",
@@ -192,9 +192,24 @@ class MapStorageRequestHandlerTest {
                     "zstd",
                     header(response, "X-BlueMap-Required-Content-Encoding")
             );
-            assertNull(response.getBody());
+            assertNotNull(response.getBody());
+            assertArrayEquals(
+                    ("{\"code\":\"bluemap_required_content_encoding\","
+                            + "\"requiredEncoding\":\"zstd\"}").getBytes(),
+                    response.getBody().readAllBytes()
+            );
         }
         assertEquals(1, item.metadataReads);
+        assertEquals(0, item.reads);
+
+        HttpRequest head = request("HEAD", "/settings.json");
+        head.addHeader("Accept-Encoding", "gzip");
+        try (HttpResponse response = handler.handle(head)) {
+            assertEquals(HttpStatusCode.NOT_ACCEPTABLE, response.getStatusCode());
+            assertNull(response.getBody());
+            assertTrue(response.isBodySuppressed());
+        }
+        assertEquals(2, item.metadataReads);
         assertEquals(0, item.reads);
     }
 
@@ -357,6 +372,11 @@ class MapStorageRequestHandlerTest {
         }
 
         @Override
+        public Compression compression() {
+            return compression;
+        }
+
+        @Override
         public void delete() {
             missing = true;
         }
@@ -394,6 +414,11 @@ class MapStorageRequestHandlerTest {
         @Override
         public StoredDataMetadata readMetadata(int x, int z) {
             return missing ? null : item.readMetadata();
+        }
+
+        @Override
+        public Compression compression() {
+            return item.compression();
         }
 
         @Override

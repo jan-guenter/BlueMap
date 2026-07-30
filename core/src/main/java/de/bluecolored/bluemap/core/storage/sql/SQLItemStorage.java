@@ -78,6 +78,11 @@ public class SQLItemStorage implements ItemStorage {
     }
 
     @Override
+    public Compression compression() {
+        return compression;
+    }
+
+    @Override
     public void delete() throws IOException {
         sql.deleteItem(map, storage);
     }

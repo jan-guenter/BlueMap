@@ -94,7 +94,8 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
                 String contentType = lod == 0 ? "application/octet-stream" : "image/png";
                 return withReadPermit(() -> tileResponse(
                         gridStorage, x, z, contentType, cacheControl,
-                        request, head
+                        request, head,
+                        requiresEncodingPreflight(request, gridStorage.compression())
                 ));
             }
 
@@ -114,7 +115,8 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
             };
             String contentType = ContentTypeRegistry.fromFileName(path);
             return withReadPermit(() -> itemResponse(
-                    itemStorage, contentType, cacheControl, request, head
+                    itemStorage, contentType, cacheControl, request, head,
+                    requiresEncodingPreflight(request, itemStorage.compression())
             ));
 
         } catch (NumberFormatException | NoSuchElementException ignore){
@@ -133,9 +135,10 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
             String contentType,
             String cacheControl,
             HttpRequest request,
-            boolean head
+            boolean head,
+            boolean encodingPreflight
     ) throws IOException {
-        if (needsMetadata(request)) {
+        if (needsMetadata(request) || encodingPreflight) {
             HttpResponse metadataResponse = metadataResponse(
                     gridStorage.readMetadata(x, z),
                     contentType,
@@ -161,9 +164,10 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
             String contentType,
             String cacheControl,
             HttpRequest request,
-            boolean head
+            boolean head,
+            boolean encodingPreflight
     ) throws IOException {
-        if (needsMetadata(request)) {
+        if (needsMetadata(request) || encodingPreflight) {
             HttpResponse metadataResponse = metadataResponse(
                     itemStorage.readMetadata(),
                     contentType,
@@ -209,6 +213,15 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
         return request.getMethod().equalsIgnoreCase("HEAD")
                 || request.getHeader("If-None-Match") != null
                 || request.getHeader("If-Modified-Since") != null;
+    }
+
+    private static boolean requiresEncodingPreflight(
+            HttpRequest request, @Nullable Compression compression
+    ) {
+        if (compression == null) return false;
+        String requiredEncoding =
+                compression == Compression.NONE ? "identity" : compression.getId();
+        return !HttpCacheSupport.acceptsEncoding(request, requiredEncoding);
     }
 
     private @Nullable HttpResponse metadataResponse(

@@ -81,6 +81,11 @@ public class SQLGridStorage implements GridStorage {
     }
 
     @Override
+    public Compression compression() {
+        return compression;
+    }
+
+    @Override
     public void delete(int x, int z) throws IOException {
         sql.deleteGridItem(map, storage, x, z);
     }

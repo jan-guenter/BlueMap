@@ -109,6 +109,11 @@ public class FileItemStorage implements ItemStorage {
         }
     }
 
+    @Override
+    public Compression compression() {
+        return compression;
+    }
+
     static OpenedFile openStableFile(Path path) throws IOException {
         return openStableFile(path, () -> {});
     }
