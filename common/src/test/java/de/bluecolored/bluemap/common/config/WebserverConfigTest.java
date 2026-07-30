@@ -22,53 +22,24 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-package de.bluecolored.bluemap.common.web.http;
+package de.bluecolored.bluemap.common.config;
 
-import lombok.*;
-import org.jetbrains.annotations.Nullable;
+import org.junit.jupiter.api.Test;
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.lang.reflect.Field;
 
-@Getter
-@Setter
-@RequiredArgsConstructor
-public class HttpResponse implements Closeable, HttpHeaderCarrier {
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
-    private @NonNull String version = "HTTP/1.1";
-    private @NonNull HttpStatusCode statusCode;
-    private @NonNull @Singular Map<String, HttpHeader> headers = new LinkedHashMap<>();
-    private @Nullable InputStream body;
-    private boolean bodySuppressed;
-    private boolean flushAfterEachChunk;
+class WebserverConfigTest {
 
-    public void setBody(@Nullable InputStream body) {
-        this.body = body;
-    }
+    @Test
+    void reportsInvalidHttpLimitsAsConfigurationErrors() throws Exception {
+        WebserverConfig config = new WebserverConfig();
+        Field maxActiveConnections = WebserverConfig.class.getDeclaredField("maxActiveConnections");
+        maxActiveConnections.setAccessible(true);
+        maxActiveConnections.setInt(config, 0);
 
-    public void setBody(byte[] data) {
-        if (data == null) {
-            this.body = null;
-            return;
-        }
-
-        setBody(new ByteArrayInputStream(data));
-    }
-
-    public void setBody(String data) {
-        if (data == null) {
-            this.body = null;
-            return;
-        }
-
-        setBody(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    @Override
-    public void close() throws IOException {
-        if (body != null) body.close();
+        assertThrows(ConfigurationException.class, config::createHttpServerSettings);
     }
 
 }

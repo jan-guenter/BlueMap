@@ -1,0 +1,9 @@
+replicaCount: 2
+
+extraVolumes:
+  - name: custom-webroot
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: custom-webroot
+    mountPath: /data/web

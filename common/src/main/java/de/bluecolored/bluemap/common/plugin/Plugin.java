@@ -270,7 +270,8 @@ public class Plugin implements ServerEventListener {
                                         webRequestHandler,
                                         webserverConfig.getLog().getFormat(),
                                         webLogger
-                                )
+                                ),
+                                webserverConfig.createHttpServerSettings()
                         );
                         webServer.bind(new InetSocketAddress(
                                 webserverConfig.resolveIp(),

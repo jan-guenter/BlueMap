@@ -24,6 +24,8 @@
  */
 package de.bluecolored.bluemap.common.config;
 
+import de.bluecolored.bluemap.common.web.http.HttpRequestLimits;
+import de.bluecolored.bluemap.common.web.http.HttpServerSettings;
 import lombok.Getter;
 import org.spongepowered.configurate.objectmapping.ConfigSerializable;
 
@@ -31,6 +33,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.file.Path;
+import java.time.Duration;
 
 @SuppressWarnings({"FieldMayBeFinal", "FieldCanBeLocal"})
 @ConfigSerializable
@@ -46,6 +49,13 @@ public class WebserverConfig {
     private boolean sseEnabled = true;
     private int tileCacheMaxAge = 60;
 
+    private int maxActiveConnections = 256;
+    private int connectionIdleTimeoutSeconds = 60;
+    private int maxRequestLineBytes = 8 * 1024;
+    private int maxHeaderCount = 100;
+    private int maxHeaderBytes = 32 * 1024;
+    private int maxBodyBytes = 1024 * 1024;
+
     private LogConfig log = new LogConfig();
 
     public InetAddress resolveIp() throws UnknownHostException {
@@ -55,6 +65,26 @@ public class WebserverConfig {
             return InetAddress.getLocalHost();
         } else {
             return InetAddress.getByName(ip);
+        }
+    }
+
+    public HttpServerSettings createHttpServerSettings() throws ConfigurationException {
+        try {
+            return new HttpServerSettings(
+                    maxActiveConnections,
+                    Duration.ofSeconds(connectionIdleTimeoutSeconds),
+                    new HttpRequestLimits(
+                            maxRequestLineBytes,
+                            maxHeaderCount,
+                            maxHeaderBytes,
+                            maxBodyBytes
+                    )
+            );
+        } catch (IllegalArgumentException ex) {
+            throw new ConfigurationException(
+                    "The HTTP request limits in webserver.conf are invalid: " + ex.getMessage(),
+                    ex
+            );
         }
     }
 

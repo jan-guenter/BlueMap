@@ -38,8 +38,16 @@ storage for updates. To publish players and markers from the Minecraft server,
 set BlueMap's `write-players-interval` and `write-markers-interval` to positive
 values in its plugin configuration.
 
-The server exposes `/health/live` and `/health/ready`. Readiness means that
-configuration and all referenced storage backends initialized successfully.
+The server exposes `/health/live` and `/health/ready`. Readiness means that the
+generated webroot exists and all referenced storage backends initialized and
+remain open. It deliberately avoids a synchronous database query on every
+probe.
+
+`webserver.conf` also controls `max-active-connections`,
+`connection-idle-timeout-seconds`, `max-request-line-bytes`,
+`max-header-count`, `max-header-bytes`, and `max-body-bytes`. The defaults are
+intended to provide predictable benchmark and overload behavior; tune the
+connection limit together with the SQL pool limit.
 
 For larger public deployments, the Helm chart can route `/maps` to an
 independently scalable SQL data tier built from the

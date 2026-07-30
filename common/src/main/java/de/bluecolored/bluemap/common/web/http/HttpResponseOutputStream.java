@@ -39,7 +39,9 @@ public class HttpResponseOutputStream implements Closeable {
 
     private final OutputStream outputStream;
 
-    private final byte[] byteBuffer = new byte[1024];
+    static final int COPY_BUFFER_SIZE = 64 * 1024;
+
+    private final byte[] byteBuffer = new byte[COPY_BUFFER_SIZE];
 
     public void write(HttpResponse response) throws IOException {
         HttpStatusCode statusCode = response.getStatusCode();
@@ -72,7 +74,9 @@ public class HttpResponseOutputStream implements Closeable {
                 writeLine(Integer.toHexString(read));
                 outputStream.write(byteBuffer, 0, read);
                 writeLine();
-                outputStream.flush();  // prevent SSE from being buffered
+                if (response.isFlushAfterEachChunk()) {
+                    outputStream.flush();
+                }
             }
 
             writeLine(Integer.toHexString(0));

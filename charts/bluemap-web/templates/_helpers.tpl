@@ -136,4 +136,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and .Values.phpFpm.enabled (eq .Values.storage.sql.databaseType "sqlite") -}}
 {{- fail "phpFpm does not support SQLite; BlueMap's sql.php supports MySQL/MariaDB and PostgreSQL" -}}
 {{- end -}}
+{{- if and (gt (int .Values.replicaCount) 1) (eq .Values.storage.type "sql") (eq .Values.storage.sql.databaseType "sqlite") -}}
+{{- fail "Java replicaCount greater than 1 is not supported with SQLite; use one replica or an external SQL database" -}}
+{{- end -}}
+{{- if gt (int .Values.replicaCount) 1 -}}
+{{- range .Values.extraVolumes -}}
+{{- if eq (default "" .name) "webroot" -}}
+{{- fail "extraVolumes must not use the reserved name webroot when replicaCount is greater than 1" -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.extraVolumeMounts -}}
+{{- if eq (default "" .mountPath) "/data/web" -}}
+{{- fail "extraVolumeMounts must not use the reserved /data/web mountPath when replicaCount is greater than 1" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end }}

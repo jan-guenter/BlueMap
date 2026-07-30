@@ -24,51 +24,25 @@
  */
 package de.bluecolored.bluemap.common.web.http;
 
-import lombok.*;
-import org.jetbrains.annotations.Nullable;
+public record HttpRequestLimits(
+        int maxRequestLineBytes,
+        int maxHeaderCount,
+        int maxHeaderBytes,
+        int maxBodyBytes
+) {
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
-import java.util.Map;
+    public static final HttpRequestLimits DEFAULT = new HttpRequestLimits(
+            8 * 1024,
+            100,
+            32 * 1024,
+            1024 * 1024
+    );
 
-@Getter
-@Setter
-@RequiredArgsConstructor
-public class HttpResponse implements Closeable, HttpHeaderCarrier {
-
-    private @NonNull String version = "HTTP/1.1";
-    private @NonNull HttpStatusCode statusCode;
-    private @NonNull @Singular Map<String, HttpHeader> headers = new LinkedHashMap<>();
-    private @Nullable InputStream body;
-    private boolean bodySuppressed;
-    private boolean flushAfterEachChunk;
-
-    public void setBody(@Nullable InputStream body) {
-        this.body = body;
-    }
-
-    public void setBody(byte[] data) {
-        if (data == null) {
-            this.body = null;
-            return;
-        }
-
-        setBody(new ByteArrayInputStream(data));
-    }
-
-    public void setBody(String data) {
-        if (data == null) {
-            this.body = null;
-            return;
-        }
-
-        setBody(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    @Override
-    public void close() throws IOException {
-        if (body != null) body.close();
+    public HttpRequestLimits {
+        if (maxRequestLineBytes < 1) throw new IllegalArgumentException("maxRequestLineBytes must be positive");
+        if (maxHeaderCount < 1) throw new IllegalArgumentException("maxHeaderCount must be positive");
+        if (maxHeaderBytes < 1) throw new IllegalArgumentException("maxHeaderBytes must be positive");
+        if (maxBodyBytes < 0) throw new IllegalArgumentException("maxBodyBytes must not be negative");
     }
 
 }

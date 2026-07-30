@@ -42,10 +42,18 @@ public class HttpConnection implements Runnable {
     private final HttpRequestHandler requestHandler;
 
     public HttpConnection(Socket socket, HttpRequestHandler requestHandler) throws IOException {
+        this(socket, requestHandler, HttpRequestLimits.DEFAULT);
+    }
+
+    public HttpConnection(Socket socket, HttpRequestHandler requestHandler, HttpRequestLimits limits) throws IOException {
         this.socket = socket;
         this.requestHandler = requestHandler;
 
-        this.requestIn = new HttpRequestInputStream(new BufferedInputStream(socket.getInputStream()), socket.getInetAddress());
+        this.requestIn = new HttpRequestInputStream(
+                new BufferedInputStream(socket.getInputStream()),
+                socket.getInetAddress(),
+                limits
+        );
         this.responseOut = new HttpResponseOutputStream(new BufferedOutputStream(socket.getOutputStream()));
     }
 

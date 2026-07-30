@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -71,10 +72,49 @@ class HttpResponseOutputStreamTest {
         assertTrue(write(response).contains("Content-Length: 0"));
     }
 
+    @Test
+    void usesLargeCopyBufferAndFlushesNormalResponsesOnce() throws Exception {
+        CountingOutputStream output = new CountingOutputStream();
+        HttpResponse response = responseWithChunks(2);
+
+        new HttpResponseOutputStream(output).write(response);
+
+        assertEquals(64 * 1024, HttpResponseOutputStream.COPY_BUFFER_SIZE);
+        assertEquals(1, output.flushCount);
+    }
+
+    @Test
+    void flushesEveryChunkForExplicitStreamingResponses() throws Exception {
+        CountingOutputStream output = new CountingOutputStream();
+        HttpResponse response = responseWithChunks(2);
+        response.setFlushAfterEachChunk(true);
+
+        new HttpResponseOutputStream(output).write(response);
+
+        assertTrue(output.flushCount >= 3);
+    }
+
+    private static HttpResponse responseWithChunks(int chunks) {
+        HttpResponse response = new HttpResponse(HttpStatusCode.OK);
+        response.setBody(new byte[HttpResponseOutputStream.COPY_BUFFER_SIZE * chunks]);
+        return response;
+    }
+
     private static String write(HttpResponse response) throws Exception {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         new HttpResponseOutputStream(bytes).write(response);
         return bytes.toString(StandardCharsets.UTF_8);
+    }
+
+    private static class CountingOutputStream extends ByteArrayOutputStream {
+
+        private int flushCount;
+
+        @Override
+        public void flush() {
+            flushCount++;
+        }
+
     }
 
 }

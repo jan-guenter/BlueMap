@@ -31,27 +31,98 @@ import java.io.IOException;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 
 public class HttpServer extends Server {
 
     @Getter @Setter
     private HttpRequestHandler requestHandler;
-    private ExecutorService executor;
+    private final ExecutorService executor;
+    private final boolean ownsExecutor;
+    private final HttpServerSettings settings;
+    private final Semaphore activeConnections;
 
-    public HttpServer(String name, HttpRequestHandler requestHandler, ExecutorService executor) throws IOException {
+    public HttpServer(
+            String name,
+            HttpRequestHandler requestHandler,
+            ExecutorService executor,
+            HttpServerSettings settings
+    ) throws IOException {
+        this(name, requestHandler, executor, settings, false);
+    }
+
+    private HttpServer(
+            String name,
+            HttpRequestHandler requestHandler,
+            ExecutorService executor,
+            HttpServerSettings settings,
+            boolean ownsExecutor
+    ) throws IOException {
         super(name);
         this.requestHandler = requestHandler;
         this.executor = executor;
+        this.ownsExecutor = ownsExecutor;
+        this.settings = settings;
+        this.activeConnections = new Semaphore(settings.maxActiveConnections());
+    }
+
+    public HttpServer(String name, HttpRequestHandler requestHandler, ExecutorService executor) throws IOException {
+        this(name, requestHandler, executor, HttpServerSettings.DEFAULT);
     }
 
     public HttpServer(String name, HttpRequestHandler requestHandler) throws IOException {
-        this(name, requestHandler, Executors.newVirtualThreadPerTaskExecutor());
+        this(name, requestHandler, Executors.newVirtualThreadPerTaskExecutor(), HttpServerSettings.DEFAULT, true);
+    }
+
+    public HttpServer(String name, HttpRequestHandler requestHandler, HttpServerSettings settings) throws IOException {
+        this(name, requestHandler, Executors.newVirtualThreadPerTaskExecutor(), settings, true);
     }
 
     @Override
     public void handleConnection(SocketChannel connection) throws IOException {
-        connection.socket().setSoTimeout(600000); // set a 10 min max idle timeout
-        executor.execute(new HttpConnection(connection.socket(), requestHandler));
+        if (!activeConnections.tryAcquire()) {
+            connection.close();
+            return;
+        }
+
+        try {
+            connection.socket().setSoTimeout((int) settings.idleTimeout().toMillis());
+            HttpConnection httpConnection =
+                    new HttpConnection(connection.socket(), requestHandler, settings.requestLimits());
+            executor.execute(() -> {
+                try {
+                    httpConnection.run();
+                } finally {
+                    activeConnections.release();
+                }
+            });
+        } catch (IOException | RuntimeException ex) {
+            activeConnections.release();
+            try {
+                connection.close();
+            } catch (IOException closeException) {
+                ex.addSuppressed(closeException);
+            }
+            if (ex instanceof IOException ioException) throw ioException;
+            throw new IOException("Failed to dispatch HTTP connection", ex);
+        }
+    }
+
+    public int getActiveConnectionCount() {
+        return settings.maxActiveConnections() - activeConnections.availablePermits();
+    }
+
+    boolean isExecutorShutdown() {
+        return executor.isShutdown();
+    }
+
+    @Override
+    public void close() throws IOException {
+        try {
+            super.close();
+        } finally {
+            if (ownsExecutor) executor.shutdownNow();
+        }
     }
 
 }

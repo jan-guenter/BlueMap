@@ -48,8 +48,9 @@ ingress:
           pathType: Prefix
   tls: []
 
-strategy:
-  type: Recreate
+# Empty selects RollingUpdate for scalable replicas and Recreate for a single
+# replica or ReadWriteOnce persistence. Set this object to override that choice.
+strategy: {}
 
 # One storage configuration is generated as storages/<id>.conf. Map
 # configurations under config.files should reference this id.
@@ -106,6 +107,12 @@ config:
       ip: "0.0.0.0"
       port: 8100
       sse-enabled: false
+      max-active-connections: 256
+      connection-idle-timeout-seconds: 60
+      max-request-line-bytes: 8192
+      max-header-count: 100
+      max-header-bytes: 32768
+      max-body-bytes: 1048576
       log: {}
     maps/world.conf: |
       name: "World"
@@ -196,8 +203,7 @@ persistence:
 resources: {}
 
 livenessProbe:
-  httpGet:
-    path: /health/live
+  tcpSocket:
     port: http
   initialDelaySeconds: 5
   periodSeconds: 10

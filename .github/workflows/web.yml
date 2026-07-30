@@ -264,6 +264,20 @@ jobs:
             --values charts/bluemap-web/ci/configmap-driver-values.yaml
           helm template test charts/bluemap-web --namespace bluemap \
             --values charts/bluemap-web/ci/php-fpm-values.yaml
+          helm template test charts/bluemap-web --namespace bluemap \
+            --values charts/bluemap-web/ci/multi-replica-values.yaml
+          if helm template test charts/bluemap-web --namespace bluemap \
+            --values charts/bluemap-web/ci/invalid-multi-replica-volume-values.yaml \
+            >/dev/null 2>&1; then
+            echo "::error::reserved multi-replica webroot volume was accepted"
+            exit 1
+          fi
+          if helm template test charts/bluemap-web --namespace bluemap \
+            --values charts/bluemap-web/ci/invalid-multi-replica-mount-values.yaml \
+            >/dev/null 2>&1; then
+            echo "::error::reserved multi-replica webroot mount was accepted"
+            exit 1
+          fi
       - name: Package chart
         run: |
           helm package charts/bluemap-web \

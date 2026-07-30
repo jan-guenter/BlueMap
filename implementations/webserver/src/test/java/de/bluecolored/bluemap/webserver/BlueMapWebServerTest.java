@@ -117,9 +117,13 @@ class BlueMapWebServerTest {
                 storage: "file"
                 """);
 
-        try (BlueMapWebServer server = BlueMapWebServer.create(config, false)) {
+        BlueMapWebServer server = BlueMapWebServer.create(config, false);
+        assertFalse(server.isReady());
+        try (server) {
             server.start();
+            assertTrue(server.isReady());
         }
+        assertFalse(server.isReady());
 
         assertTrue(Files.isRegularFile(Path.of(web).resolve("index.html")));
         assertTrue(Files.isRegularFile(Path.of(web).resolve("settings.json")));

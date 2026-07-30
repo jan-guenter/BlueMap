@@ -102,6 +102,7 @@ public class MapRequestHandler extends RoutingRequestHandler {
 
                 // attempt to turn off buffering in upstream proxy
                 response.addHeader("X-Accel-Buffering", "no");
+                response.setFlushAfterEachChunk(true);
 
                 try {
                     response.setBody(sseConnections.openConnection());

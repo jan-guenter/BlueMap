@@ -200,10 +200,28 @@ downloadable static file.
 
 The generated storage file is always projected alongside these sources.
 
-Keep the Java `replicaCount` at `1` unless every Java replica has an independent
-writable webroot and concurrent web-app synchronization has been tested. The
-PHP data tier is stateless and is independently scalable through
-`phpFpm.replicaCount`.
+With one Java replica, `/data/web` remains part of the `data` volume for
+compatibility with existing persistent webroots. With multiple replicas, the
+chart overlays `/data/web` with a pod-local `emptyDir` so each replica can
+safely synchronize its own web app and `settings.json`. In that mode,
+`extraVolumes` cannot use the reserved `webroot` name and
+`extraVolumeMounts` cannot use the reserved `/data/web` path.
+
+The default deployment strategy is `RollingUpdate` for multiple replicas, and
+`Recreate` for a single replica or when enabled persistence declares
+`ReadWriteOnce`. Set `strategy` explicitly to override this selection. File
+storage replicas may share the map-data volume with a single BlueMap writer
+when atomic file writes remain enabled. SQLite is restricted to one Java
+replica. Size `storage.sql.maxConnections` as a per-pod limit, accounting for
+all Java replicas and the Minecraft writer. The PHP data tier is independently
+scalable through `phpFpm.replicaCount`.
+
+The default liveness probe is a TCP check. It verifies that the listener still
+exists without competing for one of the bounded HTTP connection slots.
+Readiness remains an HTTP request to `/health/ready`; a saturated replica can
+therefore be removed from Service traffic without Kubernetes restarting an
+otherwise healthy process. Connections accepted after
+`max-active-connections` is reached are closed immediately.
 
 ## Live data
 

@@ -24,51 +24,31 @@
  */
 package de.bluecolored.bluemap.common.web.http;
 
-import lombok.*;
-import org.jetbrains.annotations.Nullable;
+import java.time.Duration;
+import java.util.Objects;
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
-import java.util.Map;
+public record HttpServerSettings(
+        int maxActiveConnections,
+        Duration idleTimeout,
+        HttpRequestLimits requestLimits
+) {
 
-@Getter
-@Setter
-@RequiredArgsConstructor
-public class HttpResponse implements Closeable, HttpHeaderCarrier {
+    public static final HttpServerSettings DEFAULT = new HttpServerSettings(
+            256,
+            Duration.ofSeconds(60),
+            HttpRequestLimits.DEFAULT
+    );
 
-    private @NonNull String version = "HTTP/1.1";
-    private @NonNull HttpStatusCode statusCode;
-    private @NonNull @Singular Map<String, HttpHeader> headers = new LinkedHashMap<>();
-    private @Nullable InputStream body;
-    private boolean bodySuppressed;
-    private boolean flushAfterEachChunk;
-
-    public void setBody(@Nullable InputStream body) {
-        this.body = body;
-    }
-
-    public void setBody(byte[] data) {
-        if (data == null) {
-            this.body = null;
-            return;
+    public HttpServerSettings {
+        Objects.requireNonNull(idleTimeout, "idleTimeout");
+        Objects.requireNonNull(requestLimits, "requestLimits");
+        if (maxActiveConnections < 1) throw new IllegalArgumentException("maxActiveConnections must be positive");
+        if (idleTimeout.isNegative() || idleTimeout.isZero()) {
+            throw new IllegalArgumentException("idleTimeout must be positive");
         }
-
-        setBody(new ByteArrayInputStream(data));
-    }
-
-    public void setBody(String data) {
-        if (data == null) {
-            this.body = null;
-            return;
+        if (idleTimeout.toMillis() > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("idleTimeout is too large");
         }
-
-        setBody(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    @Override
-    public void close() throws IOException {
-        if (body != null) body.close();
     }
 
 }

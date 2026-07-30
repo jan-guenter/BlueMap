@@ -24,51 +24,23 @@
  */
 package de.bluecolored.bluemap.common.web.http;
 
-import lombok.*;
-import org.jetbrains.annotations.Nullable;
+import org.junit.jupiter.api.Test;
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@Getter
-@Setter
-@RequiredArgsConstructor
-public class HttpResponse implements Closeable, HttpHeaderCarrier {
+class HttpServerTest {
 
-    private @NonNull String version = "HTTP/1.1";
-    private @NonNull HttpStatusCode statusCode;
-    private @NonNull @Singular Map<String, HttpHeader> headers = new LinkedHashMap<>();
-    private @Nullable InputStream body;
-    private boolean bodySuppressed;
-    private boolean flushAfterEachChunk;
+    @Test
+    void closesInternallyOwnedExecutor() throws Exception {
+        HttpServer server = new HttpServer(
+                "test",
+                _ -> new HttpResponse(HttpStatusCode.OK)
+        );
 
-    public void setBody(@Nullable InputStream body) {
-        this.body = body;
-    }
-
-    public void setBody(byte[] data) {
-        if (data == null) {
-            this.body = null;
-            return;
-        }
-
-        setBody(new ByteArrayInputStream(data));
-    }
-
-    public void setBody(String data) {
-        if (data == null) {
-            this.body = null;
-            return;
-        }
-
-        setBody(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    @Override
-    public void close() throws IOException {
-        if (body != null) body.close();
+        assertFalse(server.isExecutorShutdown());
+        server.close();
+        assertTrue(server.isExecutorShutdown());
     }
 
 }
