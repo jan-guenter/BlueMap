@@ -1,0 +1,40 @@
+# One configuration format controls the HTTP server, web UI and storage reader.
+bind = "0.0.0.0:8100"
+web_root = "/usr/share/bluemap-web"
+shutdown_grace_seconds = 30
+dependency_check_seconds = 5
+storage_timeout_seconds = 30
+max_in_flight_requests = 32
+tile_cache_max_age_seconds = 60
+
+[webapp]
+use_cookies = true
+default_to_flat_view = false
+resolution_default = 1.0
+min_zoom_distance = 5
+max_zoom_distance = 100000
+hires_slider_max = 500
+hires_slider_default = 100
+hires_slider_min = 0
+lowres_slider_max = 7000
+lowres_slider_default = 2000
+lowres_slider_min = 500
+map_data_root = "maps"
+live_data_root = "maps"
+scripts = []
+styles = []
+
+[[maps]]
+id = "world"
+sorting = 0
+
+[[maps]]
+id = "nether"
+sorting = 100
+
+# Supported compression values are none, gzip, deflate, zstd and lz4.
+# BlueMap LZ4 is pass-through only and normally produces HTTP 406 in browsers.
+[storage]
+type = "file"
+root = "/data/maps"
+compression = "gzip"

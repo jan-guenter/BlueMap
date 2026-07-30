@@ -1,0 +1,27 @@
+bind = "0.0.0.0:8100"
+web_root = "/usr/share/bluemap-web"
+shutdown_grace_seconds = 30
+dependency_check_seconds = 5
+storage_timeout_seconds = 30
+max_in_flight_requests = 32
+tile_cache_max_age_seconds = 60
+
+[[maps]]
+id = "world"
+sorting = 0
+
+[storage]
+type = "mariadb"
+host = "mariadb.example.internal"
+port = 3306
+database = "bluemap"
+username_env = "BLUEMAP_DATABASE_USERNAME"
+password_env = "BLUEMAP_DATABASE_PASSWORD"
+max_connections = 10
+connect_timeout_seconds = 10
+
+[storage.tls]
+mode = "verify-full"
+ca = "/run/secrets/database/ca.crt"
+# client_cert = "/run/secrets/database/tls.crt"
+# client_key = "/run/secrets/database/tls.key"
