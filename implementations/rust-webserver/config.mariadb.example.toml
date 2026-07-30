@@ -5,6 +5,7 @@ runtime_shutdown_seconds = 5
 dependency_check_seconds = 5
 storage_timeout_seconds = 30
 max_in_flight_requests = 8
+max_object_bytes = 67108864
 tile_cache_max_age_seconds = 60
 
 [[maps]]

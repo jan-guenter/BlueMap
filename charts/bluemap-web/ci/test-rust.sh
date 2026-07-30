@@ -67,6 +67,7 @@ assert_contains "$temporary/rust-file.yaml" "cpu: 50m"
 assert_contains "$temporary/rust-file.yaml" "memory: 512Mi"
 assert_contains "$temporary/rust-file.yaml" "terminationGracePeriodSeconds: 40"
 assert_contains "$temporary/rust-file.yaml" "kubernetes.io/arch: amd64"
+assert_contains "$temporary/rust-file.yaml" "kubernetes.io/os: linux"
 assert_absent "$temporary/rust-file.yaml" "download-jdbc-driver"
 assert_absent "$temporary/rust-file.yaml" "jdbc-driver"
 assert_absent "$temporary/rust-file.yaml" "BLUEMAP_SQL_"
@@ -87,6 +88,7 @@ with pathlib.Path(sys.argv[1]).open("rb") as source:
 assert config["tile_cache_max_age_seconds"] == 60
 assert config["runtime_shutdown_seconds"] == 5
 assert config["max_in_flight_requests"] == 8
+assert config["max_object_bytes"] == 64 * 1024 * 1024
 assert isinstance(config["webapp"]["resolution_default"], float)
 assert [entry["id"] for entry in config["maps"]] == ["world", "nether"]
 assert config["storage"] == {
@@ -101,7 +103,32 @@ helm template test "$chart_directory" --namespace bluemap \
     --set nodeSelector.storage=fast \
     >"$temporary/rust-node-selector.yaml"
 assert_contains "$temporary/rust-node-selector.yaml" "kubernetes.io/arch: amd64"
+assert_contains "$temporary/rust-node-selector.yaml" "kubernetes.io/os: linux"
 assert_contains "$temporary/rust-node-selector.yaml" "storage: fast"
+
+helm template test "$chart_directory" --namespace bluemap \
+    --values "$chart_directory/examples/rust-file-values.yaml" \
+    --set replicaCount=1 \
+    --set 'persistence.accessModes={ReadWriteOnce}' \
+    >"$temporary/rust-file-single-rwo.yaml"
+assert_contains "$temporary/rust-file-single-rwo.yaml" "replicas: 1"
+assert_contains "$temporary/rust-file-single-rwo.yaml" "claimName: bluemap-maps-rwx"
+
+helm template test "$chart_directory" --namespace bluemap \
+    --values "$script_directory/rust-external-file-values.yaml" \
+    >"$temporary/rust-file-external.yaml"
+assert_contains "$temporary/rust-file-external.yaml" "mountPath: /mnt/bluemap"
+assert_contains "$temporary/rust-file-external.yaml" "readOnly: true"
+assert_absent "$temporary/rust-file-external.yaml" "mountPath: /data"
+assert_absent "$temporary/rust-file-external.yaml" "emptyDir:"
+
+helm template test "$chart_directory" --namespace bluemap \
+    --values "$script_directory/rust-external-file-values.yaml" \
+    --set replicaCount=2 \
+    --set 'persistence.accessModes={ReadOnlyMany}' \
+    >"$temporary/rust-file-external-rox.yaml"
+assert_contains "$temporary/rust-file-external-rox.yaml" "replicas: 2"
+assert_contains "$temporary/rust-file-external-rox.yaml" "mountPath: /mnt/bluemap"
 
 helm template test "$chart_directory" --namespace bluemap \
     --values "$chart_directory/examples/rust-file-values.yaml" \

@@ -37,7 +37,10 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["largeObject"], "/maps/world/settings.json")
         self.assertEqual(manifest["settings"], ["/maps/world/settings.json"])
         self.assertEqual(manifest["textures"], [])
-        self.assertEqual(manifest["missingTile"], "/maps/world/tiles/0/x2147483647/z2147483647.prbm")
+        self.assertEqual(
+            manifest["missingTile"],
+            "/maps/world/tiles/0/x2/1/4/7/4/8/3/6/4/7/z2/1/4/7/4/8/3/6/4/7.prbm",
+        )
         self.assertEqual(
             manifest["expected"][route]["decodedSha256"],
             hashlib.sha256(tile_data).hexdigest(),

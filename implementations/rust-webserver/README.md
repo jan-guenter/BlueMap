@@ -43,6 +43,11 @@ the service returns an `application/problem+json` HTTP 406 with
 implicitly acceptable unless `identity;q=0` or `*;q=0` explicitly rejects it;
 an omitted `Accept-Encoding` header permits every content coding.
 
+Tile URLs are accepted only in BlueMap's canonical character-sharded form:
+hires tiles end exactly in `.prbm`, low-resolution tiles end exactly in
+`.png`, and storage-compression suffixes never appear in the HTTP URL. This
+keeps multiple aliases from referring to the same cache object.
+
 Tiles use `public,max-age=60,must-revalidate,no-transform` by default; set
 `tile_cache_max_age_seconds` to change the age. Settings, textures, assets, and
 markers use `public,no-cache,no-transform`. Players use
@@ -100,7 +105,15 @@ health monitor, HTTP draining, and database-pool cleanup. After that,
 blocking filesystem workers. Kubernetes must allow both budgets plus a small
 termination margin; the Helm chart calculates that total automatically.
 
-`max_in_flight_requests` is a non-queuing map-response limit (default `8`).
+`max_in_flight_requests` is a non-queuing map-response limit (default `8`,
+valid range `1..=1024`). `max_object_bytes` rejects any individual stored
+object above its default 64 MiB limit. Metadata is checked before a body read;
+file reads enforce the limit again inside the blocking worker, and SQL body
+queries use a size-bounded projection so an object that grows between queries
+is represented by metadata rather than materialized as a BLOB. Oversize
+responses are HTTP 500 problem documents with
+`Cache-Control: no-store,no-transform`; logs contain only the observed and
+configured byte counts.
 Excess map requests receive HTTP 503 with `Retry-After: 1`. A permit remains
 attached while the response body is streamed in bounded chunks, so slow clients
 cannot accumulate unlimited materialized SQL BLOBs after database connections

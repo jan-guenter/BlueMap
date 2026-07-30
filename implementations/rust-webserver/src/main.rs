@@ -45,6 +45,8 @@ pub enum AppError {
     StorageTimeout(&'static str),
     #[error("unsupported stored encoding: {0}")]
     UnsupportedEncoding(String),
+    #[error("stored object is {actual} bytes, above the configured {limit}-byte limit")]
+    ObjectTooLarge { actual: u64, limit: u64 },
     #[error("invalid storage path")]
     InvalidPath,
     #[error("failed to serialize web settings: {0}")]
@@ -284,6 +286,14 @@ mod tests {
         max_in_flight_requests: usize,
         compression: crate::config::StoredEncoding,
     ) -> (TempDir, AppState) {
+        fixture_with_limits(max_in_flight_requests, 64 * 1024 * 1024, compression).await
+    }
+
+    async fn fixture_with_limits(
+        max_in_flight_requests: usize,
+        max_object_bytes: u64,
+        compression: crate::config::StoredEncoding,
+    ) -> (TempDir, AppState) {
         let temp = TempDir::new().unwrap();
         let web = temp.path().join("web");
         let maps = temp.path().join("maps");
@@ -306,6 +316,7 @@ mod tests {
             dependency_check_seconds: 1,
             storage_timeout_seconds: 1,
             max_in_flight_requests,
+            max_object_bytes,
             tile_cache_max_age_seconds: 60,
             webapp: Default::default(),
             maps: vec![crate::config::MapConfig {
@@ -318,9 +329,14 @@ mod tests {
             },
         };
         let backend = Backend::File(
-            crate::storage::FileBackend::open(maps, compression, max_in_flight_requests)
-                .await
-                .unwrap(),
+            crate::storage::FileBackend::open(
+                maps,
+                compression,
+                max_in_flight_requests,
+                max_object_bytes,
+            )
+            .await
+            .unwrap(),
         );
         let state = AppState::new(config, backend).unwrap();
         (temp, state)
@@ -339,7 +355,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/maps/world/tiles/0/x3z4.prbm.gz")
+                    .uri("/maps/world/tiles/0/x3/z4.prbm")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -355,7 +371,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/maps/world/tiles/0/x3z4.prbm.gz")
+                    .uri("/maps/world/tiles/0/x3/z4.prbm")
                     .header(header::ACCEPT_ENCODING, "gzip;q=0, *;q=1")
                     .body(Body::empty())
                     .unwrap(),
@@ -397,7 +413,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/maps/world/tiles/0/x3z4.prbm.gz")
+                    .uri("/maps/world/tiles/0/x3/z4.prbm")
                     .header(header::ACCEPT_ENCODING, "gzip")
                     .body(Body::empty())
                     .unwrap(),
@@ -417,7 +433,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/maps/world/tiles/0/x3z4.prbm.gz")
+                    .uri("/maps/world/tiles/0/x3/z4.prbm")
                     .header(header::ACCEPT_ENCODING, "gzip")
                     .header(header::IF_NONE_MATCH, etag)
                     .body(Body::empty())
@@ -431,7 +447,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/maps/world/tiles/0/x99z99.prbm.gz")
+                    .uri("/maps/world/tiles/0/x9/z9.prbm")
                     .header(header::ACCEPT_ENCODING, "gzip")
                     .body(Body::empty())
                     .unwrap(),
@@ -447,7 +463,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(
-                Request::get("/maps/world/tiles/1/0/x0z0.png")
+                Request::get("/maps/world/tiles/10/x0/z0.png")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -470,7 +486,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(
-                Request::get("/maps/world/tiles/1/0/x0z0.png")
+                Request::get("/maps/world/tiles/10/x0/z0.png")
                     .header(header::ACCEPT_ENCODING, "identity;q=0")
                     .body(Body::empty())
                     .unwrap(),
@@ -489,7 +505,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(
-                Request::head("/maps/world/tiles/0/x3z4.prbm.gz")
+                Request::head("/maps/world/tiles/0/x3/z4.prbm")
                     .header(header::ACCEPT_ENCODING, "gzip;q=0")
                     .body(Body::empty())
                     .unwrap(),
@@ -648,7 +664,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(
-                Request::get("/maps/world/tiles/0/x3z4.prbm.lz4")
+                Request::get("/maps/world/tiles/0/x3/z4.prbm")
                     .header(header::ACCEPT_ENCODING, "gzip")
                     .body(Body::empty())
                     .unwrap(),
@@ -667,7 +683,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::get("/maps/world/tiles/0/x3z4.prbm.lz4")
+                Request::get("/maps/world/tiles/0/x3/z4.prbm")
                     .header(header::ACCEPT_ENCODING, "lz4")
                     .body(Body::empty())
                     .unwrap(),
@@ -676,6 +692,36 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(backend.body_read_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_metadata_rejects_get_without_reading_the_object_body() {
+        let (_temp, state) = fixture_with_limits(8, 8, crate::config::StoredEncoding::Gzip).await;
+        let backend = match &state.backend {
+            Backend::File(backend) => backend.clone(),
+            _ => unreachable!(),
+        };
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/maps/world/settings.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store,no-transform"
+        );
+        let problem = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8_lossy(&problem)
+                .contains("stored map object exceeds server response limit")
+        );
+        assert_eq!(backend.body_read_count(), 0);
     }
 
     #[tokio::test]

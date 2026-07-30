@@ -1,0 +1,5 @@
+webserver:
+  implementation: rust
+  rust:
+    config:
+      maxObjectBytes: 0

@@ -33,7 +33,7 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 use crate::{
     AppError, Result, VERSION,
     config::{Config, StoredEncoding},
-    storage::{Backend, ObjectClass, ObjectMetadata, ObjectRequest, StoredObject},
+    storage::{Backend, ObjectClass, ObjectMetadata, ObjectRequest, StoredObject, grid_item_path},
     storage_operation,
 };
 
@@ -145,6 +145,11 @@ async fn map_data(
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "map object not found"),
         Err(error) => return storage_error_response(error, &map_id, &path),
     };
+    if let Some(actual) = metadata.content_length
+        && actual > state.config.max_object_bytes
+    {
+        return object_too_large_response(actual, state.config.max_object_bytes);
+    }
     if let Some(response) = metadata_only_response(
         &metadata,
         &path,
@@ -183,6 +188,7 @@ fn storage_error_response(error: AppError, map_id: &str, path: &str) -> Response
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("unsupported stored encoding: {encoding}"),
         ),
+        AppError::ObjectTooLarge { actual, limit } => object_too_large_response(actual, limit),
         error => {
             tracing::error!(error = %error, map_id, path, "failed to read map object");
             error_response(
@@ -191,6 +197,18 @@ fn storage_error_response(error: AppError, map_id: &str, path: &str) -> Response
             )
         }
     }
+}
+
+fn object_too_large_response(actual: u64, limit: u64) -> Response {
+    tracing::error!(
+        actual_bytes = actual,
+        limit_bytes = limit,
+        "stored map object exceeds configured response limit"
+    );
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "stored map object exceeds server response limit",
+    )
 }
 
 fn storage_timeout_response(map_id: &str, path: &str) -> Response {
@@ -235,25 +253,28 @@ pub fn parse_map_path(path: &str) -> Option<ObjectRequest> {
         return Some(ObjectRequest::Asset(asset.to_owned()));
     }
     let tile = path.strip_prefix("tiles/")?;
-    let coordinate_separator = tile.find("/x")?;
-    let lod = &tile[..coordinate_separator];
-    let coordinates = &tile[coordinate_separator + 1..];
-    if lod.is_empty() || !lod.chars().all(|c| c.is_ascii_digit() || c == '/') {
+    let (without_suffix, extension) = if let Some(tile) = tile.strip_suffix(".prbm") {
+        (tile, ".prbm")
+    } else {
+        (tile.strip_suffix(".png")?, ".png")
+    };
+    let (lod_raw, coordinates) = without_suffix.split_once("/x")?;
+    let lod: i32 = lod_raw.parse().ok()?;
+    if lod < 0 || lod.to_string() != lod_raw {
         return None;
     }
-    let lod: i32 = lod.replace('/', "").parse().ok()?;
-    let x_start = 1;
-    if !coordinates.starts_with('x') {
+    if (lod == 0 && extension != ".prbm") || (lod > 0 && extension != ".png") {
         return None;
     }
-    let z_position = coordinates[x_start..].find('z')? + x_start;
-    let x_raw = &coordinates[x_start..z_position];
-    let z_raw: String = coordinates[z_position + 1..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '/')
-        .collect();
-    let x: i32 = x_raw.replace('/', "").parse().ok()?;
-    let z: i32 = z_raw.replace('/', "").parse().ok()?;
+    let compact_coordinates = format!("x{}", coordinates.replace('/', ""));
+    let (x, z) = compact_coordinates.strip_prefix('x')?.split_once('z')?;
+    let x: i32 = x.parse().ok()?;
+    let z: i32 = z.parse().ok()?;
+    let tile_root = format!("tiles/{lod}");
+    let canonical = grid_item_path(std::path::Path::new(&tile_root), x, z, extension);
+    if canonical.to_str()? != path {
+        return None;
+    }
     Some(ObjectRequest::Tile { lod, x, z })
 }
 
@@ -655,7 +676,7 @@ mod tests {
     #[test]
     fn parses_canonical_and_sharded_tiles() {
         assert!(matches!(
-            parse_map_path("tiles/0/x-12z34.prbm.gz"),
+            parse_map_path("tiles/0/x-1/2/z3/4.prbm"),
             Some(ObjectRequest::Tile {
                 lod: 0,
                 x: -12,
@@ -663,13 +684,26 @@ mod tests {
             })
         ));
         assert!(matches!(
-            parse_map_path("tiles/1/2/x-/1/2/z3/4.png"),
+            parse_map_path("tiles/12/x-1/2/z3/4.png"),
             Some(ObjectRequest::Tile {
                 lod: 12,
                 x: -12,
                 z: 34
             })
         ));
+        for invalid in [
+            "tiles/0/x-1/2/z3/4.prbm.gz",
+            "tiles/0/x-1/2/z3/4.prbm.zst",
+            "tiles/0/x-1/2/z3/4.prbm.lz4",
+            "tiles/0/x-1/2/z3/4.prbm.extra",
+            "tiles/0/x12/z34.prbm",
+            "tiles/00/x0/z0.prbm",
+            "tiles/0/x0/z0.png",
+            "tiles/1/x0/z0.prbm",
+            "tiles/1/2/x-1/2/z3/4.png",
+        ] {
+            assert!(parse_map_path(invalid).is_none(), "{invalid} is an alias");
+        }
     }
 
     #[test]
@@ -783,7 +817,7 @@ mod tests {
                 data: Bytes::from_static(b"lz4"),
                 metadata: object_metadata,
             },
-            "tiles/0/x0z0.prbm.lz4",
+            "tiles/0/x0/z0.prbm",
             &headers,
             &Method::GET,
             permit,
@@ -803,11 +837,11 @@ mod tests {
     #[test]
     fn lowres_mime_does_not_depend_on_zero_path_segments() {
         assert_eq!(
-            content_type("tiles/1/0/x0z0.png", ObjectClass::LowresTile),
+            content_type("tiles/10/x0/z0.png", ObjectClass::LowresTile),
             HeaderValue::from_static("image/png")
         );
         assert_eq!(
-            content_type("tiles/0/x0z0.prbm", ObjectClass::HiresTile),
+            content_type("tiles/0/x0/z0.prbm", ObjectClass::HiresTile),
             HeaderValue::from_static("application/octet-stream")
         );
     }

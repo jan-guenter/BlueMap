@@ -1,0 +1,5 @@
+webserver:
+  implementation: rust
+
+nodeSelector:
+  kubernetes.io/os: windows

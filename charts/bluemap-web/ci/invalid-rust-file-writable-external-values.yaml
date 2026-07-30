@@ -1,0 +1,17 @@
+webserver:
+  implementation: rust
+
+storage:
+  type: file
+  file:
+    root: /mnt/bluemap/maps
+
+extraVolumes:
+  - name: map-data
+    persistentVolumeClaim:
+      claimName: externally-managed-bluemap-data
+
+extraVolumeMounts:
+  - name: map-data
+    mountPath: /mnt/bluemap
+    readOnly: false

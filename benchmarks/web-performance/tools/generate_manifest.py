@@ -56,6 +56,18 @@ def url_path(path: Path, webroot: Path, strip_compression: bool = False) -> str:
     return f"/{relative}"
 
 
+def sharded_grid_path(x: int, z: int, suffix: str) -> str:
+    parts: list[str] = []
+    part = ""
+    for character in f"x{x}z{z}":
+        part += character
+        if character.isdigit():
+            parts.append(part)
+            part = ""
+    parts[-1] += suffix
+    return "/".join(parts)
+
+
 def regular_files(root: Path):
     if not root.is_dir():
         return
@@ -264,7 +276,7 @@ def generate(
         "largeObject": largest_object,
         "missingTile": (
             f"/maps/{map_directories[0].name}"
-            "/tiles/0/x2147483647/z2147483647.prbm"
+            f"/tiles/0/{sharded_grid_path(2147483647, 2147483647, '.prbm')}"
         ),
         "expected": expected,
         "counts": {

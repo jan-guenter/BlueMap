@@ -3,6 +3,7 @@ webserver:
   rust:
     config:
       maxInFlightRequests: 8
+      maxObjectBytes: 67108864
       tileCacheMaxAgeSeconds: 60
     maps:
       - id: world

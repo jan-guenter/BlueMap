@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AppError, Result};
 
+const MAX_IN_FLIGHT_REQUESTS: usize = 1024;
+
 fn default_bind() -> SocketAddr {
     "0.0.0.0:8100".parse().expect("valid default bind address")
 }
@@ -35,6 +37,10 @@ fn default_storage_timeout_seconds() -> u64 {
 
 fn default_max_in_flight_requests() -> usize {
     8
+}
+
+fn default_max_object_bytes() -> u64 {
+    64 * 1024 * 1024
 }
 
 fn default_tile_cache_max_age_seconds() -> u64 {
@@ -114,6 +120,8 @@ pub struct Config {
     pub storage_timeout_seconds: u64,
     #[serde(default = "default_max_in_flight_requests")]
     pub max_in_flight_requests: usize,
+    #[serde(default = "default_max_object_bytes")]
+    pub max_object_bytes: u64,
     #[serde(default = "default_tile_cache_max_age_seconds")]
     pub tile_cache_max_age_seconds: u64,
     #[serde(default)]
@@ -139,9 +147,14 @@ impl Config {
                 "at least one [[maps]] entry is required".to_owned(),
             ));
         }
-        if self.max_in_flight_requests == 0 {
+        if !(1..=MAX_IN_FLIGHT_REQUESTS).contains(&self.max_in_flight_requests) {
+            return Err(AppError::InvalidConfig(format!(
+                "max_in_flight_requests must be between 1 and {MAX_IN_FLIGHT_REQUESTS}"
+            )));
+        }
+        if self.max_object_bytes == 0 || self.max_object_bytes > i64::MAX as u64 {
             return Err(AppError::InvalidConfig(
-                "max_in_flight_requests must be greater than zero".to_owned(),
+                "max_object_bytes must be between 1 and 9223372036854775807".to_owned(),
             ));
         }
         if self.runtime_shutdown_seconds == 0 {
@@ -425,6 +438,7 @@ mod tests {
         let config: Config = toml::from_str(&raw).unwrap();
         assert_eq!(config.max_in_flight_requests, 8);
         assert_eq!(config.runtime_shutdown_seconds, 5);
+        assert_eq!(config.max_object_bytes, 64 * 1024 * 1024);
         assert_eq!(config.tile_cache_max_age_seconds, 60);
 
         let mut config = config;
@@ -434,10 +448,38 @@ mod tests {
                 .validate()
                 .unwrap_err()
                 .to_string()
-                .contains("greater than zero")
+                .contains("between 1 and 1024")
+        );
+
+        config.max_in_flight_requests = 1025;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("between 1 and 1024")
         );
 
         config.max_in_flight_requests = 8;
+        config.max_object_bytes = 0;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("max_object_bytes")
+        );
+
+        config.max_object_bytes = i64::MAX as u64 + 1;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("max_object_bytes")
+        );
+
+        config.max_object_bytes = 64 * 1024 * 1024;
         config.runtime_shutdown_seconds = 0;
         assert!(
             config

@@ -14,6 +14,7 @@ data:
     dependency_check_seconds = {{ .Values.webserver.rust.config.dependencyCheckSeconds }}
     storage_timeout_seconds = {{ .Values.webserver.rust.config.storageTimeoutSeconds }}
     max_in_flight_requests = {{ .Values.webserver.rust.config.maxInFlightRequests }}
+    max_object_bytes = {{ .Values.webserver.rust.config.maxObjectBytes }}
     tile_cache_max_age_seconds = {{ .Values.webserver.rust.config.tileCacheMaxAgeSeconds }}
 
     [webapp]

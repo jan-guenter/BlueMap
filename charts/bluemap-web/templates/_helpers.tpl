@@ -166,6 +166,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and (hasKey .Values.nodeSelector "kubernetes.io/arch") (ne (index .Values.nodeSelector "kubernetes.io/arch") "amd64") -}}
 {{- fail "the Rust image supports only linux/amd64; nodeSelector kubernetes.io/arch must be amd64" -}}
 {{- end -}}
+{{- if and (hasKey .Values.nodeSelector "kubernetes.io/os") (ne (index .Values.nodeSelector "kubernetes.io/os") "linux") -}}
+{{- fail "the Rust image supports only Linux; nodeSelector kubernetes.io/os must be linux" -}}
+{{- end -}}
 {{- if or (ne .Values.webserver.rust.config.webapp.mapDataRoot "maps") (ne .Values.webserver.rust.config.webapp.liveDataRoot "maps") -}}
 {{- fail "the Rust webserver currently serves map and live data only below /maps; mapDataRoot and liveDataRoot must both be maps" -}}
 {{- end -}}
@@ -227,6 +230,40 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- $mountPath := clean (default "" .mountPath) -}}
 {{- if or (eq $mountPath "/data") (hasPrefix "/data/" $mountPath) (eq $mountPath "/etc/bluemap-web") (hasPrefix "/etc/bluemap-web/" $mountPath) (eq $mountPath "/run/secrets/database-ca") (hasPrefix "/run/secrets/database-ca/" $mountPath) (eq $mountPath "/run/secrets/database-client") (hasPrefix "/run/secrets/database-client/" $mountPath) -}}
 {{- fail (printf "extraVolumeMounts must not use or shadow Rust-reserved mountPath %s" $mountPath) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq .Values.storage.type "file" -}}
+{{- $fileRoot := clean .Values.storage.file.root -}}
+{{- if not (hasPrefix "/" $fileRoot) -}}
+{{- fail "Rust file storage root must be an absolute path" -}}
+{{- end -}}
+{{- $extraVolumeNames := dict -}}
+{{- range .Values.extraVolumes -}}
+{{- $_ := set $extraVolumeNames (default "" .name) true -}}
+{{- end -}}
+{{- $externalSource := false -}}
+{{- range .Values.extraVolumeMounts -}}
+{{- $mountPath := clean (default "" .mountPath) -}}
+{{- $coversRoot := or (eq $mountPath $fileRoot) (and (ne $mountPath "/") (hasPrefix (printf "%s/" $mountPath) $fileRoot)) -}}
+{{- if $coversRoot -}}
+{{- if not (hasKey $extraVolumeNames (default "" .name)) -}}
+{{- fail (printf "extraVolumeMount %s covers Rust file storage but has no matching extraVolume" (default "" .name)) -}}
+{{- end -}}
+{{- if not (default false .readOnly) -}}
+{{- fail (printf "extraVolumeMount %s covering Rust file storage must be readOnly" (default "" .name)) -}}
+{{- end -}}
+{{- $externalSource = true -}}
+{{- end -}}
+{{- end -}}
+{{- $persistenceSource := and .Values.persistence.enabled (or (eq $fileRoot "/data") (hasPrefix "/data/" $fileRoot)) -}}
+{{- if not (or $persistenceSource $externalSource) -}}
+{{- fail "Rust file storage requires persistence under /data or a read-only extraVolumeMount covering storage.file.root" -}}
+{{- end -}}
+{{- if and (gt (int .Values.replicaCount) 1) (not (or (has "ReadWriteMany" .Values.persistence.accessModes) (has "ReadOnlyMany" .Values.persistence.accessModes))) -}}
+{{- fail "Rust file storage with multiple replicas requires ReadWriteMany or ReadOnlyMany in persistence.accessModes" -}}
+{{- end -}}
+{{- if and (gt (int .Values.replicaCount) 1) (or (has "ReadWriteOnce" .Values.persistence.accessModes) (has "ReadWriteOncePod" .Values.persistence.accessModes)) -}}
+{{- fail "Rust file storage with multiple replicas cannot declare ReadWriteOnce or ReadWriteOncePod in persistence.accessModes" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

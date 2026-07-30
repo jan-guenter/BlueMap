@@ -103,20 +103,31 @@ budget. Keep each pod's `webserver.rust.config.maxInFlightRequests` near
 `storage.sql.maxConnections`, so the aggregate in-flight limit remains near
 the aggregate pool capacity instead of retaining many SQL BLOBs above it. File
 deployments with multiple replicas require a shared ReadWriteMany (RWX) volume
-with reliable read-after-rename behavior, as shown by the file example. The
-Rust mount is read-only. Custom `extraVolumeMounts` must live outside `/data`,
-`/etc/bluemap-web`, and the database TLS mount roots so they cannot shadow
-chart-managed content. The Rust image is linux/amd64 only. The chart merges
-`kubernetes.io/arch: amd64` into `nodeSelector` and rejects a conflicting
-selector while preserving other user selectors.
+or ReadOnlyMany (ROX) volume with reliable read-after-rename behavior, as shown
+by the file example. A single replica may use ReadWriteOnce (RWO). Rust file
+storage must have a real data source: either enable chart persistence below
+`/data`, or declare matching `extraVolumes` and a read-only
+`extraVolumeMounts` entry that contains `storage.file.root`. For multiple
+replicas, `persistence.accessModes` must declare RWX or ROX even when the
+volume is externally managed; RWO and ReadWriteOncePod are rejected. The Rust
+mount is always read-only. Custom `extraVolumeMounts` must live outside
+`/data`, `/etc/bluemap-web`, and the database TLS mount roots so they cannot
+shadow chart-managed content. The Rust image is linux/amd64 only. The chart
+merges both `kubernetes.io/os: linux` and `kubernetes.io/arch: amd64` into
+`nodeSelector`, rejects conflicting selectors, and preserves other user
+selectors.
 
-The default in-flight limit is eight. The largest object in the reference test
-data was a 20.2 MiB texture, so eight materialized responses alone can retain
-at least 161.6 MiB. The examples request 128 MiB and cap each pod at 512 MiB to
-leave room for database, TLS, allocator, and runtime overhead. Recalculate both
-the in-flight limit and memory limit for the largest object in your own map.
-File-backed syscalls use at most the smaller of the in-flight limit and eight
-blocking workers.
+The default in-flight limit is eight and the accepted range is 1 through 1024.
+`webserver.rust.config.maxObjectBytes` defaults to 64 MiB and rejects a larger
+stored object before it can be served. SQL body queries enforce the bound in
+the database, and file reads enforce it again in the blocking worker. Oversize
+responses are not cached. The largest object in the reference test data was a
+20.2 MiB texture, so eight materialized responses alone can retain at least
+161.6 MiB. The examples request 128 MiB and cap each pod at 512 MiB to leave
+room for database, TLS, allocator, and runtime overhead. Recalculate the object
+limit, in-flight limit, and memory limit for the largest object in your own
+map. File-backed syscalls use at most the smaller of the in-flight limit and
+eight blocking workers.
 
 Tiles default to
 `public,max-age=60,must-revalidate,no-transform`; tune the age with
@@ -161,6 +172,28 @@ config:
 
 Enable `persistence`, select an existing claim, or mount shared storage with
 `extraVolumes` and `extraVolumeMounts` for a durable file-storage deployment.
+For example, an externally managed read-only claim can be mounted without
+enabling chart persistence:
+
+```yaml
+storage:
+  type: file
+  file:
+    root: /mnt/bluemap/maps
+
+extraVolumes:
+  - name: map-data
+    persistentVolumeClaim:
+      claimName: bluemap-maps
+extraVolumeMounts:
+  - name: map-data
+    mountPath: /mnt/bluemap
+    readOnly: true
+```
+
+When this deployment has more than one replica, also declare
+`persistence.accessModes: [ReadWriteMany]` or `[ReadOnlyMany]` to state the
+external claim's supported multi-node access mode.
 
 ## SQL storage
 

@@ -41,6 +41,7 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- $rustNodeSelector := deepCopy .Values.nodeSelector }}
       {{- $_ := set $rustNodeSelector "kubernetes.io/arch" "amd64" }}
+      {{- $_ := set $rustNodeSelector "kubernetes.io/os" "linux" }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -83,7 +84,7 @@ spec:
             - name: rust-config
               mountPath: /etc/bluemap-web
               readOnly: true
-            {{- if eq .Values.storage.type "file" }}
+            {{- if and (eq .Values.storage.type "file") .Values.persistence.enabled }}
             - name: data
               mountPath: /data
               readOnly: true
@@ -108,14 +109,10 @@ spec:
             items:
               - key: config.toml
                 path: config.toml
-        {{- if eq .Values.storage.type "file" }}
+        {{- if and (eq .Values.storage.type "file") .Values.persistence.enabled }}
         - name: data
-          {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ default (include "bluemap-web.fullname" .) .Values.persistence.existingClaim }}
-          {{- else }}
-          emptyDir: {}
-          {{- end }}
         {{- end }}
         {{- if .Values.webserver.rust.databaseTls.ca.existingSecret }}
         - name: database-ca

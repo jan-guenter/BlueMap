@@ -1,0 +1,9 @@
+webserver:
+  implementation: rust
+
+replicaCount: 2
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce

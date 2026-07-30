@@ -58,6 +58,7 @@ pub struct FileBackend {
     root_directory: Arc<File>,
     pub(crate) compression: StoredEncoding,
     workers: BlockingFileWorkers,
+    max_object_bytes: u64,
     #[cfg(test)]
     body_reads: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -73,6 +74,7 @@ struct BlockingFileWorkers {
 pub struct SqlBackend<P> {
     pool: P,
     metadata: SqlMetadata,
+    max_object_bytes: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -123,8 +125,13 @@ impl Backend {
     pub async fn connect(config: &Config) -> Result<Self> {
         match &config.storage {
             StorageConfig::File { root, compression } => Ok(Self::File(
-                FileBackend::open(root.clone(), *compression, config.max_in_flight_requests)
-                    .await?,
+                FileBackend::open(
+                    root.clone(),
+                    *compression,
+                    config.max_in_flight_requests,
+                    config.max_object_bytes,
+                )
+                .await?,
             )),
             StorageConfig::Mariadb {
                 host,
@@ -163,7 +170,11 @@ impl Backend {
                     .await
                     .map_err(AppError::Database)?;
                 let metadata = mysql_schema_metadata(&pool).await?;
-                Ok(Self::MariaDb(SqlBackend { pool, metadata }))
+                Ok(Self::MariaDb(SqlBackend {
+                    pool,
+                    metadata,
+                    max_object_bytes: config.max_object_bytes as i64,
+                }))
             }
             StorageConfig::Postgresql {
                 host,
@@ -202,7 +213,11 @@ impl Backend {
                     .await
                     .map_err(AppError::Database)?;
                 let metadata = postgres_schema_metadata(&pool).await?;
-                Ok(Self::PostgreSql(SqlBackend { pool, metadata }))
+                Ok(Self::PostgreSql(SqlBackend {
+                    pool,
+                    metadata,
+                    max_object_bytes: config.max_object_bytes as i64,
+                }))
             }
         }
     }
@@ -277,6 +292,7 @@ impl FileBackend {
         root: PathBuf,
         compression: StoredEncoding,
         worker_limit: usize,
+        max_object_bytes: u64,
     ) -> Result<Self> {
         let workers = BlockingFileWorkers::new(worker_limit);
         let open_path = root.clone();
@@ -301,6 +317,7 @@ impl FileBackend {
             root_directory,
             compression,
             workers,
+            max_object_bytes,
             #[cfg(test)]
             body_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -357,6 +374,7 @@ impl FileBackend {
         let root = self.root_directory.clone();
         let display_path = self.root.join(&relative_path);
         let root_path = self.root.clone();
+        let max_object_bytes = self.max_object_bytes;
         self.workers
             .run("file-storage read", move || {
                 let mut file = match open_beneath(&root, &root_path, &relative_path) {
@@ -370,10 +388,14 @@ impl FileBackend {
                 if !stat.is_file() {
                     return Ok(None);
                 }
+                ensure_object_size(stat.len(), max_object_bytes)?;
                 let capacity = usize::try_from(stat.len()).unwrap_or(0);
                 let mut data = Vec::with_capacity(capacity);
-                file.read_to_end(&mut data)
+                (&mut file)
+                    .take(max_object_bytes + 1)
+                    .read_to_end(&mut data)
                     .map_err(|source| AppError::StorageIo(display_path.clone(), source))?;
+                ensure_object_size(data.len() as u64, max_object_bytes)?;
                 let final_stat = file
                     .metadata()
                     .map_err(|source| AppError::StorageIo(display_path.clone(), source))?;
@@ -507,6 +529,14 @@ impl BlockingFileWorkers {
     #[cfg(test)]
     fn available_permits(&self) -> usize {
         self.permits.available_permits()
+    }
+}
+
+fn ensure_object_size(actual: u64, limit: u64) -> Result<()> {
+    if actual > limit {
+        Err(AppError::ObjectTooLarge { actual, limit })
+    } else {
+        Ok(())
     }
 }
 
@@ -660,7 +690,7 @@ impl SqlBackend<MySqlPool> {
     ) -> Result<Option<StoredObject>> {
         self.fetch_mysql(map_id, request, true)
             .await?
-            .map(|row| decode_row(&row))
+            .map(|row| decode_row(&row, self.max_object_bytes as u64))
             .transpose()
     }
 
@@ -690,7 +720,11 @@ impl SqlBackend<MySqlPool> {
                      JOIN bluemap_compression c ON d.compression = c.id \
                      WHERE m.map_id = ? AND s.`key` = ? AND d.x = ? AND d.z = ?"
                 );
-                let row = sqlx::query(&statement)
+                let mut query = sqlx::query(&statement);
+                if include_data {
+                    query = query.bind(self.max_object_bytes);
+                }
+                let row = query
                     .bind(map_id)
                     .bind(storage)
                     .bind(x)
@@ -716,7 +750,11 @@ impl SqlBackend<MySqlPool> {
                      JOIN bluemap_compression c ON d.compression = c.id \
                      WHERE m.map_id = ? AND s.`key` = ?"
                 );
-                let row = sqlx::query(&statement)
+                let mut query = sqlx::query(&statement);
+                if include_data {
+                    query = query.bind(self.max_object_bytes);
+                }
+                let row = query
                     .bind(map_id)
                     .bind(storage)
                     .fetch_optional(&self.pool)
@@ -747,7 +785,7 @@ impl SqlBackend<PgPool> {
     ) -> Result<Option<StoredObject>> {
         self.fetch_postgres(map_id, request, true)
             .await?
-            .map(|row| decode_row(&row))
+            .map(|row| decode_row(&row, self.max_object_bytes as u64))
             .transpose()
     }
 
@@ -766,7 +804,7 @@ impl SqlBackend<PgPool> {
                 };
                 let hash = postgres_content_hash_projection(self.metadata.grid_content_hash);
                 let updated = postgres_updated_at_projection(self.metadata.grid_updated_at);
-                let data = postgres_data_projection(include_data);
+                let data = postgres_data_projection(include_data, 5);
                 let class = if lod == 0 { "hires" } else { "lowres" };
                 let statement = format!(
                     "SELECT {data} c.key AS compression, {hash} AS content_hash, \
@@ -777,11 +815,15 @@ impl SqlBackend<PgPool> {
                      JOIN bluemap_compression c ON d.compression = c.id \
                      WHERE m.map_id = $1 AND s.key = $2 AND d.x = $3 AND d.z = $4"
                 );
-                let row = sqlx::query(&statement)
+                let mut query = sqlx::query(&statement)
                     .bind(map_id)
                     .bind(storage)
                     .bind(x)
-                    .bind(z)
+                    .bind(z);
+                if include_data {
+                    query = query.bind(self.max_object_bytes);
+                }
+                let row = query
                     .fetch_optional(&self.pool)
                     .await
                     .map_err(AppError::Database)?;
@@ -792,7 +834,7 @@ impl SqlBackend<PgPool> {
                 let (storage, class) = item_key(request);
                 let hash = postgres_content_hash_projection(self.metadata.item_content_hash);
                 let updated = postgres_updated_at_projection(self.metadata.item_updated_at);
-                let data = postgres_data_projection(include_data);
+                let data = postgres_data_projection(include_data, 3);
                 let class = class.database_name();
                 let statement = format!(
                     "SELECT {data} c.key AS compression, {hash} AS content_hash, \
@@ -803,9 +845,11 @@ impl SqlBackend<PgPool> {
                      JOIN bluemap_compression c ON d.compression = c.id \
                      WHERE m.map_id = $1 AND s.key = $2"
                 );
-                let row = sqlx::query(&statement)
-                    .bind(map_id)
-                    .bind(storage)
+                let mut query = sqlx::query(&statement).bind(map_id).bind(storage);
+                if include_data {
+                    query = query.bind(self.max_object_bytes);
+                }
+                let row = query
                     .fetch_optional(&self.pool)
                     .await
                     .map_err(AppError::Database)?;
@@ -857,19 +901,25 @@ fn postgres_updated_at_projection(available: bool) -> &'static str {
     }
 }
 
-fn mysql_data_projection(include_data: bool) -> &'static str {
+fn mysql_data_projection(include_data: bool) -> String {
     if include_data {
-        "d.data, CAST(OCTET_LENGTH(d.data) AS SIGNED) AS content_length,"
+        "CASE WHEN OCTET_LENGTH(d.data) <= ? THEN d.data ELSE NULL END AS data, \
+         CAST(OCTET_LENGTH(d.data) AS SIGNED) AS content_length,"
+            .to_owned()
     } else {
-        "CAST(OCTET_LENGTH(d.data) AS SIGNED) AS content_length,"
+        "CAST(OCTET_LENGTH(d.data) AS SIGNED) AS content_length,".to_owned()
     }
 }
 
-fn postgres_data_projection(include_data: bool) -> &'static str {
+fn postgres_data_projection(include_data: bool, parameter: usize) -> String {
     if include_data {
-        "d.data, CAST(OCTET_LENGTH(d.data) AS BIGINT) AS content_length,"
+        format!(
+            "CASE WHEN OCTET_LENGTH(d.data) <= ${parameter} THEN d.data \
+             ELSE NULL::bytea END AS data, \
+             CAST(OCTET_LENGTH(d.data) AS BIGINT) AS content_length,"
+        )
     } else {
-        "CAST(OCTET_LENGTH(d.data) AS BIGINT) AS content_length,"
+        "CAST(OCTET_LENGTH(d.data) AS BIGINT) AS content_length,".to_owned()
     }
 }
 
@@ -930,19 +980,37 @@ where
     })
 }
 
-fn decode_row<R: Row>(row: &R) -> Result<StoredObject>
+fn decode_row<R: Row>(row: &R, max_object_bytes: u64) -> Result<StoredObject>
 where
     for<'a> &'a str: sqlx::ColumnIndex<R>,
     Vec<u8>: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     String: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     i64: for<'r> sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
-    let data: Vec<u8> = row.try_get("data").map_err(AppError::Database)?;
     let metadata = decode_metadata(row)?;
+    let content_length = metadata.content_length.ok_or_else(|| {
+        AppError::InvalidSchema("SQL object body is missing its content length".to_owned())
+    })?;
+    let data = read_bounded_sql_body(content_length, max_object_bytes, || {
+        let data: Option<Vec<u8>> = row.try_get("data").map_err(AppError::Database)?;
+        data.ok_or_else(|| {
+            AppError::InvalidSchema("bounded SQL object projection returned no body".to_owned())
+        })
+    })?;
+    ensure_object_size(data.len() as u64, max_object_bytes)?;
     Ok(StoredObject {
         data: Bytes::from(data),
         metadata,
     })
+}
+
+fn read_bounded_sql_body<T>(
+    content_length: u64,
+    max_object_bytes: u64,
+    read_body: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    ensure_object_size(content_length, max_object_bytes)?;
+    read_body()
 }
 
 fn mysql_tls_mode(mode: TlsMode) -> MySqlSslMode {
@@ -1119,15 +1187,37 @@ mod tests {
         );
         assert!(!mysql_metadata.starts_with("d.data,"));
 
-        let postgres_metadata = postgres_data_projection(false);
+        let postgres_metadata = postgres_data_projection(false, 0);
         assert_eq!(
             postgres_metadata,
             "CAST(OCTET_LENGTH(d.data) AS BIGINT) AS content_length,"
         );
         assert!(!postgres_metadata.starts_with("d.data,"));
 
-        assert!(mysql_data_projection(true).starts_with("d.data,"));
-        assert!(postgres_data_projection(true).starts_with("d.data,"));
+        let mysql_body = mysql_data_projection(true);
+        assert!(mysql_body.contains("CASE WHEN OCTET_LENGTH(d.data) <= ?"));
+        assert!(mysql_body.contains("ELSE NULL END AS data"));
+        let postgres_body = postgres_data_projection(true, 5);
+        assert!(postgres_body.contains("CASE WHEN OCTET_LENGTH(d.data) <= $5"));
+        assert!(postgres_body.contains("ELSE NULL::bytea END AS data"));
+    }
+
+    #[test]
+    fn oversized_sql_projection_is_rejected_before_body_decoding() {
+        let body_decoded = std::cell::Cell::new(false);
+        let error = read_bounded_sql_body(65, 64, || {
+            body_decoded.set(true);
+            Ok(Vec::<u8>::new())
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::ObjectTooLarge {
+                actual: 65,
+                limit: 64
+            }
+        ));
+        assert!(!body_decoded.get());
     }
 
     #[test]
@@ -1171,7 +1261,7 @@ mod tests {
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, b"{}").unwrap();
 
-        let file = FileBackend::open(maps, StoredEncoding::None, 8)
+        let file = FileBackend::open(maps, StoredEncoding::None, 8, 64 * 1024 * 1024)
             .await
             .unwrap();
         let backend = Backend::File(file.clone());
@@ -1196,7 +1286,7 @@ mod tests {
         std::fs::write(outside.join("settings.json"), b"container secret").unwrap();
         symlink(&outside, maps.join("world")).unwrap();
 
-        let backend = FileBackend::open(maps, StoredEncoding::None, 8)
+        let backend = FileBackend::open(maps, StoredEncoding::None, 8, 64 * 1024 * 1024)
             .await
             .unwrap();
         let error = backend
@@ -1204,6 +1294,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, AppError::StorageIo(_, _)));
+    }
+
+    #[tokio::test]
+    async fn file_body_limit_is_checked_inside_the_blocking_worker() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let maps = temporary.path().join("maps");
+        let settings = maps.join("world/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(settings, b"123456789").unwrap();
+
+        let backend = FileBackend::open(maps, StoredEncoding::None, 8, 8)
+            .await
+            .unwrap();
+        assert!(matches!(
+            backend.read("world", ObjectRequest::Settings).await,
+            Err(AppError::ObjectTooLarge {
+                actual: 9,
+                limit: 8
+            })
+        ));
     }
 
     #[cfg(unix)]
