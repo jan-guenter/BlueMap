@@ -12,6 +12,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from runtime_identity import (
+    validate_digest,
+    validate_expected_images,
+    validate_git_revision,
+)
+
 
 ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 PROFILES = {
@@ -59,15 +65,22 @@ def matrix_sha256(path: Path) -> str:
 
 
 def validate_matrix(matrix: dict[str, Any]) -> None:
-    if matrix.get("formatVersion") != 1:
-        raise ValueError("matrix formatVersion must be 1")
+    if matrix.get("formatVersion") != 2:
+        raise ValueError("matrix formatVersion must be 2")
     if not isinstance(matrix.get("repetitions"), int) or matrix["repetitions"] < 1:
         raise ValueError("matrix repetitions must be a positive integer")
+    validate_git_revision(
+        matrix.get("benchmarkGitRevision"),
+        "matrix benchmarkGitRevision",
+    )
     for key in ("scheduleSeed", "traceSeed"):
         if not isinstance(matrix.get(key), str) or not matrix[key]:
             raise ValueError(f"matrix {key} must be a non-empty string")
-    if re.fullmatch(r"[0-9a-f]{64}", matrix.get("manifestSha256", "")) is None:
-        raise ValueError("matrix manifestSha256 must be 64 lowercase hex characters")
+    validate_digest(
+        matrix.get("manifestSha256"),
+        "matrix manifestSha256",
+        prefix=False,
+    )
     if (
         not isinstance(matrix.get("mapIds"), list)
         or not matrix["mapIds"]
@@ -130,6 +143,12 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
             or variant["replicaCount"] < 1
         ):
             raise ValueError("variant replicaCount must be positive")
+        validate_expected_images(variant.get("expectedImages"))
+        validate_digest(
+            variant.get("expectedSanitizedConfigSha256"),
+            f"variant {variant['id']} expectedSanitizedConfigSha256",
+            prefix=False,
+        )
         variant_ids.append(variant["id"])
     if len(set(variant_ids)) != len(variant_ids):
         raise ValueError("variant ids must be unique")
@@ -223,6 +242,11 @@ def build_schedule(
                             "databaseBackend"
                         ],
                         "replicaCount": variants[variant_id]["replicaCount"],
+                        "benchmarkGitRevision": matrix["benchmarkGitRevision"],
+                        "expectedImages": variants[variant_id]["expectedImages"],
+                        "expectedSanitizedConfigSha256": variants[variant_id][
+                            "expectedSanitizedConfigSha256"
+                        ],
                         "acceptEncoding": case["acceptEncoding"],
                         "storedEncoding": case["storedEncoding"],
                         "traceSeed": matrix["traceSeed"],
@@ -247,10 +271,11 @@ def build_schedule(
                     }
                 )
     return {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "matrixSha256": matrix_digest,
         "scheduleSeed": schedule_seed,
         "traceSeed": matrix["traceSeed"],
+        "benchmarkGitRevision": matrix["benchmarkGitRevision"],
         "repetitions": matrix["repetitions"],
         "entries": entries,
     }

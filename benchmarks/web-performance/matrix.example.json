@@ -1,9 +1,10 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "repetitions": 5,
   "scheduleSeed": "bluemap-web-performance-schedule-v1",
   "traceSeed": "bluemap-web-performance-v1",
-  "manifestSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "benchmarkGitRevision": "REPLACE_WITH_40_CHARACTER_BENCHMARK_GIT_REVISION",
+  "manifestSha256": "REPLACE_WITH_64_CHARACTER_MANIFEST_SHA256",
   "mapIds": ["world"],
   "controls": {
     "warmupDuration": "2m",
@@ -20,7 +21,20 @@
       "implementation": "php",
       "storageType": "sql",
       "databaseBackend": "postgresql",
-      "replicaCount": 1
+      "replicaCount": 1,
+      "expectedImages": [
+        {
+          "kind": "container",
+          "name": "nginx",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        },
+        {
+          "kind": "container",
+          "name": "php-fpm",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
     },
     {
       "id": "java-old-postgresql",
@@ -28,7 +42,20 @@
       "implementation": "java",
       "storageType": "sql",
       "databaseBackend": "postgresql",
-      "replicaCount": 1
+      "replicaCount": 1,
+      "expectedImages": [
+        {
+          "kind": "container",
+          "name": "bluemap-web",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        },
+        {
+          "kind": "initContainer",
+          "name": "download-jdbc-driver",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
     },
     {
       "id": "java-new-postgresql",
@@ -36,7 +63,20 @@
       "implementation": "java",
       "storageType": "sql",
       "databaseBackend": "postgresql",
-      "replicaCount": 1
+      "replicaCount": 1,
+      "expectedImages": [
+        {
+          "kind": "container",
+          "name": "bluemap-web",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        },
+        {
+          "kind": "initContainer",
+          "name": "download-jdbc-driver",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
     },
     {
       "id": "rust-postgresql",
@@ -44,7 +84,15 @@
       "implementation": "rust",
       "storageType": "sql",
       "databaseBackend": "postgresql",
-      "replicaCount": 1
+      "replicaCount": 1,
+      "expectedImages": [
+        {
+          "kind": "container",
+          "name": "bluemap-web",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
     },
     {
       "id": "java-new-postgresql-r3",
@@ -52,7 +100,20 @@
       "implementation": "java",
       "storageType": "sql",
       "databaseBackend": "postgresql",
-      "replicaCount": 3
+      "replicaCount": 3,
+      "expectedImages": [
+        {
+          "kind": "container",
+          "name": "bluemap-web",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        },
+        {
+          "kind": "initContainer",
+          "name": "download-jdbc-driver",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
     },
     {
       "id": "rust-postgresql-r3",
@@ -60,7 +121,15 @@
       "implementation": "rust",
       "storageType": "sql",
       "databaseBackend": "postgresql",
-      "replicaCount": 3
+      "replicaCount": 3,
+      "expectedImages": [
+        {
+          "kind": "container",
+          "name": "bluemap-web",
+          "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
     }
   ],
   "cases": [

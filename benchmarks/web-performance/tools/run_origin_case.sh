@@ -10,6 +10,7 @@ NAMESPACE="minecraft"
 LOADGEN_POD="bluemap-perf-loadgen"
 K6_SCRIPT="$BENCHMARK_ROOT/k6/bluemap.js"
 CONTRACT_SCRIPT="$BENCHMARK_ROOT/tools/check_http_contract.py"
+RUNTIME_IDENTITY_SCRIPT="$BENCHMARK_ROOT/tools/runtime_identity.py"
 ARTIFACT_ROOT="$BENCHMARK_ROOT/artifacts"
 PROFILE="map-data-mixed"
 RATE="100"
@@ -80,6 +81,9 @@ EXPECTED_ITERATION_RATE=""
 EFFECTIVE_LATENCY_P95_MS=""
 EFFECTIVE_LATENCY_P99_MS=""
 DESIRED_WEB_REPLICA_COUNT="0"
+BENCHMARK_COMMIT=""
+EXPECTED_IMAGES_JSON=""
+EXPECTED_SANITIZED_CONFIG_SHA256=""
 
 usage() {
     cat <<'EOF'
@@ -189,6 +193,23 @@ validate_positive_number() {
     jq -en --arg value "$value" \
         '($value | tonumber) as $number | $number > 0' >/dev/null 2>&1 ||
         die "$name must be a positive number"
+}
+
+verify_committed_benchmark_file() {
+    local relative_path="$1"
+    local actual_path="$2"
+    local expected_digest
+    local actual_digest
+    expected_digest="$(
+        git -C "$REPOSITORY_ROOT" show \
+            "$BENCHMARK_COMMIT:$relative_path" |
+            sha256sum |
+            awk '{print $1}'
+    )" || die "Could not read $relative_path from the scheduled Git revision"
+    actual_digest="$(sha256sum "$actual_path" | awk '{print $1}')" ||
+        die "Could not hash benchmark input $actual_path"
+    [[ "$actual_digest" == "$expected_digest" ]] ||
+        die "Benchmark input $actual_path differs from the scheduled Git revision"
 }
 
 while (($# > 0)); do
@@ -523,12 +544,17 @@ fi
     die "Schedule validator is unavailable"
 [[ -f "$SCRIPT_DIR/check_arrival_gate.py" ]] ||
     die "Arrival-gate helper is unavailable"
+[[ -f "$RUNTIME_IDENTITY_SCRIPT" ]] ||
+    die "Runtime-identity helper is unavailable"
 [[ -f "$KUBECONFIG_PATH" ]] || die "Kubeconfig '$KUBECONFIG_PATH' is not a regular file"
 
-for command in kubectl jq sha256sum tee diff; do
+for command in git kubectl jq sha256sum tee diff; do
     require_command "$command"
 done
 require_command "$PYTHON_BIN"
+BENCHMARK_COMMIT="$(
+    git -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null
+)" || die "Could not resolve the benchmark repository Git revision"
 if [[ -n "$PROMETHEUS_URL" ]]; then
     PROMETHEUS_INSPECTION="$(
         "$PYTHON_BIN" "$SCRIPT_DIR/capture_prometheus.py" \
@@ -570,6 +596,46 @@ if ((schedule_option_count == 3)); then
         "$PYTHON_BIN" "$SCRIPT_DIR/generate_schedule.py" validate-entry \
             "$MATRIX" "$SCHEDULE" "$SCHEDULE_ENTRY_ID"
     )" || die "Formal matrix/schedule validation failed"
+    expected_benchmark_revision="$(
+        jq -er '.benchmarkGitRevision' <<<"$SCHEDULE_ENTRY_JSON"
+    )" || die "Formal schedule entry has no benchmark Git revision"
+    [[ "$BENCHMARK_COMMIT" == "$expected_benchmark_revision" ]] ||
+        die "Benchmark Git revision does not match the formal schedule"
+    tracked_worktree_status="$(
+        git -C "$REPOSITORY_ROOT" status --porcelain --untracked-files=no
+    )" || die "Could not verify the formal benchmark worktree state"
+    [[ -z "$tracked_worktree_status" ]] ||
+        die "Formal runs require a clean tracked Git worktree"
+
+    verify_committed_benchmark_file \
+        "benchmarks/web-performance/tools/run_origin_case.sh" \
+        "${BASH_SOURCE[0]}"
+    verify_committed_benchmark_file \
+        "benchmarks/web-performance/k6/bluemap.js" \
+        "$K6_SCRIPT"
+    verify_committed_benchmark_file \
+        "benchmarks/web-performance/tools/check_http_contract.py" \
+        "$CONTRACT_SCRIPT"
+    for helper in \
+        capture_prometheus.py \
+        check_arrival_gate.py \
+        configmap_references.py \
+        generate_schedule.py \
+        runtime_identity.py \
+        sanitize_configmap.py \
+        sanitize_kubernetes_resource.py \
+        slow_reader.py; do
+        verify_committed_benchmark_file \
+            "benchmarks/web-performance/tools/$helper" \
+            "$SCRIPT_DIR/$helper"
+    done
+
+    EXPECTED_IMAGES_JSON="$(
+        jq -ceS '.expectedImages' <<<"$SCHEDULE_ENTRY_JSON"
+    )" || die "Formal schedule entry has no expected image identity"
+    EXPECTED_SANITIZED_CONFIG_SHA256="$(
+        jq -er '.expectedSanitizedConfigSha256' <<<"$SCHEDULE_ENTRY_JSON"
+    )" || die "Formal schedule entry has no expected configuration identity"
     jq -e \
         --arg caseId "$CASE_ID" \
         --arg variantId "$VARIANT_ID" \
@@ -901,31 +967,21 @@ snapshot_configmap() {
 capture_configmap_set() {
     local label="$1"
     local directory="$ARTIFACT_DIR/cluster/$label"
-    local digest_items="$ARTIFACT_DIR/cluster/.config-digests-$label.ndjson"
-    : > "$digest_items"
+    local -a snapshot_files=()
 
     for configmap in "${CONFIGMAPS[@]}"; do
         local snapshot_file="$directory/configmap-$configmap.json"
-        local digest
         snapshot_configmap "$configmap" "$snapshot_file" || return 1
-        digest="$(
-            jq -cS '.resource.data' "$snapshot_file" |
-                sha256sum |
-                awk '{print $1}'
-        )" || return 1
-        jq -nc \
-            --arg name "$configmap" \
-            --arg sha256 "$digest" \
-            '{name: $name, sanitizedDataSha256: $sha256}' \
-            >> "$digest_items" || return 1
+        snapshot_files+=("$snapshot_file")
     done
 
-    jq -s \
+    "$PYTHON_BIN" "$RUNTIME_IDENTITY_SCRIPT" config-snapshots \
+        "${snapshot_files[@]}" |
+        jq \
         --arg capturedAt "$(timestamp)" \
-        '{capturedAt: $capturedAt, configMaps: (sort_by(.name))}' \
-        "$digest_items" > "$ARTIFACT_DIR/cluster/config-digests-$label.json" ||
+        '. + {capturedAt: $capturedAt}' \
+        > "$ARTIFACT_DIR/cluster/config-digests-$label.json" ||
         return 1
-    rm -f -- "$digest_items"
 }
 
 capture_snapshot_set() {
@@ -964,6 +1020,87 @@ capture_snapshot_set() {
         })
     }' "$directory"/pod-*.json > "$ARTIFACT_DIR/cluster/images-$label.json" ||
         return 1
+}
+
+verify_formal_runtime_identity() {
+    [[ -n "$SCHEDULE_ENTRY_JSON" ]] || return 0
+
+    local identity_items="$ARTIFACT_DIR/cluster/.runtime-identities.ndjson"
+    local config_identity_file="$ARTIFACT_DIR/cluster/config-digests-before.json"
+    local actual_config_sha256
+    local config_passed=false
+    local mismatch=0
+    : > "$identity_items"
+
+    for pod in "${WEB_PODS[@]}"; do
+        local pod_snapshot="$ARTIFACT_DIR/cluster/before/pod-$pod.json"
+        local actual_images
+        actual_images="$(
+            "$PYTHON_BIN" "$RUNTIME_IDENTITY_SCRIPT" pod-images \
+                < "$pod_snapshot"
+        )" || {
+            rm -f -- "$identity_items"
+            return 1
+        }
+        actual_images="$(jq -ceS . <<<"$actual_images")" || {
+            rm -f -- "$identity_items"
+            return 1
+        }
+        jq -nc \
+            --arg pod "$pod" \
+            --argjson expected "$EXPECTED_IMAGES_JSON" \
+            --argjson actual "$actual_images" \
+            '{
+                pod: $pod,
+                expectedImages: $expected,
+                actualImages: $actual,
+                passed: ($expected == $actual)
+            }' >> "$identity_items" || {
+                rm -f -- "$identity_items"
+                return 1
+            }
+        [[ "$actual_images" == "$EXPECTED_IMAGES_JSON" ]] || mismatch=1
+    done
+
+    actual_config_sha256="$(
+        jq -er '.sanitizedConfigSha256' "$config_identity_file"
+    )" || {
+        rm -f -- "$identity_items"
+        return 1
+    }
+    if [[ "$actual_config_sha256" == "$EXPECTED_SANITIZED_CONFIG_SHA256" ]]; then
+        config_passed=true
+    else
+        mismatch=1
+    fi
+
+    jq -s \
+        --arg benchmarkGitRevision "$BENCHMARK_COMMIT" \
+        --arg expectedSanitizedConfigSha256 \
+            "$EXPECTED_SANITIZED_CONFIG_SHA256" \
+        --arg actualSanitizedConfigSha256 "$actual_config_sha256" \
+        --argjson configPassed "$config_passed" \
+        '{
+            benchmarkGitRevision: $benchmarkGitRevision,
+            webPods: .,
+            configuration: {
+                expectedSanitizedConfigSha256:
+                    $expectedSanitizedConfigSha256,
+                actualSanitizedConfigSha256:
+                    $actualSanitizedConfigSha256,
+                passed: $configPassed
+            },
+            passed: (
+                $configPassed
+                and all(.[]; .passed == true)
+            )
+        }' "$identity_items" \
+        > "$ARTIFACT_DIR/cluster/runtime-identity-before.json" || {
+            rm -f -- "$identity_items"
+            return 1
+        }
+    rm -f -- "$identity_items"
+    ((mismatch == 0))
 }
 
 capture_restart_counts() {
@@ -1543,6 +1680,7 @@ write_workload_metadata() {
         --arg configMapReferencesSha256 "$(sha256sum "$SCRIPT_DIR/configmap_references.py" | awk '{print $1}')" \
         --arg arrivalGateSha256 "$(sha256sum "$SCRIPT_DIR/check_arrival_gate.py" | awk '{print $1}')" \
         --arg slowReaderSha256 "$(sha256sum "$SCRIPT_DIR/slow_reader.py" | awk '{print $1}')" \
+        --arg runtimeIdentitySha256 "$(sha256sum "$RUNTIME_IDENTITY_SCRIPT" | awk '{print $1}')" \
         --argjson mapIds "$MANIFEST_MAP_IDS_JSON" \
         --argjson configMaps "$CONFIGMAPS_JSON" \
         --argjson derivedConfigMaps "$derived_configmaps_json" \
@@ -1674,7 +1812,8 @@ write_workload_metadata() {
                 configSanitizerSha256: $configSanitizerSha256,
                 configMapReferencesSha256: $configMapReferencesSha256,
                 arrivalGateSha256: $arrivalGateSha256,
-                slowReaderSha256: $slowReaderSha256
+                slowReaderSha256: $slowReaderSha256,
+                runtimeIdentitySha256: $runtimeIdentitySha256
             }
         }' > "$ARTIFACT_DIR/inputs/workload.json"
 }
@@ -1695,7 +1834,6 @@ if (($(printf '%s\n' "${ALL_PODS[@]}" | sort | uniq -d | wc -l) > 0)); then
 fi
 
 BASE_URL="http://$SERVICE.$NAMESPACE.svc.cluster.local:$SERVICE_PORT"
-BENCHMARK_COMMIT="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
 
 kube get service "$SERVICE" -o name >/dev/null
 validate_ready_pod "$LOADGEN_POD"
@@ -1778,6 +1916,8 @@ cp -- "$SCRIPT_DIR/slow_reader.py" \
     "$ARTIFACT_DIR/inputs/slow_reader.py"
 cp -- "$SCRIPT_DIR/generate_schedule.py" \
     "$ARTIFACT_DIR/inputs/generate_schedule.py"
+cp -- "$RUNTIME_IDENTITY_SCRIPT" \
+    "$ARTIFACT_DIR/inputs/runtime_identity.py"
 if [[ -n "$SCHEDULE_ENTRY_JSON" ]]; then
     cp -- "$MATRIX" "$ARTIFACT_DIR/inputs/matrix.json"
     cp -- "$SCHEDULE" "$ARTIFACT_DIR/inputs/schedule.json"
@@ -1799,6 +1939,7 @@ write_workload_metadata
         check_arrival_gate.py \
         slow_reader.py \
         generate_schedule.py \
+        runtime_identity.py \
         workload.json > SHA256SUMS
     if [[ -n "$SCHEDULE_ENTRY_JSON" ]]; then
         sha256sum matrix.json schedule.json schedule-entry.json >> SHA256SUMS
@@ -1824,6 +1965,8 @@ kube exec -i "pod/$LOADGEN_POD" -c k6 -- \
     sh "$REMOTE_ROOT/inputs/bluemap.js" < "$K6_SCRIPT"
 
 capture_snapshot_set before
+verify_formal_runtime_identity ||
+    die "Formal runtime image or sanitized configuration identity does not match"
 verify_service_endpoints before ||
     die "Ready EndpointSlice Pod targets do not exactly match --web-pod targets"
 capture_restart_counts "$ARTIFACT_DIR/cluster/restarts-case-before.json"

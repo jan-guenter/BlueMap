@@ -1,0 +1,293 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:bluemap:web-performance-schedule:2",
+  "title": "BlueMap generated formal web-performance schedule",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "formatVersion",
+    "matrixSha256",
+    "scheduleSeed",
+    "traceSeed",
+    "benchmarkGitRevision",
+    "repetitions",
+    "entries"
+  ],
+  "properties": {
+    "formatVersion": {
+      "const": 2
+    },
+    "matrixSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "scheduleSeed": {
+      "type": "string",
+      "minLength": 1
+    },
+    "traceSeed": {
+      "type": "string",
+      "minLength": 1
+    },
+    "benchmarkGitRevision": {
+      "$ref": "#/$defs/gitRevision"
+    },
+    "repetitions": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+    },
+    "gitRevision": {
+      "type": "string",
+      "pattern": "^(?!0{40}$)[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$"
+    },
+    "imageDigest": {
+      "type": "string",
+      "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*(ms|s|m|h)$"
+    },
+    "encoding": {
+      "enum": [
+        "gzip",
+        "zstd",
+        "deflate",
+        "identity"
+      ]
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "name",
+        "digest"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "container",
+            "ephemeralContainer",
+            "initContainer"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "digest": {
+          "$ref": "#/$defs/imageDigest"
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entryId",
+        "sequence",
+        "block",
+        "ordinalWithinCase",
+        "matrixCaseId",
+        "variantId",
+        "runnerCaseId",
+        "profile",
+        "rate",
+        "viewers",
+        "markerIntervalSeconds",
+        "contractMode",
+        "implementation",
+        "storageType",
+        "databaseBackend",
+        "replicaCount",
+        "benchmarkGitRevision",
+        "expectedImages",
+        "expectedSanitizedConfigSha256",
+        "acceptEncoding",
+        "storedEncoding",
+        "traceSeed",
+        "manifestSha256",
+        "mapIds",
+        "warmupDuration",
+        "measurementDuration",
+        "cooldownSeconds",
+        "minimumAchievedRateRatio",
+        "preAllocatedVUs",
+        "maxVUs",
+        "latencyP95Milliseconds",
+        "latencyP99Milliseconds"
+      ],
+      "properties": {
+        "entryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "block": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ordinalWithinCase": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "matrixCaseId": {
+          "$ref": "#/$defs/id"
+        },
+        "variantId": {
+          "$ref": "#/$defs/id"
+        },
+        "runnerCaseId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+        },
+        "profile": {
+          "enum": [
+            "static",
+            "hot-tile",
+            "random-tiles",
+            "large-tile",
+            "settings",
+            "textures",
+            "large-object",
+            "missing-tile",
+            "conditional",
+            "live-viewers",
+            "map-data-mixed",
+            "browser-mixed"
+          ]
+        },
+        "rate": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "viewers": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "markerIntervalSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "contractMode": {
+          "enum": [
+            "enhanced",
+            "legacy"
+          ]
+        },
+        "implementation": {
+          "enum": [
+            "php",
+            "java",
+            "rust"
+          ]
+        },
+        "storageType": {
+          "enum": [
+            "sql",
+            "file"
+          ]
+        },
+        "databaseBackend": {
+          "enum": [
+            "postgresql",
+            "mariadb",
+            "none"
+          ]
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "benchmarkGitRevision": {
+          "$ref": "#/$defs/gitRevision"
+        },
+        "expectedImages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/image"
+          }
+        },
+        "expectedSanitizedConfigSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "acceptEncoding": {
+          "$ref": "#/$defs/encoding"
+        },
+        "storedEncoding": {
+          "$ref": "#/$defs/encoding"
+        },
+        "traceSeed": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mapIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "warmupDuration": {
+          "$ref": "#/$defs/duration"
+        },
+        "measurementDuration": {
+          "$ref": "#/$defs/duration"
+        },
+        "cooldownSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minimumAchievedRateRatio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "preAllocatedVUs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxVUs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "latencyP95Milliseconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "latencyP99Milliseconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  }
+}

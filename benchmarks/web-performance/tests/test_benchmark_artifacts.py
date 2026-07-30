@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
+
 import argparse
 import hashlib
 import json
@@ -23,6 +25,7 @@ import check_arrival_gate
 import configmap_references
 import generate_schedule
 import probe_delivery_cache
+import runtime_identity
 import sanitize_kubernetes_resource
 import sanitize_configmap
 import slow_reader
@@ -157,6 +160,152 @@ class ConfigMapSnapshotTests(unittest.TestCase):
                     "binaryData": {"blob": "AA=="},
                 },
                 "2026-07-30T00:00:00.000Z",
+            )
+
+
+class RuntimeIdentityTests(unittest.TestCase):
+    def test_resolves_every_pod_container_kind_to_an_immutable_digest(
+        self,
+    ) -> None:
+        pod = {
+            "kind": "Pod",
+            "spec": {
+                "containers": [{"name": "web"}],
+                "initContainers": [{"name": "driver"}],
+                "ephemeralContainers": [{"name": "debug"}],
+            },
+            "status": {
+                "containerStatuses": [
+                    {
+                        "name": "web",
+                        "imageID": "containerd://sha256:" + "1" * 64,
+                    }
+                ],
+                "initContainerStatuses": [
+                    {
+                        "name": "driver",
+                        "imageID": "example.invalid/driver@sha256:" + "2" * 64,
+                    }
+                ],
+                "ephemeralContainerStatuses": [
+                    {
+                        "name": "debug",
+                        "imageID": "docker-pullable://debug@sha256:" + "3" * 64,
+                    }
+                ],
+            },
+        }
+
+        self.assertEqual(
+            runtime_identity.pod_images(pod),
+            [
+                {
+                    "kind": "container",
+                    "name": "web",
+                    "digest": "sha256:" + "1" * 64,
+                },
+                {
+                    "kind": "ephemeralContainer",
+                    "name": "debug",
+                    "digest": "sha256:" + "3" * 64,
+                },
+                {
+                    "kind": "initContainer",
+                    "name": "driver",
+                    "digest": "sha256:" + "2" * 64,
+                },
+            ],
+        )
+
+    def test_rejects_missing_status_and_non_immutable_image_ids(self) -> None:
+        pod = {
+            "kind": "Pod",
+            "spec": {"containers": [{"name": "web"}]},
+            "status": {"containerStatuses": []},
+        }
+        with self.assertRaisesRegex(ValueError, "do not exactly match"):
+            runtime_identity.pod_images(pod)
+
+        pod["status"]["containerStatuses"] = [
+            {"name": "web", "imageID": "example.invalid/web:latest"}
+        ]
+        with self.assertRaisesRegex(ValueError, "not an immutable"):
+            runtime_identity.pod_images(pod)
+
+    def test_sanitized_configuration_identity_is_stable_and_secret_free(
+        self,
+    ) -> None:
+        def configmaps(secret: str, public_value: str, reverse: bool) -> dict:
+            items = [
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "bluemap-perf-b"},
+                    "data": {
+                        "storage.conf": (
+                            f"password = {secret}\npublic = {public_value}\n"
+                        )
+                    },
+                },
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "bluemap-perf-a"},
+                    "data": {"web.conf": "port = 8100\n"},
+                },
+            ]
+            return {"kind": "List", "items": list(reversed(items)) if reverse else items}
+
+        first = runtime_identity.config_identity_from_snapshots(
+            runtime_identity.sanitize_configmaps(configmaps("one", "same", False))
+        )
+        second = runtime_identity.config_identity_from_snapshots(
+            runtime_identity.sanitize_configmaps(configmaps("two", "same", True))
+        )
+        changed = runtime_identity.config_identity_from_snapshots(
+            runtime_identity.sanitize_configmaps(configmaps("two", "changed", True))
+        )
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(
+            first["sanitizedConfigSha256"],
+            changed["sanitizedConfigSha256"],
+        )
+        self.assertNotIn("one", json.dumps(first))
+        self.assertNotIn("two", json.dumps(second))
+        self.assertEqual(
+            [item["name"] for item in first["configMaps"]],
+            ["bluemap-perf-a", "bluemap-perf-b"],
+        )
+
+    def test_expected_identity_rejects_placeholders_and_unsorted_images(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "40-character"):
+            runtime_identity.validate_git_revision(
+                "REPLACE_WITH_40_CHARACTER_BENCHMARK_GIT_REVISION",
+                "revision",
+            )
+        with self.assertRaisesRegex(ValueError, "all-zero"):
+            runtime_identity.validate_digest(
+                "sha256:" + "0" * 64,
+                "image",
+                prefix=True,
+            )
+        with self.assertRaisesRegex(ValueError, "sorted"):
+            runtime_identity.validate_expected_images(
+                [
+                    {
+                        "kind": "initContainer",
+                        "name": "driver",
+                        "digest": "sha256:" + "1" * 64,
+                    },
+                    {
+                        "kind": "container",
+                        "name": "web",
+                        "digest": "sha256:" + "2" * 64,
+                    },
+                ]
             )
 
 
@@ -409,6 +558,20 @@ class PrometheusCaptureTests(unittest.TestCase):
 
 
 class OriginRunnerStaticTests(unittest.TestCase):
+    @staticmethod
+    def resolved_matrix() -> dict:
+        matrix = generate_schedule.load_json(BENCHMARK_ROOT / "matrix.example.json")
+        matrix["benchmarkGitRevision"] = "1" * 40
+        matrix["manifestSha256"] = "2" * 64
+        for variant_index, variant in enumerate(matrix["variants"], start=1):
+            for image_index, image in enumerate(variant["expectedImages"], start=1):
+                digit = format((variant_index + image_index) % 15 + 1, "x")
+                image["digest"] = "sha256:" + digit * 64
+            variant["expectedSanitizedConfigSha256"] = (
+                format(variant_index + 8, "x") * 64
+            )
+        return matrix
+
     def test_help_does_not_require_cluster_access(self) -> None:
         result = subprocess.run(
             ["bash", str(TOOLS_DIR / "run_origin_case.sh"), "--help"],
@@ -435,15 +598,27 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("configmap_references.py", runner)
         self.assertIn("check_arrival_gate.py", runner)
         self.assertIn("DESIRED_WEB_REPLICA_COUNT", runner)
+        self.assertIn("verify_formal_runtime_identity", runner)
+        self.assertIn("runtime_identity.py", runner)
+        self.assertNotIn("printf 'unknown'", runner)
 
     def test_formal_schedule_is_seeded_balanced_and_tamper_evident(self) -> None:
         matrix_path = BENCHMARK_ROOT / "matrix.example.json"
-        matrix = generate_schedule.load_json(matrix_path)
+        unresolved = generate_schedule.load_json(matrix_path)
         digest = generate_schedule.matrix_sha256(matrix_path)
+        with self.assertRaisesRegex(ValueError, "benchmarkGitRevision"):
+            generate_schedule.build_schedule(unresolved, digest)
+
+        matrix = self.resolved_matrix()
         first = generate_schedule.build_schedule(matrix, digest)
         second = generate_schedule.build_schedule(matrix, digest)
 
         self.assertEqual(first, second)
+        self.assertEqual(first["formatVersion"], 2)
+        self.assertEqual(
+            first["benchmarkGitRevision"],
+            matrix["benchmarkGitRevision"],
+        )
         generate_schedule.validate_schedule(matrix, digest, first)
         counts = {}
         for entry in first["entries"]:
@@ -465,6 +640,15 @@ class OriginRunnerStaticTests(unittest.TestCase):
                 variant["databaseBackend"],
             )
             self.assertEqual(entry["replicaCount"], variant["replicaCount"])
+            self.assertEqual(
+                entry["benchmarkGitRevision"],
+                matrix["benchmarkGitRevision"],
+            )
+            self.assertEqual(entry["expectedImages"], variant["expectedImages"])
+            self.assertEqual(
+                entry["expectedSanitizedConfigSha256"],
+                variant["expectedSanitizedConfigSha256"],
+            )
         self.assertTrue(all(count == 1 for count in counts.values()))
 
         for case in matrix["cases"]:
@@ -488,6 +672,50 @@ class OriginRunnerStaticTests(unittest.TestCase):
         tampered["entries"][0]["variantId"] = "tampered"
         with self.assertRaisesRegex(ValueError, "does not exactly match"):
             generate_schedule.validate_schedule(matrix, digest, tampered)
+
+    def test_formal_identity_gate_precedes_correctness_and_load(self) -> None:
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+        identity_call = runner.index(
+            "capture_snapshot_set before\n"
+            "verify_formal_runtime_identity ||"
+        )
+        case_start = runner.index('CASE_START_EPOCH="$(date -u +%s)"')
+        correctness = runner.index(
+            'set_phase "$repetition" "correctness"',
+        )
+
+        self.assertLess(identity_call, case_start)
+        self.assertLess(identity_call, correctness)
+        self.assertIn("Formal runs require a clean tracked Git worktree", runner)
+        self.assertIn(
+            "Benchmark Git revision does not match the formal schedule",
+            runner,
+        )
+        self.assertIn("expectedImages", runner)
+        self.assertIn("expectedSanitizedConfigSha256", runner)
+
+    def test_identity_schemas_are_versioned_and_reject_placeholders(self) -> None:
+        matrix_schema = json.loads(
+            (BENCHMARK_ROOT / "matrix.schema.json").read_text(encoding="utf-8")
+        )
+        schedule_schema = json.loads(
+            (BENCHMARK_ROOT / "schedule.schema.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(matrix_schema["properties"]["formatVersion"]["const"], 2)
+        self.assertEqual(schedule_schema["properties"]["formatVersion"]["const"], 2)
+        self.assertIn(
+            "benchmarkGitRevision",
+            matrix_schema["required"],
+        )
+        self.assertIn(
+            "expectedImages",
+            matrix_schema["$defs"]["variant"]["required"],
+        )
+        self.assertNotRegex(
+            "REPLACE_WITH_40_CHARACTER_BENCHMARK_GIT_REVISION",
+            matrix_schema["$defs"]["gitRevision"]["pattern"],
+        )
 
     def test_k6_workload_has_formal_arrival_and_exact_status_gates(self) -> None:
         script = (BENCHMARK_ROOT / "k6" / "bluemap.js").read_text(encoding="utf-8")

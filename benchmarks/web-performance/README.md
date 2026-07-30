@@ -307,16 +307,75 @@ case.
 
 Formal work starts from a frozen machine-readable matrix. Copy and edit the
 example once, generate the seeded balanced schedule, validate it, and archive
-both hashes before the first run:
+both hashes before the first run. `matrix.example.json` deliberately contains
+invalid `REPLACE_WITH_...` values and cannot generate a schedule as checked
+in. This prevents an unresolved example from being mistaken for a formal
+matrix. `matrix.schema.json` and `schedule.schema.json` describe format
+version 2; `generate_schedule.py` additionally enforces ordering,
+cross-reference, balance, and placeholder rules.
+
+First deploy each frozen candidate and collect its expected runtime identity
+with read-only queries. `pod-images` includes every normal, init, and
+ephemeral container and uses the resolved `status.*ContainerStatuses[].imageID`
+digest, not an image tag or registry index digest:
 
 ```shell
-MANIFEST_SHA256=$(sha256sum \
+benchmark_identity_dir="$(mktemp -d)"
+variant_id=java-new-postgresql
+web_pod=bluemap-perf-java-POD-SUFFIX
+
+kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
+  get pod "$web_pod" -o json |
+  python3 benchmarks/web-performance/tools/runtime_identity.py pod-images \
+  > "$benchmark_identity_dir/$variant_id-images.json"
+
+kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
+  get configmap \
+    bluemap-perf-java-config \
+    bluemap-perf-java-storage \
+    -o json |
+  python3 benchmarks/web-performance/tools/runtime_identity.py configmaps \
+  > "$benchmark_identity_dir/$variant_id-config.json"
+```
+
+Repeat this for every variant using exactly the ConfigMaps that will be passed
+through its repeated `--configmap` arguments. All selected replicas of one
+variant must report the same complete image array. For configuration, the
+helper first applies the benchmark ConfigMap sanitizer. It hashes canonical
+JSON for each sanitized `.data` object, sorts the
+`{name, sanitizedDataSha256}` entries, then hashes that canonical array.
+ConfigMap names are therefore part of the identity; capture timestamps,
+resource versions, labels, and Secrets are not. The output's
+`sanitizedConfigSha256` is the variant's
+`expectedSanitizedConfigSha256`.
+
+Copy the example, replace `benchmarkGitRevision` with the exact checked-out
+40-character commit, replace `manifestSha256`, and set each variant's complete
+`expectedImages` array and `expectedSanitizedConfigSha256` from those helper
+outputs. Do not edit the tracked example in place because formal runs require
+a clean tracked worktree:
+
+```shell
+benchmark_git_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+manifest_sha256="$(sha256sum \
   benchmarks/web-performance/artifacts/snapshot/manifest.json |
   awk '{print $1}')
-jq --arg sha256 "$MANIFEST_SHA256" \
-  '.manifestSha256 = $sha256' \
-  benchmarks/web-performance/matrix.example.json \
-  > benchmarks/web-performance/artifacts/snapshot/matrix.json
+cp benchmarks/web-performance/matrix.example.json \
+  benchmarks/web-performance/artifacts/snapshot/matrix.json
+
+# Resolve every REPLACE_WITH_... value in the copied matrix. For each variant,
+# paste the entire *-images.json array and the corresponding config output's
+# sanitizedConfigSha256. Then set the two common identities:
+matrix_tmp="$(mktemp)"
+jq \
+  --arg revision "$benchmark_git_revision" \
+  --arg manifest "$manifest_sha256" \
+  '.benchmarkGitRevision = $revision | .manifestSha256 = $manifest' \
+  benchmarks/web-performance/artifacts/snapshot/matrix.json \
+  > "$matrix_tmp"
+mv "$matrix_tmp" \
+  benchmarks/web-performance/artifacts/snapshot/matrix.json
+
 python3 benchmarks/web-performance/tools/generate_schedule.py generate \
   benchmarks/web-performance/artifacts/snapshot/matrix.json \
   benchmarks/web-performance/artifacts/snapshot/schedule.json
@@ -330,7 +389,9 @@ sha256sum \
 
 Every block contains every case/variant combination exactly once. Each matrix
 variant explicitly records its implementation, storage type, database backend,
-and replica count. The generator deterministically shuffles case order and
+replica count, resolved image identities, and sanitized rendered-configuration
+identity. The exact benchmark Git revision is copied into the schedule and
+every entry. The generator deterministically shuffles case order and
 creates a seeded variant base order, then rotates the latter across blocks so
 every variant occupies each ordinal position equally, or within one occurrence
 when the repetition count is not divisible by the variant count. Its validator
@@ -341,7 +402,13 @@ runner invocation. The runner rejects any identity, service shape, case ID,
 profile, rate, viewer count, encoding, contract mode, trace seed, or latency
 gate that differs from the selected entry. It independently requires the
 schedule replica count to equal both the number of named web Pods and the sum
-of desired replicas in the named Deployments.
+of desired replicas in the named Deployments. Before any correctness request,
+warm-up, or measured load, it also requires a clean tracked worktree at the
+scheduled commit, verifies the committed runner/workload/helper bytes, captures
+the selected Pods and ConfigMaps, and requires their actual image and sanitized
+configuration identities to exactly match the entry. A mismatch is written to
+`cluster/runtime-identity-before.json` and aborts the run before load
+generation.
 
 The resulting order has this shape:
 
@@ -544,6 +611,8 @@ The local `artifacts/<case-id>/` directory contains:
 - exact copies and SHA-256 hashes of the manifest, k6/contract scripts,
   runner helpers, workload parameters, and formal matrix/schedule entry when
   configured;
+- the scheduled benchmark revision plus the expected/actual resolved image and
+  sanitized rendered-configuration identities checked before load generation;
 - sanitized before/after Service, Deployment, and Pod specs;
 - sanitized explicitly selected ConfigMaps, their content hashes, and a
   before/after immutability check, plus the automatically derived reference
