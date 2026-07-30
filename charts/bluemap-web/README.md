@@ -144,12 +144,16 @@ only the writer versions must not overlap.
 ## Scalable PHP-FPM data tier
 
 BlueMap's external SQL webserver design uses its `sql.php` script to translate
-normal `/maps/...` requests into SQL queries. Enable that tier with:
+normal `/maps/...` requests into SQL queries. The PHP image intentionally keeps
+the existing upstream script unchanged. It is retained as a compatibility and
+performance baseline; it does not consume the new SQL cache metadata or provide
+the Java server's enhanced validator and unsupported-encoding responses.
+
+Enable that tier with:
 
 ```yaml
 phpFpm:
   enabled: true
-  tileCacheMaxAge: 60
   replicaCount: 4
 
 ingress:

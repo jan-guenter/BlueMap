@@ -47,8 +47,6 @@ spec:
               value: {{ .Values.storage.sql.port | quote }}
             - name: BLUEMAP_SQL_DATABASE
               value: {{ .Values.storage.sql.database | quote }}
-            - name: BLUEMAP_TILE_CACHE_MAX_AGE
-              value: {{ .Values.phpFpm.tileCacheMaxAge | quote }}
             - name: BLUEMAP_SQL_USERNAME
               valueFrom:
                 secretKeyRef:

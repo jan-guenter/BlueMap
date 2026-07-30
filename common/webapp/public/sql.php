@@ -14,7 +14,6 @@ $port     = intval(envOrDefault('BLUEMAP_SQL_PORT', '3306'));
 $username = envOrDefault('BLUEMAP_SQL_USERNAME', 'root');
 $password = envOrDefault('BLUEMAP_SQL_PASSWORD', '');
 $database = envOrDefault('BLUEMAP_SQL_DATABASE', 'bluemap');
-$tileCacheMaxAge = max(0, intval(envOrDefault('BLUEMAP_TILE_CACHE_MAX_AGE', '60')));
 
 // !!! END - DONT CHANGE ANYTHING AFTER THIS LINE !!!
 
@@ -80,10 +79,9 @@ function error($code, $message = null) {
 
     http_response_code($code);
     header("Content-Type: text/plain");
-    $body = "BlueMap php-script - $code\n";
-    if ($message != null) $body .= $message."\n";
-    $body .= "Requested Path: $path";
-    send($body);
+    echo "BlueMap php-script - $code\n";
+    if ($message != null) echo $message."\n";
+    echo "Requested Path: $path";
     exit;
 }
 
@@ -120,189 +118,11 @@ function getMimeType($path) {
 }
 
 function send($data) {
-    if ($_SERVER['REQUEST_METHOD'] === 'HEAD') return;
     if (is_resource($data)) {
         fpassthru($data);
     } else {
         echo $data;
     }
-}
-
-function binaryValue($value) {
-    if (is_resource($value)) $value = stream_get_contents($value);
-    if (is_string($value) && startsWith($value, '\\x')) {
-        $hex = substr($value, 2);
-        if (ctype_xdigit($hex)) return hex2bin($hex);
-    }
-    return $value;
-}
-
-function parseQuality($value) {
-    $value = trim($value);
-    if (!preg_match('/^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/D', $value))
-        return 0.0;
-    return floatval($value);
-}
-
-function encodingAccepted($requiredEncoding) {
-    $requiredEncoding = strtolower($requiredEncoding);
-    $header = issetOrElse($_SERVER['HTTP_ACCEPT_ENCODING'], null);
-    if ($header === null) return true;
-    if (trim($header) === '') return $requiredEncoding === 'identity';
-
-    $requiredQuality = null;
-    $wildcardQuality = null;
-    foreach (explode(',', $header) as $entry) {
-        $parts = explode(';', trim($entry));
-        $encoding = strtolower(trim(array_shift($parts)));
-        if ($encoding === '') continue;
-
-        $quality = 1.0;
-        $qualitySeen = false;
-        foreach ($parts as $parameter) {
-            $pair = explode('=', trim($parameter), 2);
-            if (count($pair) === 2 && strtolower(trim($pair[0])) === 'q') {
-                $quality = $qualitySeen ? 0.0 : parseQuality($pair[1]);
-                $qualitySeen = true;
-            }
-        }
-
-        if ($encoding === $requiredEncoding)
-            $requiredQuality = $requiredQuality === null
-                ? $quality
-                : max($requiredQuality, $quality);
-        if ($encoding === '*')
-            $wildcardQuality = $wildcardQuality === null
-                ? $quality
-                : max($wildcardQuality, $quality);
-    }
-
-    if ($requiredQuality !== null) return $requiredQuality > 0.0;
-    if ($requiredEncoding === 'identity')
-        return $wildcardQuality === null || $wildcardQuality > 0.0;
-    return $wildcardQuality !== null && $wildcardQuality > 0.0;
-}
-
-function notAcceptable($requiredEncoding) {
-    http_response_code(406);
-    header('Cache-Control: no-store');
-    header('Vary: Accept-Encoding');
-    header('Content-Type: application/problem+json');
-    header('X-BlueMap-Required-Content-Encoding: '.$requiredEncoding);
-    send(json_encode([
-        'code' => 'bluemap_required_content_encoding',
-        'requiredEncoding' => $requiredEncoding
-    ]));
-    exit;
-}
-
-function etagMatches($header, $etag) {
-    foreach (explode(',', $header) as $candidate) {
-        $candidate = trim($candidate);
-        if (startsWith(strtoupper($candidate), 'W/')) $candidate = substr($candidate, 2);
-        if ($candidate === '*') return true;
-        if ($etag !== null && $candidate === $etag) return true;
-    }
-    return false;
-}
-
-function parseHttpDate($value) {
-    $timezone = new DateTimeZone('UTC');
-    $formats = [
-        ['!D, d M Y H:i:s \G\M\T', trim($value)],
-        ['!l, d-M-y H:i:s \G\M\T', trim($value)],
-        ['!D M j H:i:s Y', preg_replace('/\s+/', ' ', trim($value))]
-    ];
-
-    foreach ($formats as [$format, $candidate]) {
-        $date = DateTimeImmutable::createFromFormat($format, $candidate, $timezone);
-        $errors = DateTimeImmutable::getLastErrors();
-        if ($date !== false && ($errors === false
-                || ($errors['warning_count'] === 0 && $errors['error_count'] === 0)))
-            return $date->getTimestamp();
-    }
-
-    return null;
-}
-
-function isMissingCacheMetadataColumn($exception) {
-    $sqlState = strtoupper(strval($exception->getCode()));
-    if ($sqlState === '42S22' || $sqlState === '42703') return true;
-    if (isset($exception->errorInfo[1]) && intval($exception->errorInfo[1]) === 1054)
-        return true;
-
-    $message = strtolower($exception->getMessage());
-    $mentionsMetadata = strpos($message, 'content_hash') !== false
-        || strpos($message, 'updated_at') !== false;
-    $isUnknownColumn = strpos($message, 'unknown column') !== false
-        || strpos($message, 'does not exist') !== false
-        || strpos($message, 'no such column') !== false;
-    return $mentionsMetadata && $isUnknownColumn;
-}
-
-function fetchStoredRow($sql, $query, $legacyQuery, $parameters) {
-    foreach ([$query, $legacyQuery] as $attempt => $statementSql) {
-        try {
-            $statement = $sql->prepare($statementSql);
-            foreach ($parameters as $name => [$value, $type])
-                $statement->bindValue($name, $value, $type);
-            $statement->setFetchMode(PDO::FETCH_ASSOC);
-            $statement->execute();
-            $line = $statement->fetch();
-            return $line === false ? null : $line;
-        } catch (PDOException $exception) {
-            if ($attempt > 0 || !isMissingCacheMetadataColumn($exception))
-                throw $exception;
-        }
-    }
-
-    return null;
-}
-
-function sendStored($line, $contentType, $cacheControl) {
-    $compression = $line['key'];
-    $requiredEncoding = $compression === 'bluemap:none'
-        ? 'identity'
-        : issetOrElse($GLOBALS['compressionHeaderMap'][$compression], null);
-    if ($requiredEncoding === null)
-        error(500, 'Unsupported storage compression');
-    if (!encodingAccepted($requiredEncoding))
-        notAcceptable($requiredEncoding);
-
-    $contentHash = binaryValue($line['content_hash']);
-    $etag = $contentHash === null ? null : '"'.bin2hex($contentHash).'"';
-    $updatedAt = $line['updated_at'] === null ? 0 : intval($line['updated_at']);
-    $lastModified = $updatedAt <= 0
-        ? null
-        : gmdate('D, d M Y H:i:s', intdiv($updatedAt, 1000)).' GMT';
-
-    $notModified = false;
-    $ifNoneMatch = issetOrElse($_SERVER['HTTP_IF_NONE_MATCH'], null);
-    if ($ifNoneMatch !== null) {
-        $notModified = etagMatches($ifNoneMatch, $etag);
-    } else {
-        $ifModifiedSince = issetOrElse($_SERVER['HTTP_IF_MODIFIED_SINCE'], null);
-        if ($ifModifiedSince !== null && $updatedAt > 0) {
-            $since = parseHttpDate($ifModifiedSince);
-            $notModified = $since !== null
-                && $since >= intdiv($updatedAt, 1000);
-        }
-    }
-
-    header('Cache-Control: '.$cacheControl);
-    header('Vary: Accept-Encoding');
-    header('Content-Type: '.$contentType);
-    compressionHeader($compression);
-    if ($etag !== null) header('ETag: '.$etag);
-    if ($lastModified !== null) header('Last-Modified: '.$lastModified);
-
-    if ($notModified) {
-        http_response_code(304);
-        exit;
-    }
-
-    send($line['data']);
-    exit;
 }
 
 // determine relative request-path
@@ -320,16 +140,11 @@ if ($path === "") {
 // root => index.html
 if ($path === "/") {
     header("Content-Type: text/html");
-    send(file_get_contents("index.html"));
+    echo file_get_contents("index.html");
     exit;
 }
 
 if (startsWith($path, "/maps/")) {
-    if ($_SERVER['REQUEST_METHOD'] !== 'GET' && $_SERVER['REQUEST_METHOD'] !== 'HEAD') {
-        http_response_code(405);
-        header('Allow: GET, HEAD');
-        exit;
-    }
 
     // determine map-path
     $pathParts = explode("/", substr($path, strlen("/maps/")), 2);
@@ -357,8 +172,8 @@ if (startsWith($path, "/maps/")) {
 
         // query for tile
         try {
-            $query = "
-                SELECT d.data, c.key, d.content_hash, d.updated_at
+            $statement = $sql->prepare("
+                SELECT d.data, c.key
                 FROM bluemap_grid_storage_data d
                 INNER JOIN bluemap_map m
                  ON d.map = m.id
@@ -370,36 +185,27 @@ if (startsWith($path, "/maps/")) {
                  AND s.key = :storage
                  AND d.x = :x
                  AND d.z = :z
-            ";
-            $legacyQuery = "
-                SELECT d.data, c.key, NULL AS content_hash, NULL AS updated_at
-                FROM bluemap_grid_storage_data d
-                INNER JOIN bluemap_map m
-                 ON d.map = m.id
-                INNER JOIN bluemap_grid_storage s
-                 ON d.storage = s.id
-                INNER JOIN bluemap_compression c
-                 ON d.compression = c.id
-                WHERE m.map_id = :map_id
-                 AND s.key = :storage
-                 AND d.x = :x
-                 AND d.z = :z
-            ";
-            $line = fetchStoredRow($sql, $query, $legacyQuery, [
-                ':map_id' => [$mapId, PDO::PARAM_STR],
-                ':storage' => [$storage, PDO::PARAM_STR],
-                ':x' => [$tileX, PDO::PARAM_INT],
-                ':z' => [$tileZ, PDO::PARAM_INT]
-            ]);
+            ");
+            $statement->bindParam( ':map_id', $mapId, PDO::PARAM_STR );
+            $statement->bindParam( ':storage', $storage, PDO::PARAM_STR );
+            $statement->bindParam( ':x', $tileX, PDO::PARAM_INT );
+            $statement->bindParam( ':z', $tileZ, PDO::PARAM_INT );
+            $statement->setFetchMode(PDO::FETCH_ASSOC);
+            $statement->execute();
 
             // return result
-            if ($line !== null) {
-                $contentType = $lod === 0 ? 'application/octet-stream' : 'image/png';
-                sendStored(
-                    $line,
-                    $contentType,
-                    'public,max-age='.$tileCacheMaxAge.',must-revalidate'
-                );
+            if ($line = $statement->fetch()) {
+                header("Cache-Control: public,max-age=86400");
+                compressionHeader($line["key"]);
+
+                if ($lod === 0) {
+                    header("Content-Type: application/octet-stream");
+                } else {
+                    header("Content-Type: image/png");
+                }
+
+                send($line["data"]);
+                exit;
             }
 
         } catch (PDOException $e) { 
@@ -409,7 +215,6 @@ if (startsWith($path, "/maps/")) {
 
         // no content if nothing found
         http_response_code(204);
-        header('Cache-Control: no-store');
         exit;
     }
 
@@ -420,8 +225,8 @@ if (startsWith($path, "/maps/")) {
 
     if ($storage !== null) {
         try {
-            $query = "
-                SELECT d.data, c.key, d.content_hash, d.updated_at
+            $statement = $sql->prepare("
+                SELECT d.data, c.key
                 FROM bluemap_item_storage_data d
                 INNER JOIN bluemap_map m
                  ON d.map = m.id
@@ -431,29 +236,19 @@ if (startsWith($path, "/maps/")) {
                  ON d.compression = c.id
                 WHERE m.map_id = :map_id
                  AND s.key = :storage
-            ";
-            $legacyQuery = "
-                SELECT d.data, c.key, NULL AS content_hash, NULL AS updated_at
-                FROM bluemap_item_storage_data d
-                INNER JOIN bluemap_map m
-                 ON d.map = m.id
-                INNER JOIN bluemap_item_storage s
-                 ON d.storage = s.id
-                INNER JOIN bluemap_compression c
-                 ON d.compression = c.id
-                WHERE m.map_id = :map_id
-                 AND s.key = :storage
-            ";
-            $line = fetchStoredRow($sql, $query, $legacyQuery, [
-                ':map_id' => [$mapId, PDO::PARAM_STR],
-                ':storage' => [$storage, PDO::PARAM_STR]
-            ]);
+            ");
+            $statement->bindParam( ':map_id', $mapId, PDO::PARAM_STR );
+            $statement->bindParam( ':storage', $storage, PDO::PARAM_STR );
+            $statement->setFetchMode(PDO::FETCH_ASSOC);
+            $statement->execute();
 
-            if ($line !== null) {
-                $cacheControl = $mapPath === 'live/players.json'
-                    ? 'private,no-store'
-                    : 'public,no-cache';
-                sendStored($line, getMimeType($mapPath), $cacheControl);
+            if ($line = $statement->fetch()) {
+                header("Cache-Control: public,max-age=86400");
+                header("Content-Type: ".getMimeType($mapPath));
+                compressionHeader($line["key"]);
+
+                send($line["data"]);
+                exit;
             }
         } catch (PDOException $e) { 
             error_log($e->getMessage(), 0);
