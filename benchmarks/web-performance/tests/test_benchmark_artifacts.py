@@ -737,6 +737,8 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("minimumIterationCountThreshold", script)
         self.assertNotRegex(script, r"iterations\s*:\s*\[\s*`rate>=")
         self.assertNotIn("Math.random()", script)
+        self.assertNotIn("data_received{traffic:workload}", script)
+        self.assertNotIn("data_sent{traffic:workload}", script)
 
     def test_file_cases_do_not_require_a_database_target(self) -> None:
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
@@ -746,6 +748,16 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("sample_service_endpoints", runner)
         self.assertIn('if [[ "$phase" == */measurement ]]', runner)
         self.assertIn('$phase-end"', runner)
+        self.assertIn(
+            'sh "$REMOTE_ROOT/repetitions/$repetition_name"',
+            runner,
+        )
+        self.assertIn('[[ -f "$log_file" ]]', runner)
+        self.assertIn(
+            'kube cp "$local_file" "$LOADGEN_POD:$remote_file" -c k6',
+            runner,
+        )
+        self.assertIn('[[ "$actual_sha256" == "$expected_sha256" ]]', runner)
 
     def test_runner_closes_every_prometheus_jq_conditional(self) -> None:
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")

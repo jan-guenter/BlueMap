@@ -460,7 +460,9 @@ All routes known to exist require exactly `200`; random tiles no longer accept
 requires `204`. The conditional profile performs one setup request per k6
 phase, requires its ETag, and sends that validator on every workload request.
 The seed request is tagged `traffic=setup`; workload status, TTFB, latency,
-and sent/received byte submetrics include only `traffic=workload`.
+and iteration metrics include only `traffic=workload`. k6's aggregate
+sent/received byte totals include the one setup response and are reported as
+such rather than as a nonexistent request-tagged submetric.
 
 `map-data-mixed` is the common PHP/Java/Rust origin comparison. The unchanged
 PHP endpoint cannot serve the static web UI and therefore must not be compared
@@ -514,9 +516,11 @@ any change or sampling failure rejects the case.
 The runner does not apply, patch, scale, restart, delete, or replace Kubernetes
 resources. It only reads exact resources and `metrics.k8s.io`, opens a local
 port-forward for the HTTP contract check, and executes k6 in the load-generator
-Pod. When explicitly configured, it also opens a read-only port-forward to one
-exact cluster-local Prometheus Service. The copied workload files and k6 output
-are written to the load-generator Pod's disposable `/artifacts` `emptyDir`.
+Pod. It copies the manifest and workload into that Pod with `kubectl cp` and
+verifies their SHA-256 hashes before use. When explicitly configured, it also
+opens a read-only port-forward to one exact cluster-local Prometheus Service.
+The copied workload files and k6 output are written to the load-generator
+Pod's disposable `/artifacts` `emptyDir`.
 
 Use a unique case ID and current, exact Pod names:
 
@@ -715,8 +719,8 @@ For `live-viewers`, player and marker polling are checked independently, and
 their completed counts must sum exactly to k6's overall iteration count. A
 well-performing scenario therefore cannot hide an under-delivering peer.
 Measurement runs also enforce p95/p99 on
-`http_req_duration{traffic:workload}` and expose workload-only byte submetrics;
-conditional setup traffic is separately tagged and excluded.
+`http_req_duration{traffic:workload}`. Conditional setup traffic is separately
+tagged and excluded from the workload latency and status metrics.
 
 ## Delivery/cache probe
 

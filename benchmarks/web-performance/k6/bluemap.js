@@ -196,8 +196,6 @@ function buildOptions() {
   const commonThresholds = {
     bluemap_unexpected_status: ["rate==0"],
     "http_req_failed{traffic:workload}": ["rate<0.001"],
-    "data_received{traffic:workload}": ["count>=0"],
-    "data_sent{traffic:workload}": ["count>=0"],
     dropped_iterations: ["count==0"],
   };
   if (ENFORCE_LATENCY_GATES) {

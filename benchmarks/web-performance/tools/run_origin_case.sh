@@ -101,7 +101,7 @@ Usage:
 
 Required targets are explicit; every Service, Deployment, and Pod name must
 start with "bluemap-perf-". The runner only performs Kubernetes get, get
---raw, exec into bluemap-perf-loadgen, and port-forward operations.
+--raw, exec/cp into bluemap-perf-loadgen, and port-forward operations.
 
 Workload options:
   --profile NAME                  k6 profile (default: map-data-mixed)
@@ -1275,7 +1275,8 @@ wait_for_port_forward() {
     local log_file="$2"
 
     for _ in {1..100}; do
-        if grep -q 'Forwarding from 127.0.0.1:' "$log_file"; then
+        if [[ -f "$log_file" ]] &&
+            grep -q 'Forwarding from 127.0.0.1:' "$log_file"; then
             return 0
         fi
         if ! kill -0 "$process_id" >/dev/null 2>&1; then
@@ -1427,6 +1428,24 @@ copy_remote_file() {
         return 1
     kube exec "pod/$LOADGEN_POD" -c k6 -- cat "$remote" > "$local_file"
     [[ -s "$local_file" ]]
+}
+
+copy_local_file() {
+    local local_file="$1"
+    local remote_file="$2"
+    local expected_sha256
+    local actual_sha256
+
+    expected_sha256="$(sha256sum -- "$local_file" | awk '{print $1}')"
+    kube exec "pod/$LOADGEN_POD" -c k6 -- \
+        test ! -e "$remote_file" || return 1
+    kube cp "$local_file" "$LOADGEN_POD:$remote_file" -c k6 || return 1
+    actual_sha256="$(
+        kube exec "pod/$LOADGEN_POD" -c k6 -- \
+            sha256sum "$remote_file" |
+            awk '{print $1}'
+    )"
+    [[ "$actual_sha256" == "$expected_sha256" ]]
 }
 
 validate_arrival_gate() {
@@ -1956,16 +1975,10 @@ kube exec "pod/$LOADGEN_POD" -c k6 -- \
     sh -ceu \
     'umask 077; mkdir "$1"; mkdir "$1/inputs" "$1/repetitions"' \
     sh "$REMOTE_ROOT"
-# $1 is expanded by the shell inside the load-generator container.
-# shellcheck disable=SC2016
-kube exec -i "pod/$LOADGEN_POD" -c k6 -- \
-    sh -ceu 'test ! -e "$1"; cat > "$1"' \
-    sh "$REMOTE_ROOT/inputs/manifest.json" < "$MANIFEST"
-# $1 is expanded by the shell inside the load-generator container.
-# shellcheck disable=SC2016
-kube exec -i "pod/$LOADGEN_POD" -c k6 -- \
-    sh -ceu 'test ! -e "$1"; cat > "$1"' \
-    sh "$REMOTE_ROOT/inputs/bluemap.js" < "$K6_SCRIPT"
+copy_local_file "$MANIFEST" "$REMOTE_ROOT/inputs/manifest.json" ||
+    die "Could not copy and verify the manifest in the load-generator Pod"
+copy_local_file "$K6_SCRIPT" "$REMOTE_ROOT/inputs/bluemap.js" ||
+    die "Could not copy and verify the k6 script in the load-generator Pod"
 
 capture_snapshot_set before
 verify_formal_runtime_identity ||
@@ -1986,6 +1999,16 @@ for ((repetition = 1; repetition <= REPETITIONS; repetition++)); do
     repetition_name="$(printf '%02d' "$repetition")"
     repetition_dir="$ARTIFACT_DIR/repetitions/$repetition_name"
     mkdir -- "$repetition_dir"
+    # $1 is expanded by the shell inside the load-generator container.
+    # shellcheck disable=SC2016
+    if ! kube exec "pod/$LOADGEN_POD" -c k6 -- \
+        sh -ceu 'mkdir "$1"' \
+        sh "$REMOTE_ROOT/repetitions/$repetition_name"; then
+        record_failure \
+            "Repetition $repetition: could not create the remote artifact directory"
+        case_failed=1
+        break
+    fi
     capture_restart_counts "$repetition_dir/restarts-before.json"
 
     if ! verify_service_endpoints "repetition-$repetition_name-before"; then
