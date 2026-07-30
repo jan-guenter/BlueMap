@@ -51,6 +51,13 @@ resources:
     cpu: "1"
     memory: 1Gi
 
+# Use the same container-relative heap budget for both Java candidates. The
+# JVM's default 25% MaxRAMPercentage is too small for concurrent 19 MiB SQL
+# objects and measures an avoidable heap-sizing default instead of the server.
+extraEnv:
+  - name: JAVA_TOOL_OPTIONS
+    value: "-XX:MaxRAMPercentage=70.0"
+
 nodeSelector:
   kubernetes.io/hostname: contabo2
 

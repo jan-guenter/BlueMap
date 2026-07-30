@@ -55,6 +55,12 @@ resources:
     cpu: "1"
     memory: 1Gi
 
+# Keep this identical to the legacy Java candidate. A percentage preserves the
+# same heap-to-container ratio if a replica overlay changes the memory limit.
+extraEnv:
+  - name: JAVA_TOOL_OPTIONS
+    value: "-XX:MaxRAMPercentage=70.0"
+
 nodeSelector:
   kubernetes.io/hostname: contabo2
 

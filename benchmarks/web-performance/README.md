@@ -232,6 +232,14 @@ zero replica count. The patch relies on libpq's
 `PGSSLMODE=verify-full` and `PGSSLROOTCERT` settings, so TLS is verified without
 adding TLS-specific PDO fields or changing the legacy endpoint.
 
+Both legacy and optimized Java benchmark values set
+`-XX:MaxRAMPercentage=70.0` through `JAVA_TOOL_OPTIONS`. The JVM otherwise
+defaults to a heap near 25% of the container limit, which cannot hold the
+concurrent 19 MiB SQL responses in the large-object workload. Using the same
+percentage gives both Java implementations the same heap-to-container ratio
+while leaving 30% for metaspace, thread stacks, direct buffers, and other native
+memory. This changes only the disposable benchmark deployments.
+
 ## Published optimized Java and Rust candidates
 
 Install optimized Java and Rust from the immutable OCI chart produced by the

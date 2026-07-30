@@ -314,6 +314,20 @@ class StaticProcedureTests(unittest.TestCase):
 
 
 class BenchmarkValuesTests(unittest.TestCase):
+    def test_java_candidates_use_the_same_container_relative_heap(self) -> None:
+        kubernetes = BENCHMARK_ROOT / "kubernetes"
+        for filename in (
+            "java-postgresql-values.yaml",
+            "java-optimized-postgresql-values.yaml",
+        ):
+            with self.subTest(filename=filename):
+                values = (kubernetes / filename).read_text(encoding="utf-8")
+                self.assertIn("name: JAVA_TOOL_OPTIONS", values)
+                self.assertIn(
+                    'value: "-XX:MaxRAMPercentage=70.0"',
+                    values,
+                )
+
     def test_candidates_use_implicit_app_version_and_external_secrets(self) -> None:
         kubernetes = BENCHMARK_ROOT / "kubernetes"
         candidates = {

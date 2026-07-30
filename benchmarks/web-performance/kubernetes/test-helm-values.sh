@@ -76,6 +76,9 @@ helm template bluemap-perf-rust-mariadb-mtls "$chart" \
     >"$temporary/rust-mariadb-mtls.yaml"
 helm template bluemap-perf-java "$chart" \
     --namespace minecraft \
+    --values "$php_base_values" >"$temporary/java-old.yaml"
+helm template bluemap-perf-java "$chart" \
+    --namespace minecraft \
     --values "$php_base_values" \
     --values "$php_values" >"$temporary/php.yaml"
 helm template bluemap-perf-java-file "$chart" \
@@ -104,6 +107,9 @@ assert_count_at_least "$temporary/java-r1.yaml" \
     "bluemap.guenter.cloud/experiment-id: java-new-postgresql" 2
 assert_count_at_least "$temporary/java-r1.yaml" "cpu: \"1\"" 2
 assert_count_at_least "$temporary/java-r1.yaml" "memory: 1Gi" 2
+assert_contains "$temporary/java-r1.yaml" "name: JAVA_TOOL_OPTIONS"
+assert_contains "$temporary/java-r1.yaml" \
+    "value: -XX:MaxRAMPercentage=70.0"
 assert_absent "$temporary/java-r1.yaml" "kind: Secret"
 
 assert_contains "$temporary/java-r3.yaml" \
@@ -116,6 +122,9 @@ assert_count_at_least "$temporary/java-r3.yaml" \
     "bluemap.guenter.cloud/experiment-id: java-new-postgresql-r3" 2
 assert_contains "$temporary/java-r3.yaml" \
     "image: \"ghcr.io/jan-guenter/bluemap-web:$app_version\""
+assert_contains "$temporary/java-r3.yaml" "name: JAVA_TOOL_OPTIONS"
+assert_contains "$temporary/java-r3.yaml" \
+    "value: -XX:MaxRAMPercentage=70.0"
 assert_absent "$temporary/java-r3.yaml" "kind: Secret"
 
 assert_contains "$temporary/rust-r1.yaml" \
@@ -171,12 +180,18 @@ assert_absent "$temporary/rust-mariadb-mtls.yaml" "kind: Secret"
 
 assert_count_at_least "$temporary/php.yaml" \
     "bluemap.guenter.cloud/experiment-id: php-postgresql-baseline" 2
+assert_contains "$temporary/java-old.yaml" "name: JAVA_TOOL_OPTIONS"
+assert_contains "$temporary/java-old.yaml" \
+    "value: -XX:MaxRAMPercentage=70.0"
 assert_count_at_least "$temporary/php.yaml" "type: Recreate" 2
 assert_contains "$temporary/php.yaml" "pm = static"
 assert_contains "$temporary/php.yaml" "pm.max_children = 12"
 assert_contains "$temporary/php.yaml" \
     "mountPath: /usr/local/etc/php-fpm.d/zz-bluemap.conf"
 assert_contains "$temporary/php.yaml" "max-connections: 12"
+assert_contains "$temporary/php.yaml" "name: JAVA_TOOL_OPTIONS"
+assert_contains "$temporary/php.yaml" \
+    "value: -XX:MaxRAMPercentage=70.0"
 
 for rendered in "$temporary/java-file.yaml" "$temporary/rust-file.yaml"; do
     assert_contains "$rendered" "claimName: bluemap-perf-snapshot"
