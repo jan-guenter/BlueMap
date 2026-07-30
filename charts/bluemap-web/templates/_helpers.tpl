@@ -15,8 +15,12 @@
 {{- end }}
 {{- end }}
 
+{{- define "bluemap-web.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{- define "bluemap-web.labels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
+helm.sh/chart: {{ include "bluemap-web.chart" . | quote }}
 {{ include "bluemap-web.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -70,7 +74,7 @@ app.kubernetes.io/component: sql-data
 {{- end }}
 
 {{- define "bluemap-web.phpLabels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
+helm.sh/chart: {{ include "bluemap-web.chart" . | quote }}
 {{ include "bluemap-web.phpSelectorLabels" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
