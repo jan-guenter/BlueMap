@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd)
+script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
 image="bluemap-rust-web:smoke-$$"
 container=
 temporary=$(mktemp -d)

@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-chart_directory=$(CDPATH= cd -- "$script_directory/.." && pwd)
+script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+chart_directory=$(CDPATH='' cd -- "$script_directory/.." && pwd)
 temporary=$(mktemp -d)
 
 cleanup() {
