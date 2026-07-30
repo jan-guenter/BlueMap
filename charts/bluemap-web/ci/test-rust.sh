@@ -51,6 +51,9 @@ helm template test "$chart_directory" --namespace bluemap \
     >"$temporary/java.yaml"
 assert_contains "$temporary/java.yaml" \
     'image: "ghcr.io/bluemap-minecraft/bluemap-web:dev"'
+assert_contains "$temporary/java.yaml" "name: prepare-file-storage"
+assert_contains "$temporary/java.yaml" "- /usr/bin/mkdir"
+assert_contains "$temporary/java.yaml" '- "/data/maps"'
 assert_absent "$temporary/java.yaml" "config.toml: |"
 assert_absent "$temporary/java.yaml" "bluemap-web-rust:"
 
@@ -64,7 +67,7 @@ assert_contains "$temporary/rust-file.yaml" "claimName: bluemap-maps-rwx"
 assert_contains "$temporary/rust-file.yaml" "tcpSocket:"
 assert_contains "$temporary/rust-file.yaml" "path: /health/ready"
 assert_contains "$temporary/rust-file.yaml" "cpu: 50m"
-assert_contains "$temporary/rust-file.yaml" "memory: 512Mi"
+assert_contains "$temporary/rust-file.yaml" "memory: 1Gi"
 assert_contains "$temporary/rust-file.yaml" "terminationGracePeriodSeconds: 40"
 assert_contains "$temporary/rust-file.yaml" "kubernetes.io/arch: amd64"
 assert_contains "$temporary/rust-file.yaml" "kubernetes.io/os: linux"
@@ -88,7 +91,7 @@ with pathlib.Path(sys.argv[1]).open("rb") as source:
 assert config["tile_cache_max_age_seconds"] == 60
 assert config["runtime_shutdown_seconds"] == 5
 assert config["max_in_flight_requests"] == 8
-assert config["max_object_bytes"] == 64 * 1024 * 1024
+assert config["max_object_bytes"] == 32 * 1024 * 1024
 assert isinstance(config["webapp"]["resolution_default"], float)
 assert [entry["id"] for entry in config["maps"]] == ["world", "nether"]
 assert config["storage"] == {

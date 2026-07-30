@@ -616,15 +616,7 @@ async fn cache_static_responses(request: axum::extract::Request, next: Next) -> 
     let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
     if !response.headers().contains_key(CACHE_CONTROL) {
-        let value = if response.status().is_success() {
-            if is_fingerprinted_static(&path) {
-                "public,max-age=31536000,immutable"
-            } else {
-                "no-cache"
-            }
-        } else {
-            "no-store,no-transform"
-        };
+        let value = static_cache_control(response.status(), &path);
         response
             .headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static(value));
@@ -635,6 +627,18 @@ async fn cache_static_responses(request: axum::extract::Request, next: Next) -> 
             .unwrap_or_else(|_| HeaderValue::from_static("BlueMap")),
     );
     response
+}
+
+fn static_cache_control(status: StatusCode, path: &str) -> &'static str {
+    if status.is_success() || status == StatusCode::NOT_MODIFIED {
+        if is_fingerprinted_static(path) {
+            "public,max-age=31536000,immutable"
+        } else {
+            "no-cache"
+        }
+    } else {
+        "no-store,no-transform"
+    }
 }
 
 fn is_fingerprinted_static(path: &str) -> bool {
@@ -880,5 +884,21 @@ mod tests {
         assert!(!is_fingerprinted_static("/assets/logo.png"));
         assert!(!is_fingerprinted_static("/assets/unfingerprinted.js"));
         assert!(!is_fingerprinted_static("/assets/file-not-a-build-hash.js"));
+    }
+
+    #[test]
+    fn static_revalidation_preserves_the_original_cache_policy() {
+        assert_eq!(
+            static_cache_control(StatusCode::NOT_MODIFIED, "/index.html"),
+            "no-cache"
+        );
+        assert_eq!(
+            static_cache_control(StatusCode::NOT_MODIFIED, "/assets/index-DiwrgTda.js"),
+            "public,max-age=31536000,immutable"
+        );
+        assert_eq!(
+            static_cache_control(StatusCode::NOT_FOUND, "/index.html"),
+            "no-store,no-transform"
+        );
     }
 }

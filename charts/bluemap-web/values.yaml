@@ -22,7 +22,7 @@ webserver:
       dependencyCheckSeconds: 5
       storageTimeoutSeconds: 30
       maxInFlightRequests: 8
-      maxObjectBytes: 67108864
+      maxObjectBytes: 33554432
       tileCacheMaxAgeSeconds: 60
       webapp:
         useCookies: true

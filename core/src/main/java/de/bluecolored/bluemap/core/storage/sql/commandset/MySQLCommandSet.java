@@ -34,6 +34,11 @@ public class MySQLCommandSet extends AbstractCommandSet {
     }
 
     @Override
+    protected boolean supportsCacheMetadata() {
+        return usesBuiltInStatementShapes(MySQLCommandSet.class);
+    }
+
+    @Override
     @Language("mysql")
     public String listExistingTablesStatement() {
         return """
@@ -185,6 +190,16 @@ public class MySQLCommandSet extends AbstractCommandSet {
     public String itemStorageWriteStatement() {
         return """
         REPLACE
+        INTO `bluemap_item_storage_data` (`map`, `storage`, `compression`, `data`)
+        VALUES (?, ?, ?, ?)
+        """;
+    }
+
+    @Override
+    @Language("mysql")
+    public String itemStorageWriteWithMetadataStatement() {
+        return """
+        REPLACE
         INTO `bluemap_item_storage_data` (`map`, `storage`, `compression`, `data`, `content_hash`, `updated_at`)
         VALUES (?, ?, ?, ?, ?, ?)
         """;
@@ -193,6 +208,18 @@ public class MySQLCommandSet extends AbstractCommandSet {
     @Override
     @Language("mysql")
     public String itemStorageReadStatement() {
+        return """
+        SELECT `data`
+        FROM `bluemap_item_storage_data`
+        WHERE `map` = ?
+        AND `storage` = ?
+        AND `compression` = ?
+        """;
+    }
+
+    @Override
+    @Language("mysql")
+    public String itemStorageReadWithMetadataStatement() {
         return """
         SELECT `data`, `content_hash`, `updated_at`
         FROM `bluemap_item_storage_data`
@@ -243,6 +270,16 @@ public class MySQLCommandSet extends AbstractCommandSet {
     public String gridStorageWriteStatement() {
         return """
         REPLACE
+        INTO `bluemap_grid_storage_data` (`map`, `storage`, `x`, `z`, `compression`, `data`)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """;
+    }
+
+    @Override
+    @Language("mysql")
+    public String gridStorageWriteWithMetadataStatement() {
+        return """
+        REPLACE
         INTO `bluemap_grid_storage_data` (`map`, `storage`, `x`, `z`, `compression`, `data`, `content_hash`, `updated_at`)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """;
@@ -251,6 +288,20 @@ public class MySQLCommandSet extends AbstractCommandSet {
     @Override
     @Language("mysql")
     public String gridStorageReadStatement() {
+        return """
+        SELECT `data`
+        FROM `bluemap_grid_storage_data`
+        WHERE `map` = ?
+        AND `storage` = ?
+        AND `x` = ?
+        AND `z` = ?
+        AND `compression` = ?
+        """;
+    }
+
+    @Override
+    @Language("mysql")
+    public String gridStorageReadWithMetadataStatement() {
         return """
         SELECT `data`, `content_hash`, `updated_at`
         FROM `bluemap_grid_storage_data`

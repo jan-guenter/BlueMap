@@ -551,6 +551,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn static_not_modified_response_keeps_its_cache_policy() {
+        let (_temp, state) = fixture().await;
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+        let last_modified = response
+            .headers()
+            .get(header::LAST_MODIFIED)
+            .unwrap()
+            .clone();
+
+        let response = app
+            .oneshot(
+                Request::get("/")
+                    .header(header::IF_MODIFIED_SINCE, last_modified)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+    }
+
+    #[tokio::test]
     async fn root_settings_preserve_map_order_and_health_state() {
         let (_temp, mut state) = fixture().await;
         Arc::get_mut(&mut state.config).unwrap().maps.insert(

@@ -113,9 +113,11 @@ public class WebFilesManager {
             return;
         }
 
-        PosixFileAttributes targetAttributes = target.readAttributes();
-        if (!targetAttributes.owner().equals(source.owner())) target.setOwner(source.owner());
-        if (!targetAttributes.group().equals(source.group())) target.setGroup(source.group());
+        // The replacement is intentionally owned by the process that created
+        // it. A standalone webserver commonly updates a shared webroot whose
+        // previous settings file was written by a different container UID.
+        // Restoring that owner or group would require CAP_CHOWN even when the
+        // directory is correctly group-writable.
         target.setPermissions(source.permissions());
     }
 

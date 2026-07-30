@@ -118,6 +118,113 @@ class SqliteCacheMetadataIntegrationTest {
     }
 
     @Test
+    void legacyAbstractCommandSetsKeepTheirOriginalStatementShapes(
+            @TempDir Path tempDir
+    ) throws Exception {
+        String url = "jdbc:sqlite:" + tempDir.resolve("legacy-command-set.db");
+        createLegacySchema(url);
+
+        try (Database database = new Database(url, Map.of(), 1);
+             CommandSet commands =
+                     new LegacyStatementSqliteCommandSet(database)) {
+            commands.initializeTables();
+
+            byte[] item = "legacy-settings".getBytes();
+            commands.writeItem(
+                    "map", Key.bluemap("settings"), Compression.NONE, item
+            );
+            CommandSet.StoredData storedItem = commands.readItemData(
+                    "map", Key.bluemap("settings"), Compression.NONE
+            );
+            assertNotNull(storedItem);
+            assertArrayEquals(item, storedItem.data());
+            assertNull(storedItem.contentHash());
+            assertEquals(0, storedItem.updatedAt());
+            assertNull(commands.readItemMetadata(
+                    "map", Key.bluemap("settings"), Compression.NONE
+            ));
+
+            byte[] tile = "legacy-tile".getBytes();
+            commands.writeGridItem(
+                    "map", Key.bluemap("hires"), 1, -2,
+                    Compression.NONE, tile
+            );
+            CommandSet.StoredData storedTile = commands.readGridItemData(
+                    "map", Key.bluemap("hires"), 1, -2,
+                    Compression.NONE
+            );
+            assertNotNull(storedTile);
+            assertArrayEquals(tile, storedTile.data());
+            assertNull(storedTile.contentHash());
+            assertEquals(0, storedTile.updatedAt());
+            assertNull(commands.readGridItemMetadata(
+                    "map", Key.bluemap("hires"), 1, -2, Compression.NONE
+            ));
+        }
+    }
+
+    @Test
+    void noOpBuiltInSubclassKeepsMetadataAwareStatementShapes(
+            @TempDir Path tempDir
+    ) throws Exception {
+        String url = "jdbc:sqlite:" + tempDir.resolve("no-op-subclass.db");
+
+        try (Database database = new Database(url, Map.of(), 1);
+             CommandSet commands = new NoOpSqliteCommandSet(database)) {
+            commands.initializeTables();
+
+            byte[] item = "metadata-item".getBytes();
+            commands.writeItem(
+                    "map", Key.bluemap("settings"), Compression.NONE, item
+            );
+            CommandSet.StoredData stored = commands.readItemData(
+                    "map", Key.bluemap("settings"), Compression.NONE
+            );
+            assertNotNull(stored);
+            assertArrayEquals(item, stored.data());
+            assertArrayEquals(
+                    MessageDigest.getInstance("SHA-256").digest(item),
+                    stored.contentHash()
+            );
+            assertTrue(stored.updatedAt() > 0);
+        }
+    }
+
+    @Test
+    void partialLegacyBuiltInSubclassUsesLegacyShapesConsistently(
+            @TempDir Path tempDir
+    ) throws Exception {
+        String url = "jdbc:sqlite:" + tempDir.resolve("partial-subclass.db");
+        createLegacySchema(url);
+
+        try (Database database = new Database(url, Map.of(), 1);
+             CommandSet commands =
+                     new PartialLegacyStatementSqliteCommandSet(database)) {
+            commands.initializeTables();
+
+            commands.writeItem(
+                    "map", Key.bluemap("settings"), Compression.NONE,
+                    "item".getBytes()
+            );
+            CommandSet.StoredData item = commands.readItemData(
+                    "map", Key.bluemap("settings"), Compression.NONE
+            );
+            assertNotNull(item);
+            assertNull(item.contentHash());
+
+            commands.writeGridItem(
+                    "map", Key.bluemap("hires"), 4, 5,
+                    Compression.NONE, "grid".getBytes()
+            );
+            CommandSet.StoredData grid = commands.readGridItemData(
+                    "map", Key.bluemap("hires"), 4, 5, Compression.NONE
+            );
+            assertNotNull(grid);
+            assertNull(grid.contentHash());
+        }
+    }
+
+    @Test
     void missingReadsNeverCreateAttackerControlledStorageKeys(
             @TempDir Path tempDir
     ) throws Exception {
@@ -300,6 +407,92 @@ class SqliteCacheMetadataIntegrationTest {
                     )
                     """);
         }
+    }
+
+    /**
+     * Models a custom dialect compiled against the pre-metadata
+     * {@link de.bluecolored.bluemap.core.storage.sql.commandset.AbstractCommandSet}
+     * contract.
+     */
+    private static final class LegacyStatementSqliteCommandSet
+            extends SqliteCommandSet {
+
+        private LegacyStatementSqliteCommandSet(Database database) {
+            super(database);
+        }
+
+        @Override
+        public String itemStorageWriteStatement() {
+            return """
+                    REPLACE
+                    INTO `bluemap_item_storage_data`
+                     (`map`, `storage`, `compression`, `data`)
+                    VALUES (?, ?, ?, ?)
+                    """;
+        }
+
+        @Override
+        public String itemStorageReadStatement() {
+            return """
+                    SELECT `data`
+                    FROM `bluemap_item_storage_data`
+                    WHERE `map` = ?
+                    AND `storage` = ?
+                    AND `compression` = ?
+                    """;
+        }
+
+        @Override
+        public String gridStorageWriteStatement() {
+            return """
+                    REPLACE
+                    INTO `bluemap_grid_storage_data`
+                     (`map`, `storage`, `x`, `z`, `compression`, `data`)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """;
+        }
+
+        @Override
+        public String gridStorageReadStatement() {
+            return """
+                    SELECT `data`
+                    FROM `bluemap_grid_storage_data`
+                    WHERE `map` = ?
+                    AND `storage` = ?
+                    AND `x` = ?
+                    AND `z` = ?
+                    AND `compression` = ?
+                    """;
+        }
+
+    }
+
+    private static final class NoOpSqliteCommandSet
+            extends SqliteCommandSet {
+
+        private NoOpSqliteCommandSet(Database database) {
+            super(database);
+        }
+
+    }
+
+    private static final class PartialLegacyStatementSqliteCommandSet
+            extends SqliteCommandSet {
+
+        private PartialLegacyStatementSqliteCommandSet(Database database) {
+            super(database);
+        }
+
+        @Override
+        public String itemStorageWriteStatement() {
+            return """
+                    REPLACE
+                    INTO `bluemap_item_storage_data`
+                     (`map`, `storage`, `compression`, `data`)
+                    VALUES (?, ?, ?, ?)
+                    """;
+        }
+
     }
 
     private static final class ToggleDataSource implements DataSource {

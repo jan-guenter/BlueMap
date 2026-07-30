@@ -31,6 +31,7 @@ import de.bluecolored.bluemap.core.storage.sql.commandset.SqliteCommandSet;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SqlDialectCacheMetadataStatementsTest {
@@ -48,12 +49,34 @@ class SqlDialectCacheMetadataStatementsTest {
         assertTrue(commands.createGridStorageDataTableStatement().contains("content_hash"));
         assertTrue(commands.createGridStorageDataTableStatement().contains("updated_at"));
 
-        assertEquals(6, placeholders(commands.itemStorageWriteStatement()));
-        assertEquals(8, placeholders(commands.gridStorageWriteStatement()));
-        assertTrue(commands.itemStorageReadStatement().contains("content_hash"));
-        assertTrue(commands.itemStorageReadStatement().contains("updated_at"));
-        assertTrue(commands.gridStorageReadStatement().contains("content_hash"));
-        assertTrue(commands.gridStorageReadStatement().contains("updated_at"));
+        assertEquals(4, placeholders(commands.itemStorageWriteStatement()));
+        assertEquals(6, placeholders(commands.gridStorageWriteStatement()));
+        assertFalse(commands.itemStorageReadStatement().contains("content_hash"));
+        assertFalse(commands.gridStorageReadStatement().contains("content_hash"));
+        assertEquals(
+                6,
+                placeholders(commands.itemStorageWriteWithMetadataStatement())
+        );
+        assertEquals(
+                8,
+                placeholders(commands.gridStorageWriteWithMetadataStatement())
+        );
+        assertTrue(
+                commands.itemStorageReadWithMetadataStatement()
+                        .contains("content_hash")
+        );
+        assertTrue(
+                commands.itemStorageReadWithMetadataStatement()
+                        .contains("updated_at")
+        );
+        assertTrue(
+                commands.gridStorageReadWithMetadataStatement()
+                        .contains("content_hash")
+        );
+        assertTrue(
+                commands.gridStorageReadWithMetadataStatement()
+                        .contains("updated_at")
+        );
 
         assertEquals(3, placeholders(commands.itemStorageReadMetadataStatement()));
         assertEquals(5, placeholders(commands.gridStorageReadMetadataStatement()));

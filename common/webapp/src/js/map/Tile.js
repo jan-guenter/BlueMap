@@ -67,8 +67,9 @@ export class Tile {
 
                 this.model = model;
                 this.onLoad(this);
-            }, () => {
+            }, error => {
                 this.unload();
+                if (error?.status !== "cancelled") throw error;
             })
             .finally(() => {
                 this.loading = false;

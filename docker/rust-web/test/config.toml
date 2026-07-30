@@ -2,7 +2,7 @@ bind = "0.0.0.0:8100"
 web_root = "/usr/share/bluemap-web"
 storage_timeout_seconds = 5
 max_in_flight_requests = 8
-max_object_bytes = 67108864
+max_object_bytes = 33554432
 
 [[maps]]
 id = "world"

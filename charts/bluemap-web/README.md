@@ -118,16 +118,18 @@ merges both `kubernetes.io/os: linux` and `kubernetes.io/arch: amd64` into
 selectors.
 
 The default in-flight limit is eight and the accepted range is 1 through 1024.
-`webserver.rust.config.maxObjectBytes` defaults to 64 MiB and rejects a larger
+`webserver.rust.config.maxObjectBytes` defaults to 32 MiB and rejects a larger
 stored object before it can be served. SQL body queries enforce the bound in
 the database, and file reads enforce it again in the blocking worker. Oversize
 responses are not cached. The largest object in the reference test data was a
 20.2 MiB texture, so eight materialized responses alone can retain at least
-161.6 MiB. The examples request 128 MiB and cap each pod at 512 MiB to leave
-room for database, TLS, allocator, and runtime overhead. Recalculate the object
-limit, in-flight limit, and memory limit for the largest object in your own
-map. File-backed syscalls use at most the smaller of the in-flight limit and
-eight blocking workers.
+161.6 MiB. SQL decoding can transiently retain both the driver row and response
+copy, so budget for roughly twice `maxInFlightRequests * maxObjectBytes`, plus
+database, TLS, allocator, runtime, and webapp overhead. The examples request
+256 MiB and cap each pod at 1 GiB. Recalculate the object limit, in-flight
+limit, and memory limit for the largest object in your own map. File-backed
+syscalls use at most the smaller of the in-flight limit and eight blocking
+workers.
 
 Tiles default to
 `public,max-age=60,must-revalidate,no-transform`; tune the age with

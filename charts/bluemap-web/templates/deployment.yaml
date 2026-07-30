@@ -47,8 +47,27 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.storage.sql.driver.download.url }}
+      {{- if or (eq .Values.storage.type "file") .Values.storage.sql.driver.download.url }}
       initContainers:
+        {{- if eq .Values.storage.type "file" }}
+        - name: prepare-file-storage
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - /usr/bin/mkdir
+          args:
+            - -p
+            - {{ .Values.storage.file.root | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- end }}
+        {{- if .Values.storage.sql.driver.download.url }}
         - name: download-jdbc-driver
           image: "{{ .Values.storage.sql.driver.download.image.repository }}:{{ .Values.storage.sql.driver.download.image.tag }}"
           imagePullPolicy: {{ .Values.storage.sql.driver.download.image.pullPolicy }}
@@ -81,6 +100,7 @@ spec:
               mountPath: /drivers
             - name: tmp
               mountPath: /tmp
+        {{- end }}
       {{- end }}
       containers:
         - name: bluemap-web

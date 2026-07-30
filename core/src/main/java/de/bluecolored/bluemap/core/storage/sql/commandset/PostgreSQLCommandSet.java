@@ -34,6 +34,11 @@ public class PostgreSQLCommandSet extends AbstractCommandSet {
     }
 
     @Override
+    protected boolean supportsCacheMetadata() {
+        return usesBuiltInStatementShapes(PostgreSQLCommandSet.class);
+    }
+
+    @Override
     @Language("postgresql")
     public String listExistingTablesStatement() {
         return """
@@ -164,6 +169,20 @@ public class PostgreSQLCommandSet extends AbstractCommandSet {
     public String itemStorageWriteStatement() {
         return """
         INSERT
+        INTO bluemap_item_storage_data (map, storage, compression, data)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (map, storage)
+         DO UPDATE SET
+          compression = excluded.compression,
+          data = excluded.data
+        """;
+    }
+
+    @Override
+    @Language("postgresql")
+    public String itemStorageWriteWithMetadataStatement() {
+        return """
+        INSERT
         INTO bluemap_item_storage_data (map, storage, compression, data, content_hash, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (map, storage)
@@ -178,6 +197,18 @@ public class PostgreSQLCommandSet extends AbstractCommandSet {
     @Override
     @Language("postgresql")
     public String itemStorageReadStatement() {
+        return """
+        SELECT data
+        FROM bluemap_item_storage_data
+        WHERE map = ?
+        AND storage = ?
+        AND compression = ?
+        """;
+    }
+
+    @Override
+    @Language("postgresql")
+    public String itemStorageReadWithMetadataStatement() {
         return """
         SELECT data, content_hash, updated_at
         FROM bluemap_item_storage_data
@@ -227,6 +258,20 @@ public class PostgreSQLCommandSet extends AbstractCommandSet {
     public String gridStorageWriteStatement() {
         return """
         INSERT
+        INTO bluemap_grid_storage_data (map, storage, x, z, compression, data)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (map, storage, x, z)
+         DO UPDATE SET
+          compression = excluded.compression,
+          data = excluded.data
+        """;
+    }
+
+    @Override
+    @Language("postgresql")
+    public String gridStorageWriteWithMetadataStatement() {
+        return """
+        INSERT
         INTO bluemap_grid_storage_data (map, storage, x, z, compression, data, content_hash, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (map, storage, x, z)
@@ -241,6 +286,20 @@ public class PostgreSQLCommandSet extends AbstractCommandSet {
     @Override
     @Language("postgresql")
     public String gridStorageReadStatement() {
+        return """
+        SELECT data
+        FROM bluemap_grid_storage_data
+        WHERE map = ?
+        AND storage = ?
+        AND x = ?
+        AND z = ?
+        AND compression = ?
+        """;
+    }
+
+    @Override
+    @Language("postgresql")
+    public String gridStorageReadWithMetadataStatement() {
         return """
         SELECT data, content_hash, updated_at
         FROM bluemap_grid_storage_data

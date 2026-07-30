@@ -25,6 +25,11 @@ assert_contains "$workflow" 'app_version="sha-${GITHUB_SHA}"'
 assert_contains "$workflow" 'chart_version="0.1.0-dev.sha.${GITHUB_SHA}"'
 assert_absent "$workflow" "format=short"
 assert_absent "$workflow" 'GITHUB_SHA:0:7'
+assert_contains "$workflow" ":core:spotlessCheck :core:test"
+assert_contains "$workflow" ":common:spotlessCheck :common:test"
+assert_contains "$workflow" "python -m unittest discover"
+assert_contains "$workflow" "charts/bluemap-web/ci/test-rust.sh"
+assert_contains "$workflow" "needs: validate"
 
 long_sha_tags=$(grep -F -c "type=sha,format=long,prefix=sha-" "$workflow")
 if [ "$long_sha_tags" -ne 3 ]; then

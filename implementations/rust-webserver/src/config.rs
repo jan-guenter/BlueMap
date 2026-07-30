@@ -40,7 +40,7 @@ fn default_max_in_flight_requests() -> usize {
 }
 
 fn default_max_object_bytes() -> u64 {
-    64 * 1024 * 1024
+    32 * 1024 * 1024
 }
 
 fn default_tile_cache_max_age_seconds() -> u64 {
@@ -438,7 +438,7 @@ mod tests {
         let config: Config = toml::from_str(&raw).unwrap();
         assert_eq!(config.max_in_flight_requests, 8);
         assert_eq!(config.runtime_shutdown_seconds, 5);
-        assert_eq!(config.max_object_bytes, 64 * 1024 * 1024);
+        assert_eq!(config.max_object_bytes, 32 * 1024 * 1024);
         assert_eq!(config.tile_cache_max_age_seconds, 60);
 
         let mut config = config;

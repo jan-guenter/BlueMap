@@ -3,7 +3,7 @@ webserver:
   rust:
     config:
       maxInFlightRequests: 8
-      maxObjectBytes: 67108864
+      maxObjectBytes: 33554432
     maps:
       - id: world
         sorting: 0
@@ -34,6 +34,6 @@ storage:
 resources:
   requests:
     cpu: 50m
-    memory: 128Mi
+    memory: 256Mi
   limits:
-    memory: 512Mi
+    memory: 1Gi

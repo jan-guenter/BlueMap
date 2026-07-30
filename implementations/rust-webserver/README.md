@@ -107,7 +107,7 @@ termination margin; the Helm chart calculates that total automatically.
 
 `max_in_flight_requests` is a non-queuing map-response limit (default `8`,
 valid range `1..=1024`). `max_object_bytes` rejects any individual stored
-object above its default 64 MiB limit. Metadata is checked before a body read;
+object above its default 32 MiB limit. Metadata is checked before a body read;
 file reads enforce the limit again inside the blocking worker, and SQL body
 queries use a size-bounded projection so an object that grows between queries
 is represented by metadata rather than materialized as a BLOB. Oversize
@@ -120,8 +120,11 @@ cannot accumulate unlimited materialized SQL BLOBs after database connections
 return to the pool. The largest texture object in the reference data was
 20.2 MiB. Eight simultaneous objects can therefore account for at least
 161.6 MiB before database, TLS, allocator, runtime, and webapp overhead. The
-Helm examples use a 512 MiB limit to leave practical headroom; lower the
-in-flight limit when using a smaller pod memory budget.
+SQL decoding can transiently retain both the database row and the response
+copy, so budget for roughly twice
+`max_in_flight_requests * max_object_bytes`, plus database, TLS, allocator,
+runtime, and webapp overhead. The Helm examples use a 1 GiB limit; lower the
+object or in-flight limit when using a smaller pod memory budget.
 
 ## Build and test
 

@@ -48,6 +48,7 @@ import java.util.Set;
 public abstract class AbstractCommandSet implements CommandSet {
 
     protected final Database db;
+    private volatile @Nullable Boolean cacheMetadataEnabled;
 
     protected final LoadingCache<String, Integer> mapKeys = Caches.build(this::findOrCreateMapKey);
     protected final LoadingCache<Compression, Integer> compressionKeys = Caches.build(this::findOrCreateCompressionKey);
@@ -82,16 +83,76 @@ public abstract class AbstractCommandSet implements CommandSet {
     public abstract String createGridStorageDataTableStatement();
 
     @Language("sql")
-    public abstract String addItemContentHashColumnStatement();
+    public String addItemContentHashColumnStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
 
     @Language("sql")
-    public abstract String addItemUpdatedAtColumnStatement();
+    public String addItemUpdatedAtColumnStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
 
     @Language("sql")
-    public abstract String addGridContentHashColumnStatement();
+    public String addGridContentHashColumnStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
 
     @Language("sql")
-    public abstract String addGridUpdatedAtColumnStatement();
+    public String addGridUpdatedAtColumnStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
+
+    /**
+     * Opts a dialect into the cache-metadata schema and extended statements.
+     *
+     * <p>The default preserves the statement shapes used by existing custom
+     * {@code AbstractCommandSet} subclasses.</p>
+     */
+    protected boolean supportsCacheMetadata() {
+        return false;
+    }
+
+    private boolean cacheMetadataEnabled() {
+        Boolean enabled = cacheMetadataEnabled;
+        if (enabled != null) return enabled;
+
+        enabled = supportsCacheMetadata();
+        cacheMetadataEnabled = enabled;
+        return enabled;
+    }
+
+    /**
+     * Returns whether this instance still inherits all four legacy statement
+     * shapes from the supplied built-in dialect.
+     *
+     * <p>Those methods were public extension points before cache metadata was
+     * introduced. A subclass overriding any one of them must keep using all
+     * legacy arities, while a no-op subclass can safely inherit the built-in
+     * metadata-aware statements.</p>
+     */
+    protected final boolean usesBuiltInStatementShapes(
+            Class<? extends AbstractCommandSet> dialect
+    ) {
+        try {
+            return getClass()
+                    .getMethod("itemStorageWriteStatement")
+                    .getDeclaringClass() == dialect
+                    && getClass()
+                    .getMethod("itemStorageReadStatement")
+                    .getDeclaringClass() == dialect
+                    && getClass()
+                    .getMethod("gridStorageWriteStatement")
+                    .getDeclaringClass() == dialect
+                    && getClass()
+                    .getMethod("gridStorageReadStatement")
+                    .getDeclaringClass() == dialect;
+        } catch (NoSuchMethodException ex) {
+            throw new IllegalStateException(
+                    "Required SQL statement method is missing",
+                    ex
+            );
+        }
+    }
 
     @Override
     public void initializeTables() throws IOException {
@@ -128,35 +189,54 @@ public abstract class AbstractCommandSet implements CommandSet {
             }
         });
 
-        addColumnIfMissing("bluemap_item_storage_data", "content_hash",
-                addItemContentHashColumnStatement());
-        addColumnIfMissing("bluemap_item_storage_data", "updated_at",
-                addItemUpdatedAtColumnStatement());
-        addColumnIfMissing("bluemap_grid_storage_data", "content_hash",
-                addGridContentHashColumnStatement());
-        addColumnIfMissing("bluemap_grid_storage_data", "updated_at",
-                addGridUpdatedAtColumnStatement());
+        if (cacheMetadataEnabled()) {
+            addColumnIfMissing("bluemap_item_storage_data", "content_hash",
+                    addItemContentHashColumnStatement());
+            addColumnIfMissing("bluemap_item_storage_data", "updated_at",
+                    addItemUpdatedAtColumnStatement());
+            addColumnIfMissing("bluemap_grid_storage_data", "content_hash",
+                    addGridContentHashColumnStatement());
+            addColumnIfMissing("bluemap_grid_storage_data", "updated_at",
+                    addGridUpdatedAtColumnStatement());
+        }
     }
 
     @Language("sql")
     public abstract String itemStorageWriteStatement();
+
+    @Language("sql")
+    public String itemStorageWriteWithMetadataStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
 
     @Override
     public void writeItem(String mapId, Key key, Compression compression, byte[] bytes) throws IOException {
         int mapKey = mapKey(mapId);
         int storageKey = itemStorageKey(key);
         int compressionKey = compressionKey(compression);
-        byte[] contentHash = sha256(bytes);
-        long updatedAt = System.currentTimeMillis();
-        db.run(connection -> executeUpdate(connection,
-                itemStorageWriteStatement(),
-                mapKey, storageKey, compressionKey,
-                bytes, contentHash, updatedAt
-        ));
+        if (cacheMetadataEnabled()) {
+            byte[] contentHash = sha256(bytes);
+            long updatedAt = System.currentTimeMillis();
+            db.run(connection -> executeUpdate(connection,
+                    itemStorageWriteWithMetadataStatement(),
+                    mapKey, storageKey, compressionKey,
+                    bytes, contentHash, updatedAt
+            ));
+        } else {
+            db.run(connection -> executeUpdate(connection,
+                    itemStorageWriteStatement(),
+                    mapKey, storageKey, compressionKey, bytes
+            ));
+        }
     }
 
     @Language("sql")
     public abstract String itemStorageReadStatement();
+
+    @Language("sql")
+    public String itemStorageReadWithMetadataStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
 
     @Override
     public byte @Nullable [] readItem(
@@ -176,21 +256,31 @@ public abstract class AbstractCommandSet implements CommandSet {
         if (mapKey == null || storageKey == null || compressionKey == null) return null;
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
-                    itemStorageReadStatement(),
+                    cacheMetadataEnabled()
+                            ? itemStorageReadWithMetadataStatement()
+                            : itemStorageReadStatement(),
                     mapKey, storageKey, compressionKey
             );
             if (!result.next()) return null;
-            return new StoredData(result.getBytes(1), result.getBytes(2), result.getLong(3));
+            if (!cacheMetadataEnabled()) {
+                return new StoredData(result.getBytes(1), null, 0);
+            }
+            return new StoredData(
+                    result.getBytes(1), result.getBytes(2), result.getLong(3)
+            );
         });
     }
 
     @Language("sql")
-    public abstract String itemStorageReadMetadataStatement();
+    public String itemStorageReadMetadataStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
 
     @Override
     public @Nullable StoredMetadata readItemMetadata(
             String mapId, Key key, Compression compression
     ) throws IOException {
+        if (!cacheMetadataEnabled()) return null;
         Integer mapKey = findMapKey(mapId);
         Integer storageKey = findItemStorageKey(key);
         Integer compressionKey = findCompressionKey(compression);
@@ -243,6 +333,11 @@ public abstract class AbstractCommandSet implements CommandSet {
     @Language("sql")
     public abstract String gridStorageWriteStatement();
 
+    @Language("sql")
+    public String gridStorageWriteWithMetadataStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
+
     @Override
     public void writeGridItem(
             String mapId, Key key, int x, int z, Compression compression,
@@ -251,17 +346,29 @@ public abstract class AbstractCommandSet implements CommandSet {
         int mapKey = mapKey(mapId);
         int storageKey = gridStorageKey(key);
         int compressionKey = compressionKey(compression);
-        byte[] contentHash = sha256(bytes);
-        long updatedAt = System.currentTimeMillis();
-        db.run(connection -> executeUpdate(connection,
-                gridStorageWriteStatement(),
-                mapKey, storageKey, x, z, compressionKey,
-                bytes, contentHash, updatedAt
-        ));
+        if (cacheMetadataEnabled()) {
+            byte[] contentHash = sha256(bytes);
+            long updatedAt = System.currentTimeMillis();
+            db.run(connection -> executeUpdate(connection,
+                    gridStorageWriteWithMetadataStatement(),
+                    mapKey, storageKey, x, z, compressionKey,
+                    bytes, contentHash, updatedAt
+            ));
+        } else {
+            db.run(connection -> executeUpdate(connection,
+                    gridStorageWriteStatement(),
+                    mapKey, storageKey, x, z, compressionKey, bytes
+            ));
+        }
     }
 
     @Language("sql")
     public abstract String gridStorageReadStatement();
+
+    @Language("sql")
+    public String gridStorageReadWithMetadataStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
 
     @Override
     public byte @Nullable [] readGridItem(
@@ -282,21 +389,31 @@ public abstract class AbstractCommandSet implements CommandSet {
         if (mapKey == null || storageKey == null || compressionKey == null) return null;
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
-                    gridStorageReadStatement(),
+                    cacheMetadataEnabled()
+                            ? gridStorageReadWithMetadataStatement()
+                            : gridStorageReadStatement(),
                     mapKey, storageKey, x, z, compressionKey
             );
             if (!result.next()) return null;
-            return new StoredData(result.getBytes(1), result.getBytes(2), result.getLong(3));
+            if (!cacheMetadataEnabled()) {
+                return new StoredData(result.getBytes(1), null, 0);
+            }
+            return new StoredData(
+                    result.getBytes(1), result.getBytes(2), result.getLong(3)
+            );
         });
     }
 
     @Language("sql")
-    public abstract String gridStorageReadMetadataStatement();
+    public String gridStorageReadMetadataStatement() {
+        throw new UnsupportedOperationException("Cache metadata is not supported");
+    }
 
     @Override
     public @Nullable StoredMetadata readGridItemMetadata(
             String mapId, Key key, int x, int z, Compression compression
     ) throws IOException {
+        if (!cacheMetadataEnabled()) return null;
         Integer mapKey = findMapKey(mapId);
         Integer storageKey = findGridStorageKey(key);
         Integer compressionKey = findCompressionKey(compression);

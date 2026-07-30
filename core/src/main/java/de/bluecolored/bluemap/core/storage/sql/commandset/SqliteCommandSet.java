@@ -34,6 +34,11 @@ public class SqliteCommandSet extends AbstractCommandSet {
     }
 
     @Override
+    protected boolean supportsCacheMetadata() {
+        return usesBuiltInStatementShapes(SqliteCommandSet.class);
+    }
+
+    @Override
     @Language("sqlite")
     public String listExistingTablesStatement() {
         return """
@@ -176,6 +181,16 @@ public class SqliteCommandSet extends AbstractCommandSet {
     public String itemStorageWriteStatement() {
         return """
         REPLACE
+        INTO `bluemap_item_storage_data` (`map`, `storage`, `compression`, `data`)
+        VALUES (?, ?, ?, ?)
+        """;
+    }
+
+    @Override
+    @Language("sqlite")
+    public String itemStorageWriteWithMetadataStatement() {
+        return """
+        REPLACE
         INTO `bluemap_item_storage_data` (`map`, `storage`, `compression`, `data`, `content_hash`, `updated_at`)
         VALUES (?, ?, ?, ?, ?, ?)
         """;
@@ -184,6 +199,18 @@ public class SqliteCommandSet extends AbstractCommandSet {
     @Override
     @Language("sqlite")
     public String itemStorageReadStatement() {
+        return """
+        SELECT `data`
+        FROM `bluemap_item_storage_data`
+        WHERE `map` = ?
+        AND `storage` = ?
+        AND `compression` = ?
+        """;
+    }
+
+    @Override
+    @Language("sqlite")
+    public String itemStorageReadWithMetadataStatement() {
         return """
         SELECT `data`, `content_hash`, `updated_at`
         FROM `bluemap_item_storage_data`
@@ -234,6 +261,16 @@ public class SqliteCommandSet extends AbstractCommandSet {
     public String gridStorageWriteStatement() {
         return """
         REPLACE
+        INTO `bluemap_grid_storage_data` (`map`, `storage`, `x`, `z`, `compression`, `data`)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """;
+    }
+
+    @Override
+    @Language("sqlite")
+    public String gridStorageWriteWithMetadataStatement() {
+        return """
+        REPLACE
         INTO `bluemap_grid_storage_data` (`map`, `storage`, `x`, `z`, `compression`, `data`, `content_hash`, `updated_at`)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """;
@@ -242,6 +279,20 @@ public class SqliteCommandSet extends AbstractCommandSet {
     @Override
     @Language("sqlite")
     public String gridStorageReadStatement() {
+        return """
+        SELECT `data`
+        FROM `bluemap_grid_storage_data`
+        WHERE `map` = ?
+        AND `storage` = ?
+        AND `x` = ?
+        AND `z` = ?
+        AND `compression` = ?
+        """;
+    }
+
+    @Override
+    @Language("sqlite")
+    public String gridStorageReadWithMetadataStatement() {
         return """
         SELECT `data`, `content_hash`, `updated_at`
         FROM `bluemap_grid_storage_data`
