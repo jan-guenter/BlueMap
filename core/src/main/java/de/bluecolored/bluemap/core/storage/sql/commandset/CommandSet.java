@@ -37,7 +37,7 @@ public interface CommandSet extends Closeable {
 
     void writeItem(String mapId, Key key, Compression compression, byte[] bytes) throws IOException;
 
-    byte @Nullable [] readItem(String mapId, Key key, Compression compression) throws IOException;
+    @Nullable StoredData readItem(String mapId, Key key, Compression compression) throws IOException;
 
     void deleteItem(String mapId, Key key) throws IOException;
 
@@ -48,7 +48,7 @@ public interface CommandSet extends Closeable {
             byte[] bytes
     ) throws IOException;
 
-    byte @Nullable [] readGridItem(
+    @Nullable StoredData readGridItem(
             String mapId, Key key, int x, int z, Compression compression
     ) throws IOException;
 
@@ -78,5 +78,18 @@ public interface CommandSet extends Closeable {
     boolean isClosed();
 
     record TilePosition (int x, int z) {}
+
+    record StoredData(byte[] data, byte @Nullable [] contentHash, long updatedAt) {
+
+        public StoredData {
+            contentHash = contentHash == null ? null : contentHash.clone();
+        }
+
+        @Override
+        public byte @Nullable [] contentHash() {
+            return contentHash == null ? null : contentHash.clone();
+        }
+
+    }
 
 }

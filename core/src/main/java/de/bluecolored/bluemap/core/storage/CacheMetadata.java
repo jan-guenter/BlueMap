@@ -22,50 +22,22 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-package de.bluecolored.bluemap.common.config;
+package de.bluecolored.bluemap.core.storage;
 
-import lombok.Getter;
-import org.spongepowered.configurate.objectmapping.ConfigSerializable;
+import org.jetbrains.annotations.Nullable;
 
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
-import java.nio.file.Path;
+/**
+ * Cache validators associated with the exact stored representation of an item.
+ */
+public record CacheMetadata(byte @Nullable [] contentHash, long updatedAt) {
 
-@SuppressWarnings({"FieldMayBeFinal", "FieldCanBeLocal"})
-@ConfigSerializable
-@Getter
-public class WebserverConfig {
-
-    private boolean enabled = true;
-    private Path webroot = Path.of("bluemap", "web");
-
-    private String ip = "0.0.0.0";
-    private int port = 8100;
-
-    private boolean sseEnabled = true;
-    private int tileCacheMaxAge = 60;
-
-    private LogConfig log = new LogConfig();
-
-    public InetAddress resolveIp() throws UnknownHostException {
-        if (ip.isEmpty() || ip.equals("0.0.0.0") || ip.equals("::0")) {
-            return new InetSocketAddress(0).getAddress();
-        } else if (ip.equals("#getLocalHost")) {
-            return InetAddress.getLocalHost();
-        } else {
-            return InetAddress.getByName(ip);
-        }
+    public CacheMetadata {
+        contentHash = contentHash == null ? null : contentHash.clone();
     }
 
-    @ConfigSerializable
-    @Getter
-    public static class LogConfig {
-
-        private String file = null;
-        private boolean append = false;
-        private String format = "%1$s \"%3$s %4$s %5$s\" %6$s %7$s";
-
+    @Override
+    public byte @Nullable [] contentHash() {
+        return contentHash == null ? null : contentHash.clone();
     }
 
 }

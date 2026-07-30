@@ -56,6 +56,9 @@ public class HttpConnection implements Runnable {
                 if (request == null) continue;
 
                 try (HttpResponse response = requestHandler.handle(request)) {
+                    if (request.getMethod().equalsIgnoreCase("HEAD")) {
+                        response.setBodySuppressed(true);
+                    }
                     responseOut.write(response);
                 }
             }

@@ -35,10 +35,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
 import java.util.concurrent.TimeUnit;
 
 @Getter @Setter
@@ -113,12 +109,9 @@ public class FileRequestHandler implements HttpRequestHandler {
         long lastModified = Files.getLastModifiedTime(filePath).to(TimeUnit.MILLISECONDS);
         HttpHeader modHeader = request.getHeader("If-Modified-Since");
         if (modHeader != null){
-            try {
-                long since = Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(modHeader.getValue())).toEpochMilli();
-                if (since + 1000 >= lastModified){
-                    return new HttpResponse(HttpStatusCode.NOT_MODIFIED);
-                }
-            } catch (DateTimeParseException ignored){}
+            Long since = HttpCacheSupport.parseHttpDate(modHeader.getValue());
+            if (since != null && since / 1000 >= lastModified / 1000)
+                return new HttpResponse(HttpStatusCode.NOT_MODIFIED);
         }
 
         //check ETag
@@ -136,10 +129,8 @@ public class FileRequestHandler implements HttpRequestHandler {
         //create response
         HttpResponse response = new HttpResponse(HttpStatusCode.OK);
         response.addHeader("ETag", eTag);
-        if (lastModified > 0) response.addHeader("Last-Modified", DateTimeFormatter.RFC_1123_DATE_TIME.format(Instant
-                .ofEpochMilli(lastModified)
-                .atOffset(ZoneOffset.UTC)
-        ));
+        if (lastModified > 0)
+            response.addHeader("Last-Modified", HttpCacheSupport.formatHttpDate(lastModified));
         response.addHeader("Cache-Control", "public");
         response.addHeader("Cache-Control", "max-age=" + TimeUnit.DAYS.toSeconds(1));
 

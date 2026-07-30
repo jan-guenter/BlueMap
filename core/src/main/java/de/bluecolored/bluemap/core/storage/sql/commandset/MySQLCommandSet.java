@@ -92,6 +92,8 @@ public class MySQLCommandSet extends AbstractCommandSet {
          `storage` INT UNSIGNED NOT NULL,
          `compression` SMALLINT UNSIGNED NOT NULL,
          `data` LONGBLOB NOT NULL,
+         `content_hash` BINARY(32) NULL,
+         `updated_at` BIGINT NULL,
          PRIMARY KEY (`map`, `storage`),
          CONSTRAINT `fk_bluemap_item_map`
           FOREIGN KEY (`map`)
@@ -136,6 +138,8 @@ public class MySQLCommandSet extends AbstractCommandSet {
          `z` INT NOT NULL,
          `compression` SMALLINT UNSIGNED NOT NULL,
          `data` LONGBLOB NOT NULL,
+         `content_hash` BINARY(32) NULL,
+         `updated_at` BIGINT NULL,
          PRIMARY KEY (`map`, `storage`, `x`, `z`),
          CONSTRAINT `fk_bluemap_grid_map`
           FOREIGN KEY (`map`)
@@ -157,12 +161,32 @@ public class MySQLCommandSet extends AbstractCommandSet {
     }
 
     @Override
+    public String addItemContentHashColumnStatement() {
+        return "ALTER TABLE `bluemap_item_storage_data` ADD COLUMN `content_hash` BINARY(32) NULL";
+    }
+
+    @Override
+    public String addItemUpdatedAtColumnStatement() {
+        return "ALTER TABLE `bluemap_item_storage_data` ADD COLUMN `updated_at` BIGINT NULL";
+    }
+
+    @Override
+    public String addGridContentHashColumnStatement() {
+        return "ALTER TABLE `bluemap_grid_storage_data` ADD COLUMN `content_hash` BINARY(32) NULL";
+    }
+
+    @Override
+    public String addGridUpdatedAtColumnStatement() {
+        return "ALTER TABLE `bluemap_grid_storage_data` ADD COLUMN `updated_at` BIGINT NULL";
+    }
+
+    @Override
     @Language("mysql")
     public String itemStorageWriteStatement() {
         return """
         REPLACE
-        INTO `bluemap_item_storage_data` (`map`, `storage`, `compression`, `data`)
-        VALUES (?, ?, ?, ?)
+        INTO `bluemap_item_storage_data` (`map`, `storage`, `compression`, `data`, `content_hash`, `updated_at`)
+        VALUES (?, ?, ?, ?, ?, ?)
         """;
     }
 
@@ -170,7 +194,7 @@ public class MySQLCommandSet extends AbstractCommandSet {
     @Language("mysql")
     public String itemStorageReadStatement() {
         return """
-        SELECT `data`
+        SELECT `data`, `content_hash`, `updated_at`
         FROM `bluemap_item_storage_data`
         WHERE `map` = ?
         AND `storage` = ?
@@ -207,8 +231,8 @@ public class MySQLCommandSet extends AbstractCommandSet {
     public String gridStorageWriteStatement() {
         return """
         REPLACE
-        INTO `bluemap_grid_storage_data` (`map`, `storage`, `x`, `z`, `compression`, `data`)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INTO `bluemap_grid_storage_data` (`map`, `storage`, `x`, `z`, `compression`, `data`, `content_hash`, `updated_at`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """;
     }
 
@@ -216,7 +240,7 @@ public class MySQLCommandSet extends AbstractCommandSet {
     @Language("mysql")
     public String gridStorageReadStatement() {
         return """
-        SELECT `data`
+        SELECT `data`, `content_hash`, `updated_at`
         FROM `bluemap_grid_storage_data`
         WHERE `map` = ?
         AND `storage` = ?

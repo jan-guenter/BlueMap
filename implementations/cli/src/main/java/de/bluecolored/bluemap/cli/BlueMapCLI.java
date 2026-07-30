@@ -301,8 +301,11 @@ public class BlueMapCLI {
             BmMap map = blueMap.getMaps().get(mapConfigEntry.getKey());
 
             MapRequestHandler mapRequestHandler = map != null ?
-                    new MapRequestHandler(map, null, new LiveMarkersDataSupplier(map.getMarkerSets()), config.isSseEnabled()) :
-                    new MapRequestHandler(storage);
+                    new MapRequestHandler(
+                            map, null, new LiveMarkersDataSupplier(map.getMarkerSets()),
+                            config.isSseEnabled(), config.getTileCacheMaxAge()
+                    ) :
+                    new MapRequestHandler(storage, config.getTileCacheMaxAge());
 
             routingRequestHandler.register(
                     "maps/" + Pattern.quote(mapConfigEntry.getKey()) + "/(.*)",

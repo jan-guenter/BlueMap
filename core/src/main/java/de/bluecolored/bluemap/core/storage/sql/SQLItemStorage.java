@@ -24,6 +24,7 @@
  */
 package de.bluecolored.bluemap.core.storage.sql;
 
+import de.bluecolored.bluemap.core.storage.CacheMetadata;
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.storage.ItemStorage;
@@ -53,9 +54,13 @@ public class SQLItemStorage implements ItemStorage {
 
     @Override
     public @Nullable CompressedInputStream read() throws IOException {
-        byte[] data = sql.readItem(map, storage, compression);
-        if (data == null) return null;
-        return new CompressedInputStream(new ByteArrayInputStream(data), compression);
+        CommandSet.StoredData stored = sql.readItem(map, storage, compression);
+        if (stored == null) return null;
+        return new CompressedInputStream(
+                new ByteArrayInputStream(stored.data()),
+                compression,
+                new CacheMetadata(stored.contentHash(), stored.updatedAt())
+        );
     }
 
     @Override

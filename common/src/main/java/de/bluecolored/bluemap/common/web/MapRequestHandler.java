@@ -46,7 +46,18 @@ public class MapRequestHandler extends RoutingRequestHandler {
             @Nullable Supplier<String> liveMarkerDataSupplier,
             boolean useSSE
     ) {
-        this(map.getStorage(), livePlayersDataSupplier, liveMarkerDataSupplier, useSSE);
+        this(map, livePlayersDataSupplier, liveMarkerDataSupplier, useSSE,
+                MapStorageRequestHandler.DEFAULT_TILE_MAX_AGE_SECONDS);
+    }
+
+    public MapRequestHandler(
+            BmMap map,
+            @Nullable Supplier<String> livePlayersDataSupplier,
+            @Nullable Supplier<String> liveMarkerDataSupplier,
+            boolean useSSE,
+            long tileCacheMaxAgeSeconds
+    ) {
+        this(map.getStorage(), livePlayersDataSupplier, liveMarkerDataSupplier, useSSE, tileCacheMaxAgeSeconds);
 
         if (useSSE) {
             map.getHiresModelManager().addTileUpdateListener(tile -> onTileUpdate(tile, 0));
@@ -55,7 +66,11 @@ public class MapRequestHandler extends RoutingRequestHandler {
     }
 
     public MapRequestHandler(MapStorage mapStorage) {
-        this(mapStorage, null, null, false);
+        this(mapStorage, MapStorageRequestHandler.DEFAULT_TILE_MAX_AGE_SECONDS);
+    }
+
+    public MapRequestHandler(MapStorage mapStorage, long tileCacheMaxAgeSeconds) {
+        this(mapStorage, null, null, false, tileCacheMaxAgeSeconds);
     }
 
     public MapRequestHandler(
@@ -64,7 +79,20 @@ public class MapRequestHandler extends RoutingRequestHandler {
             @Nullable Supplier<String> liveMarkerDataSupplier,
             boolean useSSE
     ) {
-        register(".*", new MapStorageRequestHandler(mapStorage));
+        this(mapStorage, livePlayersDataSupplier, liveMarkerDataSupplier, useSSE,
+                MapStorageRequestHandler.DEFAULT_TILE_MAX_AGE_SECONDS);
+    }
+
+    public MapRequestHandler(
+            MapStorage mapStorage,
+            @Nullable Supplier<String> livePlayersDataSupplier,
+            @Nullable Supplier<String> liveMarkerDataSupplier,
+            boolean useSSE,
+            long tileCacheMaxAgeSeconds
+    ) {
+        MapStorageRequestHandler storageHandler = new MapStorageRequestHandler(mapStorage);
+        storageHandler.setTileMaxAgeSeconds(tileCacheMaxAgeSeconds);
+        register(".*", storageHandler);
 
         if (useSSE) {
             register("live/sse", "", _ -> {

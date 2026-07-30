@@ -44,13 +44,17 @@ public class HttpResponseOutputStream implements Closeable {
     public void write(HttpResponse response) throws IOException {
         HttpStatusCode statusCode = response.getStatusCode();
         InputStream body = response.getBody();
+        boolean bodyAllowed = !response.isBodySuppressed()
+                && statusCode.getCode() >= 200
+                && statusCode != HttpStatusCode.NO_CONTENT
+                && statusCode != HttpStatusCode.NOT_MODIFIED;
 
         writeLine(response.getVersion() + " " + statusCode.getCode() + " " + statusCode.getMessage());
 
         // headers
-        if (body != null) {
+        if (body != null && bodyAllowed) {
             response.addHeader("Transfer-Encoding","chunked");
-        } else {
+        } else if (bodyAllowed) {
             response.addHeader("Content-Length", "0");
         }
         for (HttpHeader header : response.getHeaders().values()) {
@@ -59,7 +63,7 @@ public class HttpResponseOutputStream implements Closeable {
         writeLine();
 
         // body
-        if (body != null) {
+        if (body != null && bodyAllowed) {
 
             while (true) {
                 int read = body.read(byteBuffer);

@@ -35,6 +35,8 @@ import org.intellij.lang.annotations.Language;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -73,9 +75,22 @@ public abstract class AbstractCommandSet implements CommandSet {
     @Language("sql")
     public abstract String createGridStorageDataTableStatement();
 
+    @Language("sql")
+    public abstract String addItemContentHashColumnStatement();
+
+    @Language("sql")
+    public abstract String addItemUpdatedAtColumnStatement();
+
+    @Language("sql")
+    public abstract String addGridContentHashColumnStatement();
+
+    @Language("sql")
+    public abstract String addGridUpdatedAtColumnStatement();
+
     @Override
     public void initializeTables() throws IOException {
         db.run(connection -> {
+            boolean tablesComplete = false;
             try {
                 Set<String> tables = new HashSet<>(6);
                 ResultSet result = executeQuery(connection, listExistingTablesStatement());
@@ -83,27 +98,38 @@ public abstract class AbstractCommandSet implements CommandSet {
                     tables.add(result.getString(1));
                 }
 
-                if (tables.containsAll(Set.of(
+                tablesComplete = tables.containsAll(Set.of(
                         "bluemap_map",
                         "bluemap_compression",
                         "bluemap_item_storage",
                         "bluemap_item_storage_data",
                         "bluemap_grid_storage",
                         "bluemap_grid_storage_data"
-                ))) return;
+                ));
             } catch (SQLException ex) {
                 Logger.global.logWarning("Failed to check for existing tables, will try to create them...");
                 Logger.global.logDebug(ex.toString());
             }
 
-            // create tables (if not exists)
-            executeUpdate(connection, createMapTableStatement());
-            executeUpdate(connection, createCompressionTableStatement());
-            executeUpdate(connection, createItemStorageTableStatement());
-            executeUpdate(connection, createItemStorageDataTableStatement());
-            executeUpdate(connection, createGridStorageTableStatement());
-            executeUpdate(connection, createGridStorageDataTableStatement());
+            if (!tablesComplete) {
+                // create tables (if not exists)
+                executeUpdate(connection, createMapTableStatement());
+                executeUpdate(connection, createCompressionTableStatement());
+                executeUpdate(connection, createItemStorageTableStatement());
+                executeUpdate(connection, createItemStorageDataTableStatement());
+                executeUpdate(connection, createGridStorageTableStatement());
+                executeUpdate(connection, createGridStorageDataTableStatement());
+            }
         });
+
+        addColumnIfMissing("bluemap_item_storage_data", "content_hash",
+                addItemContentHashColumnStatement());
+        addColumnIfMissing("bluemap_item_storage_data", "updated_at",
+                addItemUpdatedAtColumnStatement());
+        addColumnIfMissing("bluemap_grid_storage_data", "content_hash",
+                addGridContentHashColumnStatement());
+        addColumnIfMissing("bluemap_grid_storage_data", "updated_at",
+                addGridUpdatedAtColumnStatement());
     }
 
     @Language("sql")
@@ -114,10 +140,12 @@ public abstract class AbstractCommandSet implements CommandSet {
         int mapKey = mapKey(mapId);
         int storageKey = itemStorageKey(key);
         int compressionKey = compressionKey(compression);
+        byte[] contentHash = sha256(bytes);
+        long updatedAt = System.currentTimeMillis();
         db.run(connection -> executeUpdate(connection,
                 itemStorageWriteStatement(),
                 mapKey, storageKey, compressionKey,
-                bytes
+                bytes, contentHash, updatedAt
         ));
     }
 
@@ -125,7 +153,7 @@ public abstract class AbstractCommandSet implements CommandSet {
     public abstract String itemStorageReadStatement();
 
     @Override
-    public byte @Nullable [] readItem(String mapId, Key key, Compression compression) throws IOException {
+    public @Nullable StoredData readItem(String mapId, Key key, Compression compression) throws IOException {
         int mapKey = mapKey(mapId);
         int storageKey = itemStorageKey(key);
         int compressionKey = compressionKey(compression);
@@ -135,7 +163,7 @@ public abstract class AbstractCommandSet implements CommandSet {
                     mapKey, storageKey, compressionKey
             );
             if (!result.next()) return null;
-            return result.getBytes(1);
+            return new StoredData(result.getBytes(1), result.getBytes(2), result.getLong(3));
         });
     }
 
@@ -181,10 +209,12 @@ public abstract class AbstractCommandSet implements CommandSet {
         int mapKey = mapKey(mapId);
         int storageKey = gridStorageKey(key);
         int compressionKey = compressionKey(compression);
+        byte[] contentHash = sha256(bytes);
+        long updatedAt = System.currentTimeMillis();
         db.run(connection -> executeUpdate(connection,
                 gridStorageWriteStatement(),
                 mapKey, storageKey, x, z, compressionKey,
-                bytes
+                bytes, contentHash, updatedAt
         ));
     }
 
@@ -192,7 +222,7 @@ public abstract class AbstractCommandSet implements CommandSet {
     public abstract String gridStorageReadStatement();
 
     @Override
-    public byte @Nullable [] readGridItem(
+    public @Nullable StoredData readGridItem(
             String mapId, Key key, int x, int z, Compression compression
     ) throws IOException {
         int mapKey = mapKey(mapId);
@@ -204,7 +234,7 @@ public abstract class AbstractCommandSet implements CommandSet {
                     mapKey, storageKey, x, z, compressionKey
             );
             if (!result.next()) return null;
-            return result.getBytes(1);
+            return new StoredData(result.getBytes(1), result.getBytes(2), result.getLong(3));
         });
     }
 
@@ -524,6 +554,81 @@ public abstract class AbstractCommandSet implements CommandSet {
             statement.setObject(i + 1, parameters[i]);
         }
         return statement;
+    }
+
+    private void addColumnIfMissing(
+            String table, String column, @Language("sql") String statement
+    ) throws IOException {
+        db.run(connection -> {
+            if (columnExists(connection, table, column)) return;
+
+            try {
+                executeUpdate(connection, statement);
+            } catch (SQLException migrationFailure) {
+                // PostgreSQL leaves the transaction aborted after a concurrent
+                // duplicate-column error. This migration gets its own
+                // transaction, so resetting it here cannot discard other work.
+                try {
+                    if (!connection.getAutoCommit()) connection.rollback();
+                } catch (SQLException rollbackFailure) {
+                    migrationFailure.addSuppressed(rollbackFailure);
+                }
+
+                try {
+                    if (columnExists(connection, table, column)) return;
+                } catch (SQLException recheckFailure) {
+                    migrationFailure.addSuppressed(recheckFailure);
+                }
+                throw migrationFailure;
+            }
+        });
+    }
+
+    static boolean columnExists(Connection connection, String table, String column)
+            throws SQLException {
+        DatabaseMetaData metadata = connection.getMetaData();
+        String catalog = connection.getCatalog();
+        String schema = connection.getSchema();
+        String tablePattern = exactMetadataPattern(metadata, table);
+        String columnPattern = exactMetadataPattern(metadata, column);
+
+        try (ResultSet columns = metadata.getColumns(
+                catalog, schema, tablePattern, columnPattern
+        )) {
+            while (columns.next()) {
+                if (!table.equalsIgnoreCase(columns.getString("TABLE_NAME"))) continue;
+                if (!column.equalsIgnoreCase(columns.getString("COLUMN_NAME"))) continue;
+
+                String resultCatalog = columns.getString("TABLE_CAT");
+                if (catalog != null && resultCatalog != null
+                        && !catalog.equalsIgnoreCase(resultCatalog)) continue;
+
+                String resultSchema = columns.getString("TABLE_SCHEM");
+                if (schema != null && resultSchema != null
+                        && !schema.equalsIgnoreCase(resultSchema)) continue;
+
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String exactMetadataPattern(DatabaseMetaData metadata, String value)
+            throws SQLException {
+        String escape = metadata.getSearchStringEscape();
+        if (escape == null || escape.isEmpty()) return value;
+        return value
+                .replace(escape, escape + escape)
+                .replace("_", escape + "_")
+                .replace("%", escape + "%");
+    }
+
+    private static byte[] sha256(byte[] bytes) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(bytes);
+        } catch (NoSuchAlgorithmException ex) {
+            throw new AssertionError("SHA-256 is required by the Java platform", ex);
+        }
     }
 
 }

@@ -161,6 +161,10 @@
           "type": "integer",
           "minimum": 1
         },
+        "tileCacheMaxAge": {
+          "type": "integer",
+          "minimum": 0
+        },
         "image": {
           "$ref": "#/definitions/image"
         },
@@ -196,6 +200,7 @@
       "required": [
         "enabled",
         "replicaCount",
+        "tileCacheMaxAge",
         "image",
         "nginx",
         "service",

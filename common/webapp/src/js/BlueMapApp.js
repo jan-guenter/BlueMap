@@ -33,7 +33,10 @@ import {MainMenu} from "./MainMenu";
 import {PopupMarker} from "./PopupMarker";
 import {MarkerSet} from "./markers/MarkerSet";
 import {getLocalStorage, round, setLocalStorage} from "./Utils";
-import {RevalidatingFileLoader} from "./util/RevalidatingFileLoader";
+import {
+    RevalidatingFileLoader,
+    showRequiredEncodingError
+} from "./util/RevalidatingFileLoader";
 import {i18n, setLanguage} from "../i18n";
 import {PlayerMarkerManager} from "./markers/PlayerMarkerManager";
 import {NormalMarkerManager} from "./markers/NormalMarkerManager";
@@ -179,6 +182,12 @@ export class BlueMapApp {
             }
         } catch (e) {
             console.error("Failed to load map!", e);
+            showRequiredEncodingError(e);
+            alert(
+                this.events,
+                e instanceof Error ? e.message : `Failed to load map: ${e}`,
+                "error"
+            );
         }
 
         // map position address
@@ -323,6 +332,7 @@ export class BlueMapApp {
 
                 return map.loadSettings(this.mapViewer.revalidatedUrls)
                     .catch(error => {
+                        showRequiredEncodingError(error);
                         alert(this.events, `Failed to load settings for map '${map.data.id}':` + error, "warning");
                     });
             })
@@ -384,7 +394,11 @@ export class BlueMapApp {
             loader.load("settings.json",
                 resolve,
                 () => {},
-                () => reject("Failed to load the settings.json!")
+                error => reject(
+                    error instanceof Error
+                        ? error
+                        : new Error("Failed to load the settings.json!")
+                )
             );
         });
     }
@@ -404,7 +418,11 @@ export class BlueMapApp {
                     else resolve(fileData);
                 },
                 () => {},
-                () => reject(`Failed to load '${this.fileUrl}'!`)
+                error => reject(
+                    error instanceof Error
+                        ? error
+                        : new Error(`Failed to load '${this.fileUrl}'!`)
+                )
             )
         });
     }

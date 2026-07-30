@@ -121,6 +121,9 @@ secretConfig:
 phpFpm:
   enabled: false
   replicaCount: 2
+  # Browser/proxy freshness window for mutable map tiles. Validators are
+  # rechecked after this interval.
+  tileCacheMaxAge: 60
   image:
     repository: ghcr.io/bluemap-minecraft/bluemap-web-php
     tag: ""

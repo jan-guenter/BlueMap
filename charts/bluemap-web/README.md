@@ -129,6 +129,18 @@ If `credentials.existingSecret` is empty, the chart creates a Secret from
 Helm release, so an existing externally managed Secret is recommended for
 production.
 
+### SQL cache-metadata upgrade
+
+BlueMap adds nullable cache-validator columns to existing SQL storage tables at
+startup. Readers remain compatible while those columns are being added.
+
+For PostgreSQL, stop every older BlueMap writer before starting the first
+version that writes cache metadata, and never let an older writer write to that
+database afterward. A legacy PostgreSQL upsert can update map data while
+preserving the previous hash and timestamp, which would expose stale HTTP cache
+validators. Multiple read-only webserver replicas may run during the upgrade;
+only the writer versions must not overlap.
+
 ## Scalable PHP-FPM data tier
 
 BlueMap's external SQL webserver design uses its `sql.php` script to translate
@@ -137,6 +149,7 @@ normal `/maps/...` requests into SQL queries. Enable that tier with:
 ```yaml
 phpFpm:
   enabled: true
+  tileCacheMaxAge: 60
   replicaCount: 4
 
 ingress:

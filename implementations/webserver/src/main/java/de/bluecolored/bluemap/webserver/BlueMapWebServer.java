@@ -121,7 +121,7 @@ public final class BlueMapWebServer implements Closeable {
                 routes.register(
                         "maps/" + Pattern.quote(mapId) + "/(.*)",
                         "$1",
-                        new MapRequestHandler(storage)
+                        new MapRequestHandler(storage, config.getTileCacheMaxAge())
                 );
             }
 

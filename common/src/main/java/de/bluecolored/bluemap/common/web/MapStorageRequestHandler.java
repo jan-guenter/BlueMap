@@ -32,6 +32,7 @@ import de.bluecolored.bluemap.common.web.http.HttpStatusCode;
 import de.bluecolored.bluemap.core.logger.Logger;
 import de.bluecolored.bluemap.core.storage.GridStorage;
 import de.bluecolored.bluemap.core.storage.MapStorage;
+import de.bluecolored.bluemap.core.storage.CacheMetadata;
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
 import lombok.Getter;
@@ -39,12 +40,8 @@ import lombok.NonNull;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.NoSuchElementException;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -53,12 +50,24 @@ import java.util.regex.Pattern;
 public class MapStorageRequestHandler implements HttpRequestHandler {
 
     private static final Pattern TILE_PATTERN = Pattern.compile("tiles/([\\d/]+)/x(-?[\\d/]+)z(-?[\\d/]+).*");
+    public static final long DEFAULT_TILE_MAX_AGE_SECONDS = 60;
 
     private @NonNull MapStorage mapStorage;
+    private long tileMaxAgeSeconds = Long.getLong(
+            "bluemap.web.tile-cache-max-age-seconds",
+            DEFAULT_TILE_MAX_AGE_SECONDS
+    );
 
     @SuppressWarnings("resource")
     @Override
     public HttpResponse handle(HttpRequest request) {
+        boolean head = request.getMethod().equalsIgnoreCase("HEAD");
+        if (!head && !request.getMethod().equalsIgnoreCase("GET")) {
+            HttpResponse response = new HttpResponse(HttpStatusCode.METHOD_NOT_ALLOWED);
+            response.addHeader("Allow", "GET, HEAD");
+            return response;
+        }
+
         String path = request.getPath();
 
         //normalize path
@@ -76,17 +85,15 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
 
                 GridStorage gridStorage = lod == 0 ? mapStorage.hiresTiles() : mapStorage.lowresTiles(lod);
                 CompressedInputStream in = gridStorage.read(x, z);
-                if (in == null) return new HttpResponse(HttpStatusCode.NO_CONTENT);
+                if (in == null) {
+                    HttpResponse response = new HttpResponse(HttpStatusCode.NO_CONTENT);
+                    response.addHeader("Cache-Control", "no-store");
+                    return response;
+                }
 
-                HttpResponse response = new HttpResponse(HttpStatusCode.OK);
-                response.addHeader("Cache-Control", "public");
-                response.addHeader("Cache-Control", "max-age=" + TimeUnit.DAYS.toSeconds(1));
-
-                if (lod == 0) response.addHeader("Content-Type", "application/octet-stream");
-                else response.addHeader("Content-Type", "image/png");
-
-                writeToResponse(in, response, request);
-                return response;
+                String cacheControl = "public,max-age=" + Math.max(0, tileMaxAgeSeconds) + ",must-revalidate";
+                String contentType = lod == 0 ? "application/octet-stream" : "image/png";
+                return storedResponse(in, contentType, cacheControl, request, head);
             }
 
             // provide meta-data
@@ -98,12 +105,15 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
                 default -> path.startsWith("assets/") ? mapStorage.asset(path.substring(7)).read() : null;
             };
             if (in != null){
-                HttpResponse response = new HttpResponse(HttpStatusCode.OK);
-                response.addHeader("Cache-Control", "public");
-                response.addHeader("Cache-Control", "max-age=" + TimeUnit.DAYS.toSeconds(1));
-                response.addHeader("Content-Type", ContentTypeRegistry.fromFileName(path));
-                writeToResponse(in, response, request);
-                return response;
+                String cacheControl = switch (path) {
+                    case "live/players.json" -> "private,no-store";
+                    case "live/markers.json" -> "public,no-cache";
+                    default -> "public,no-cache";
+                };
+                return storedResponse(
+                        in, ContentTypeRegistry.fromFileName(path), cacheControl,
+                        request, head
+                );
             }
 
         } catch (NumberFormatException | NoSuchElementException ignore){
@@ -115,29 +125,64 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
         return new HttpResponse(HttpStatusCode.NOT_FOUND);
     }
 
-    private void writeToResponse(CompressedInputStream data, HttpResponse response, HttpRequest request) throws IOException {
+    private HttpResponse storedResponse(
+            CompressedInputStream data,
+            String contentType,
+            String cacheControl,
+            HttpRequest request,
+            boolean head
+    ) throws IOException {
         Compression compression = data.getCompression();
-        if (
-                compression != Compression.NONE &&
-                request.hasHeaderValue("Accept-Encoding", compression.getId())
-        ) {
-            response.addHeader("Content-Encoding", compression.getId());
-            response.setBody(data);
-        } else if (
-                compression != Compression.GZIP &&
-                !response.hasHeaderValue("Content-Type", "image/png") &&
-                request.hasHeaderValue("Accept-Encoding", Compression.GZIP.getId())
-        ) {
-            response.addHeader("Content-Encoding", Compression.GZIP.getId());
-            ByteArrayOutputStream byteOut = new ByteArrayOutputStream();
-            try (data; OutputStream os = Compression.GZIP.compress(byteOut)) {
-                data.decompress().transferTo(os);
+        String requiredEncoding = compression == Compression.NONE ? "identity" : compression.getId();
+
+        if (!HttpCacheSupport.acceptsEncoding(request, requiredEncoding)) {
+            data.close();
+            HttpResponse response = new HttpResponse(HttpStatusCode.NOT_ACCEPTABLE);
+            response.addHeader("Cache-Control", "no-store");
+            response.addHeader("Vary", "Accept-Encoding");
+            response.addHeader("Content-Type", "application/problem+json");
+            response.addHeader("X-BlueMap-Required-Content-Encoding", requiredEncoding);
+            if (!head) {
+                response.setBody(
+                        "{\"code\":\"bluemap_required_content_encoding\","
+                                + "\"requiredEncoding\":\"" + requiredEncoding + "\"}"
+                );
             }
-            byte[] compressedData = byteOut.toByteArray();
-            response.setBody(new ByteArrayInputStream(compressedData));
-        } else {
-            response.setBody(data.decompress());
+            return response;
         }
+
+        CacheMetadata metadata = data.getCacheMetadata();
+        String eTag = HttpCacheSupport.eTag(metadata);
+        String lastModified = HttpCacheSupport.lastModified(metadata);
+
+        if (HttpCacheSupport.isNotModified(request, eTag, metadata)) {
+            data.close();
+            HttpResponse response = new HttpResponse(HttpStatusCode.NOT_MODIFIED);
+            addStoredHeaders(response, compression, contentType, cacheControl, eTag, lastModified);
+            return response;
+        }
+
+        HttpResponse response = new HttpResponse(HttpStatusCode.OK);
+        addStoredHeaders(response, compression, contentType, cacheControl, eTag, lastModified);
+        if (head) data.close();
+        else response.setBody(data);
+        return response;
+    }
+
+    private static void addStoredHeaders(
+            HttpResponse response,
+            Compression compression,
+            String contentType,
+            String cacheControl,
+            String eTag,
+            String lastModified
+    ) {
+        response.addHeader("Cache-Control", cacheControl);
+        response.addHeader("Vary", "Accept-Encoding");
+        response.addHeader("Content-Type", contentType);
+        if (compression != Compression.NONE) response.addHeader("Content-Encoding", compression.getId());
+        if (eTag != null) response.addHeader("ETag", eTag);
+        if (lastModified != null) response.addHeader("Last-Modified", lastModified);
     }
 
 }

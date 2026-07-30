@@ -12,6 +12,7 @@ The script reads these environment variables:
 - `BLUEMAP_SQL_DATABASE`
 - `BLUEMAP_SQL_USERNAME`
 - `BLUEMAP_SQL_PASSWORD`
+- `BLUEMAP_TILE_CACHE_MAX_AGE` (optional, defaults to `60` seconds)
 
 PHP-FPM listens on port `9000`. It speaks FastCGI rather than HTTP, so the Helm
 chart runs an unprivileged NGINX sidecar in front of it and exposes that

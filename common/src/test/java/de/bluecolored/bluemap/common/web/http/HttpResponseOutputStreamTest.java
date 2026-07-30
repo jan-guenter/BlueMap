@@ -1,0 +1,80 @@
+/*
+ * This file is part of BlueMap, licensed under the MIT License (MIT).
+ *
+ * Copyright (c) Blue (Lukas Rieger) <https://bluecolored.de>
+ * Copyright (c) contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+package de.bluecolored.bluemap.common.web.http;
+
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class HttpResponseOutputStreamTest {
+
+    @Test
+    void doesNotWriteBodyFramingForHead() throws Exception {
+        HttpResponse response = new HttpResponse(HttpStatusCode.OK);
+        response.setBody("payload");
+        response.setBodySuppressed(true);
+
+        String wire = write(response);
+
+        assertFalse(wire.contains("Transfer-Encoding"));
+        assertFalse(wire.contains("Content-Length: 0"));
+        assertFalse(wire.contains("payload"));
+    }
+
+    @Test
+    void doesNotWriteBodyFramingForNoContentOrNotModified() throws Exception {
+        for (HttpStatusCode status : new HttpStatusCode[]{
+                HttpStatusCode.NO_CONTENT,
+                HttpStatusCode.NOT_MODIFIED
+        }) {
+            HttpResponse response = new HttpResponse(status);
+            response.setBody("payload");
+
+            String wire = write(response);
+
+            assertFalse(wire.contains("Transfer-Encoding"));
+            assertFalse(wire.contains("Content-Length: 0"));
+            assertFalse(wire.contains("payload"));
+        }
+    }
+
+    @Test
+    void retainsZeroLengthForOrdinaryEmptyResponses() throws Exception {
+        HttpResponse response = new HttpResponse(HttpStatusCode.NOT_FOUND);
+
+        assertTrue(write(response).contains("Content-Length: 0"));
+    }
+
+    private static String write(HttpResponse response) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        new HttpResponseOutputStream(bytes).write(response);
+        return bytes.toString(StandardCharsets.UTF_8);
+    }
+
+}

@@ -27,6 +27,7 @@ import * as Vue from 'vue';
 import App from './App.vue';
 import * as BlueMap from "./js/BlueMap";
 import {BlueMapApp} from "./js/BlueMapApp";
+import {showRequiredEncodingError} from "./js/util/RevalidatingFileLoader";
 import {i18nModule, loadLanguageSettings} from "./i18n";
 
 // utils
@@ -59,6 +60,7 @@ async function load() {
 
   } catch (e) {
     console.error("Failed to load BlueMap webapp!", e);
+    const requiredEncodingError = showRequiredEncodingError(e);
     document.body.innerHTML = `
     <div id="bm-app-err">
       <div>
@@ -68,6 +70,11 @@ async function load() {
       </div>
     </div>
   `;
+    if (requiredEncodingError) {
+      document.querySelector(".bm-app-err-main").textContent = e.message;
+      document.querySelector(".bm-app-err-hint").textContent =
+        "The server administrator must choose a map-data encoding supported by this browser.";
+    }
   }
 }
 

@@ -5,14 +5,42 @@ import {Loader, Cache} from "three";
 
 /** @type {Record<string, {revalidatedUrls: Set<string> | undefined, callbacks: Array<{onLoad: function, onProgress: function, onError: function}>>}} */
 const loading = Object.create(null);
+const shownRequiredEncodings = new Set();
 
 const warn = console.warn;
 
 class HttpError extends Error {
     constructor(message, response) {
+        if (response.status === 406) {
+            const requiredEncoding =
+                response.headers.get("X-BlueMap-Required-Content-Encoding") ||
+                "the configured storage encoding";
+            message =
+                `This BlueMap server stores map data with '${requiredEncoding}' encoding, ` +
+                "but this browser did not advertise support for it. " +
+                "Ask the server administrator to choose a browser-supported BlueMap SQL compression.";
+        }
         super(message);
+        this.name = "HttpError";
         this.response = response;
+        if (response.status === 406) {
+            this.code = "bluemap_required_content_encoding";
+            this.requiredEncoding =
+                response.headers.get("X-BlueMap-Required-Content-Encoding") ||
+                null;
+        }
     }
+}
+
+export function showRequiredEncodingError(error) {
+    if (error?.code !== "bluemap_required_content_encoding") return false;
+
+    const key = error.requiredEncoding || error.message;
+    if (!shownRequiredEncodings.has(key)) {
+        shownRequiredEncodings.add(key);
+        globalThis.alert(error.message);
+    }
+    return true;
 }
 
 /**

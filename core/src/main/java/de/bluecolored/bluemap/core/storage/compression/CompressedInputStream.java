@@ -24,7 +24,9 @@
  */
 package de.bluecolored.bluemap.core.storage.compression;
 
+import de.bluecolored.bluemap.core.storage.CacheMetadata;
 import de.bluecolored.bluemap.core.util.stream.DelegateInputStream;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -35,6 +37,7 @@ import java.io.InputStream;
 public class CompressedInputStream extends DelegateInputStream {
 
     private final Compression compression;
+    private final @Nullable CacheMetadata cacheMetadata;
 
     /**
      * Creates a new CompressedInputStream with {@link Compression#NONE} from an (uncompressed) {@link InputStream}.
@@ -50,8 +53,13 @@ public class CompressedInputStream extends DelegateInputStream {
      * This does <b>not</b> compress the provided InputStream.
      */
     public CompressedInputStream(InputStream in, Compression compression) {
+        this(in, compression, null);
+    }
+
+    public CompressedInputStream(InputStream in, Compression compression, @Nullable CacheMetadata cacheMetadata) {
         super(in);
         this.compression = compression;
+        this.cacheMetadata = cacheMetadata;
     }
 
     /**
@@ -66,6 +74,10 @@ public class CompressedInputStream extends DelegateInputStream {
      */
     public Compression getCompression() {
         return compression;
+    }
+
+    public @Nullable CacheMetadata getCacheMetadata() {
+        return cacheMetadata;
     }
 
 }
