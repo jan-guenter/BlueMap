@@ -281,6 +281,9 @@
           "type": "integer",
           "minimum": 1
         },
+        "strategy": {
+          "type": "object"
+        },
         "maxChildren": {
           "type": "integer",
           "minimum": 1
@@ -323,6 +326,7 @@
       "required": [
         "enabled",
         "replicaCount",
+        "strategy",
         "maxChildren",
         "image",
         "deploymentLabels",

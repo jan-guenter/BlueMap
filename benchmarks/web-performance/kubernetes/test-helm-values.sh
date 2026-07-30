@@ -131,6 +131,7 @@ assert_absent "$temporary/rust-r3.yaml" "kind: Secret"
 
 assert_count_at_least "$temporary/php.yaml" \
     "bluemap.guenter.cloud/experiment-id: php-postgresql-baseline" 2
+assert_count_at_least "$temporary/php.yaml" "type: Recreate" 2
 assert_contains "$temporary/php.yaml" "pm = static"
 assert_contains "$temporary/php.yaml" "pm.max_children = 12"
 assert_contains "$temporary/php.yaml" \

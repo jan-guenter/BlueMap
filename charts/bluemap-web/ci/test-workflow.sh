@@ -70,6 +70,8 @@ helm template test "$temporary/bluemap-web-$chart_version.tgz" \
     --namespace bluemap \
     --values "$repository_root/charts/bluemap-web/ci/php-fpm-values.yaml" \
     >"$temporary/full-sha.yaml"
+assert_contains "$temporary/full-sha.yaml" "type: Recreate"
+assert_contains "$temporary/full-sha.yaml" "type: RollingUpdate"
 
 chart_labels=$(
     awk '$1 == "helm.sh/chart:" {

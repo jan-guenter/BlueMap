@@ -183,6 +183,8 @@ secretConfig:
 phpFpm:
   enabled: false
   replicaCount: 2
+  # Empty selects RollingUpdate for multiple replicas and Recreate for one.
+  strategy: {}
   # Maximum concurrent PHP requests (and therefore transient PDO
   # connections) per replica.
   maxChildren: 8

@@ -10,6 +10,17 @@ metadata:
     {{- end }}
 spec:
   replicas: {{ .Values.phpFpm.replicaCount }}
+  strategy:
+    {{- if .Values.phpFpm.strategy }}
+    {{- toYaml .Values.phpFpm.strategy | nindent 4 }}
+    {{- else if gt (int .Values.phpFpm.replicaCount) 1 }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- else }}
+    type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "bluemap-web.phpSelectorLabels" . | nindent 6 }}

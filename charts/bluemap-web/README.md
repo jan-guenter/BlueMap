@@ -353,6 +353,11 @@ non-persistent PDO connection per request, the maximum PHP database concurrency 
 approximately
 `phpFpm.replicaCount * phpFpm.maxChildren`.
 
+With an empty `phpFpm.strategy`, one replica uses `Recreate` so an update does
+not temporarily require capacity for two complete PHP/NGINX pods. Multiple
+replicas use a rolling update by default. Set `phpFpm.strategy` explicitly to
+override that selection.
+
 PHP-FPM can only be enabled with `storage.type: sql`, and BlueMap's script
 supports MySQL, MariaDB, and PostgreSQL. Helm rendering fails for file storage
 or SQLite.
