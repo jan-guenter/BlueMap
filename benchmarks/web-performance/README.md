@@ -168,6 +168,88 @@ Resource samples, exact manifests, image digests, source SHAs, workload
 parameters, and raw k6 output belong in an experiment-specific artifact
 directory. Do not commit credentials or unredacted cluster Secrets.
 
+## Reproducible origin-case runner
+
+`tools/run_origin_case.sh` runs one complete origin case against an exact
+`bluemap-perf-*` Service. It requires the existing
+`bluemap-perf-loadgen` Pod and explicit names for every web Deployment, web
+Pod, and database Pod; it does not discover targets through broad selectors.
+
+The runner does not apply, patch, scale, restart, delete, or replace Kubernetes
+resources. It only reads exact resources and `metrics.k8s.io`, opens a local
+port-forward for the HTTP contract check, and executes k6 in the load-generator
+Pod. When explicitly configured, it also opens a read-only port-forward to one
+exact cluster-local Prometheus Service. The copied workload files and k6 output
+are written to the load-generator Pod's disposable `/artifacts` `emptyDir`.
+
+Use a unique case ID and current, exact Pod names:
+
+```shell
+BENCHMARK_PYTHON=/path/to/venv/bin/python \
+benchmarks/web-performance/tools/run_origin_case.sh \
+  --case-id java-postgresql-browser-mixed-001 \
+  --service bluemap-perf-java \
+  --service-port 8100 \
+  --manifest benchmarks/web-performance/artifacts/snapshot/manifest.json \
+  --web-deployment bluemap-perf-java \
+  --web-pod bluemap-perf-java-POD-SUFFIX \
+  --database-pod bluemap-perf-postgres-0 \
+  --profile browser-mixed \
+  --rate 100 \
+  --accept-encoding zstd \
+  --stored-encoding zstd \
+  --contract-mode enhanced \
+  --warmup 2m \
+  --measurement 5m \
+  --cooldown-seconds 60 \
+  --repetitions 5 \
+  --prometheus-url \
+    http://rancher-monitoring-prometheus.cattle-monitoring-system.svc:9090 \
+  --prometheus-step-seconds 15
+```
+
+Repeat `--web-deployment`, `--web-pod`, or `--database-pod` for a
+horizontally scaled case. Use `--contract-mode legacy` only for the unchanged
+PHP baseline, which intentionally lacks the enhanced validator contract.
+Variant ordering is randomized by the matrix operator outside this
+single-case runner.
+
+The selected Python must have the `zstandard` package used by the HTTP contract
+gate. Set `BENCHMARK_PYTHON`, pass `--python /path/to/venv/bin/python`, or
+activate such a virtual environment before running the case.
+
+Prometheus is optional and may instead be set with `PROMETHEUS_URL` and
+`PROMETHEUS_STEP_SECONDS`. If it is omitted, the periodic `metrics.k8s.io`
+sampler remains active. A cluster-local `SERVICE.NAMESPACE.svc` URL is reached
+through an exact Service port-forward; directly reachable HTTP(S) URLs are
+queried as supplied. URLs containing credentials are rejected.
+
+The local `artifacts/<case-id>/` directory contains:
+
+- exact copies and SHA-256 hashes of the manifest, k6/contract scripts,
+  runner helpers, and workload parameters;
+- sanitized before/after Service, Deployment, and Pod specs;
+- resolved container image IDs/digests and per-repetition restart counts;
+- timestamped CPU and memory samples for the load generator and every selected
+  web/database Pod, read directly from `metrics.k8s.io`;
+- when enabled, one bounded Prometheus `query_range` bundle for the exact case
+  start/end timestamps, containing selected-pod cAdvisor CPU, working set,
+  throttling and network series plus PostgreSQL connections, transactions,
+  blocks and statement execution series where those metrics exist;
+- the HTTP contract output;
+- k6 console output, summary JSON, and raw metric NDJSON for both warmup and
+  measurement in every repetition;
+- phase timestamps, explicit failure messages, and a final `result.json`.
+
+Literal sensitive environment values and credential-like command arguments are
+redacted while Secret references remain visible. Secrets and ConfigMaps are
+refused by the snapshot helper. A result is failed if the HTTP contract fails,
+k6 reports a failed check or threshold, an expected artifact is missing, a
+metrics sample fails, a configured Prometheus capture fails, a selected
+container restarts, or fewer than the requested repetitions complete. An empty
+PostgreSQL series is retained as a valid result because exporter metric names
+vary; it is not silently substituted with a broader query.
+
 ## Correctness gates
 
 Performance results are rejected unless the variant passes:
@@ -187,7 +269,7 @@ Performance results are rejected unless the variant passes:
 - health transition during database loss and recovery;
 - clean draining of an in-flight large response on SIGTERM.
 
-## Running k6
+## Low-level k6 invocation
 
 Generate a non-sensitive request manifest for the selected data snapshot, then
 run one profile:
