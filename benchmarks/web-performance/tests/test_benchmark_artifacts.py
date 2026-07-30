@@ -761,6 +761,7 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("claimName: minecraft-data", snapshot)
         self.assertIn("readOnly: true", snapshot)
         self.assertIn("claimName: bluemap-perf-snapshot", snapshot)
+        self.assertIn("storageClassName: longhorn-static", snapshot)
 
     def test_documented_slow_reader_uses_guarded_verified_expectations(
         self,

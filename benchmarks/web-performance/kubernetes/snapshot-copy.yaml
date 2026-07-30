@@ -8,6 +8,7 @@ metadata:
     app.kubernetes.io/part-of: bluemap-web-performance
     bluemap.guenter.cloud/experiment-id: immutable-snapshot
 spec:
+  storageClassName: longhorn-static
   accessModes:
     - ReadWriteMany
   resources:
