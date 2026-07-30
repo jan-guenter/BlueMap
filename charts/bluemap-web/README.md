@@ -17,6 +17,13 @@ The web pod runs without root, Linux capabilities, or a service-account token
 and supports a read-only root filesystem. It exposes a ClusterIP Service on
 port `8100`; ingress is opt-in.
 
+`podLabels` adds labels to Java or Rust Pods, while `deploymentLabels` adds
+labels to the owning Deployment without changing its immutable selector. The
+PHP tier has the equivalent `phpFpm.podLabels` and
+`phpFpm.deploymentLabels` values. Applying the same experiment identity to
+both objects lets destructive operational tooling verify an exact ownership
+chain before acting.
+
 For non-release workflow runs, all three images receive the immutable
 `sha-<full-40-character-commit>` tag and the OCI chart version is
 `0.1.0-dev.sha.<full-40-character-commit>`. Branch tags remain convenience

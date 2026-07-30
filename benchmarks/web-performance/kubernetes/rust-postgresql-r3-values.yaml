@@ -1,0 +1,19 @@
+# Apply after rust-postgresql-values.yaml for the three-replica case.
+fullnameOverride: bluemap-perf-rust-postgresql-r3
+
+replicaCount: 3
+
+webserver:
+  rust:
+    config:
+      maxInFlightRequests: 4
+
+podLabels:
+  bluemap.guenter.cloud/experiment-id: rust-postgresql-r3
+
+deploymentLabels:
+  bluemap.guenter.cloud/experiment-id: rust-postgresql-r3
+
+storage:
+  sql:
+    maxConnections: 4

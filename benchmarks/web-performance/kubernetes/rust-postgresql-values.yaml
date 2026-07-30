@@ -1,0 +1,61 @@
+# Rust/PostgreSQL benchmark candidate. Install this only from the full-SHA OCI
+# chart documented in ../README.md. The empty image tag resolves to that
+# packaged chart's immutable appVersion.
+fullnameOverride: bluemap-perf-rust-postgresql
+
+replicaCount: 1
+
+webserver:
+  implementation: rust
+  rust:
+    image:
+      repository: ghcr.io/jan-guenter/bluemap-web-rust
+      tag: ""
+      pullPolicy: IfNotPresent
+    config:
+      maxInFlightRequests: 12
+      maxObjectBytes: 67108864
+    maps:
+      - id: world
+        sorting: 0
+    databaseTls:
+      mode: verify-full
+      ca:
+        existingSecret: bluemap-perf-postgres-ca
+        key: ca.crt
+
+podLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: rust-postgresql
+
+deploymentLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: rust-postgresql
+
+storage:
+  id: performance
+  type: sql
+  compression: zstd
+  sql:
+    databaseType: postgresql
+    host: bluemap-perf-postgres.minecraft.svc.cluster.local
+    port: 5432
+    database: bluemap
+    # The r1 and r3 variants keep the aggregate SQL pool at 12.
+    maxConnections: 12
+    connectTimeoutSeconds: 10
+    credentials:
+      existingSecret: bluemap-perf-postgres
+      usernameKey: superuser-username
+      passwordKey: superuser-password
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector:
+  kubernetes.io/hostname: contabo2

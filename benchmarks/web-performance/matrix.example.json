@@ -45,6 +45,22 @@
       "storageType": "sql",
       "databaseBackend": "postgresql",
       "replicaCount": 1
+    },
+    {
+      "id": "java-new-postgresql-r3",
+      "contractMode": "enhanced",
+      "implementation": "java",
+      "storageType": "sql",
+      "databaseBackend": "postgresql",
+      "replicaCount": 3
+    },
+    {
+      "id": "rust-postgresql-r3",
+      "contractMode": "enhanced",
+      "implementation": "rust",
+      "storageType": "sql",
+      "databaseBackend": "postgresql",
+      "replicaCount": 3
     }
   ],
   "cases": [
@@ -63,6 +79,23 @@
         "java-old-postgresql",
         "java-new-postgresql",
         "rust-postgresql"
+      ]
+    },
+    {
+      "id": "map-mixed-horizontal-r300",
+      "profile": "map-data-mixed",
+      "rate": 300,
+      "viewers": 300,
+      "markerIntervalSeconds": 10,
+      "acceptEncoding": "zstd",
+      "storedEncoding": "zstd",
+      "latencyP95Milliseconds": 500,
+      "latencyP99Milliseconds": 1000,
+      "variants": [
+        "java-new-postgresql",
+        "rust-postgresql",
+        "java-new-postgresql-r3",
+        "rust-postgresql-r3"
       ]
     },
     {

@@ -731,7 +731,7 @@ stop_sampler() {
 }
 
 # Invoked through the signal/exit trap.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 cleanup() {
     set +e
     stop_port_forward

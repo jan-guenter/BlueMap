@@ -66,6 +66,10 @@ serviceAccount:
 
 podAnnotations: {}
 podLabels: {}
+# Additional labels on the primary Java or Rust Deployment object. Workload
+# safety tooling can require the same experiment labels on both this object
+# and podLabels without changing immutable selectors.
+deploymentLabels: {}
 
 podSecurityContext:
   fsGroup: 10001
@@ -198,6 +202,7 @@ phpFpm:
     pathType: Prefix
   podAnnotations: {}
   podLabels: {}
+  deploymentLabels: {}
   podSecurityContext:
     fsGroup: 82
     fsGroupChangePolicy: OnRootMismatch

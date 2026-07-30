@@ -534,13 +534,15 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("readOnly: true", snapshot)
         self.assertIn("claimName: bluemap-perf-snapshot", snapshot)
 
-    def test_documented_slow_reader_supplies_verified_expectations(self) -> None:
+    def test_documented_slow_reader_uses_guarded_verified_expectations(
+        self,
+    ) -> None:
         readme = (BENCHMARK_ROOT / "README.md").read_text(encoding="utf-8")
         section = readme.split("## Graceful-drain slow-reader check", maxsplit=1)[1]
 
-        self.assertIn("--expected-length \"$EXPECTED_LENGTH\"", section)
-        self.assertIn("--expected-sha256 \"$EXPECTED_SHA256\"", section)
-        self.assertIn("bluemap-slow-reader.expected.json", section)
+        self.assertIn("run_guarded_slow_reader.py", section)
+        self.assertIn("--confirm-delete-pod \"$WEB_POD\"", section)
+        self.assertIn("expected response headers/hash/length", section)
 
 
 class SlowReaderTests(unittest.TestCase):

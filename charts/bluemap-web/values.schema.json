@@ -17,6 +17,9 @@
     "image": {
       "$ref": "#/definitions/image"
     },
+    "deploymentLabels": {
+      "$ref": "#/definitions/labels"
+    },
     "webserver": {
       "type": "object",
       "additionalProperties": false,
@@ -281,6 +284,9 @@
         "image": {
           "$ref": "#/definitions/image"
         },
+        "deploymentLabels": {
+          "$ref": "#/definitions/labels"
+        },
         "nginx": {
           "type": "object",
           "properties": {
@@ -314,6 +320,7 @@
         "enabled",
         "replicaCount",
         "image",
+        "deploymentLabels",
         "nginx",
         "service",
         "ingress"
@@ -325,6 +332,7 @@
     "terminationGracePeriodSeconds",
     "shutdownGracePeriodSeconds",
     "image",
+    "deploymentLabels",
     "webserver",
     "service",
     "storage",
@@ -348,6 +356,12 @@
         }
       },
       "required": ["repository", "pullPolicy", "tag"]
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
     },
     "service": {
       "type": "object",

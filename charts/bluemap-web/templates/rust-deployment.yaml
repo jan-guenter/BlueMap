@@ -5,6 +5,9 @@ metadata:
   name: {{ include "bluemap-web.fullname" . }}
   labels:
     {{- include "bluemap-web.labels" . | nindent 4 }}
+    {{- with .Values.deploymentLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:

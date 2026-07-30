@@ -207,6 +207,65 @@ zero replica count. The patch relies on libpq's
 `PGSSLMODE=verify-full` and `PGSSLROOTCERT` settings, so TLS is verified without
 adding TLS-specific PDO fields or changing the legacy endpoint.
 
+## Published optimized Java and Rust candidates
+
+Install optimized Java and Rust from the immutable OCI chart produced by the
+same full commit as their images. Do not install these benchmark values from a
+local chart or a branch alias: both image tags are deliberately empty and
+therefore resolve to the packaged chart's `appVersion`,
+`sha-<full-40-character-commit>`.
+
+```shell
+FULL_SHA=FULL_40_CHARACTER_COMMIT_SHA
+CHART_VERSION="0.1.0-dev.sha.$FULL_SHA"
+CHART=oci://ghcr.io/jan-guenter/charts/bluemap-web
+
+test "$(helm show chart "$CHART" --version "$CHART_VERSION" |
+  awk '$1 == "appVersion:" {print $2}')" = "sha-$FULL_SHA"
+
+helm upgrade --install bluemap-perf-java-new-postgresql "$CHART" \
+  --version "$CHART_VERSION" \
+  --kubeconfig /root/.kube/guenter-cloud \
+  --namespace minecraft \
+  -f benchmarks/web-performance/kubernetes/java-optimized-postgresql-values.yaml
+
+helm upgrade --install bluemap-perf-rust-postgresql "$CHART" \
+  --version "$CHART_VERSION" \
+  --kubeconfig /root/.kube/guenter-cloud \
+  --namespace minecraft \
+  -f benchmarks/web-performance/kubernetes/rust-postgresql-values.yaml
+```
+
+The two base files produce exact Deployment names and experiment labels,
+verify PostgreSQL TLS against the existing `bluemap-perf-postgres-ca` Secret,
+and reference credentials from the existing `bluemap-perf-postgres` Secret.
+They contain no credential values. Each web replica has matching one-CPU and
+one-GiB requests and limits and is pinned to the benchmark web node.
+
+For horizontal scaling, install separate three-replica releases with the
+corresponding overlay:
+
+```shell
+helm upgrade --install bluemap-perf-java-new-postgresql-r3 "$CHART" \
+  --version "$CHART_VERSION" \
+  --kubeconfig /root/.kube/guenter-cloud \
+  --namespace minecraft \
+  -f benchmarks/web-performance/kubernetes/java-optimized-postgresql-values.yaml \
+  -f benchmarks/web-performance/kubernetes/java-optimized-postgresql-r3-values.yaml
+
+helm upgrade --install bluemap-perf-rust-postgresql-r3 "$CHART" \
+  --version "$CHART_VERSION" \
+  --kubeconfig /root/.kube/guenter-cloud \
+  --namespace minecraft \
+  -f benchmarks/web-performance/kubernetes/rust-postgresql-values.yaml \
+  -f benchmarks/web-performance/kubernetes/rust-postgresql-r3-values.yaml
+```
+
+The one-replica values allow 12 database connections. The replica-three
+overlays allow four per process, preserving the same aggregate 12-connection
+budget. Rust's in-flight request limit follows the same 12/4 split. Run only
+one candidate release at a time during measurement.
+
 ## Fixed comparison controls
 
 For a valid comparison, every variant in a matrix run uses:
@@ -626,100 +685,60 @@ or Kubernetes state.
 ## Graceful-drain slow-reader check
 
 The origin runner stays read-only. Run the destructive Pod-termination check
-separately against one exact disposable `bluemap-perf-*` Pod. This procedure
-holds a large response open, sends SIGTERM through normal Kubernetes Pod
-deletion, and requires the transferred representation to finish:
+separately with the guarded helper against one exact disposable
+`bluemap-perf-*` Pod. Supply the exact Deployment and Pod names shown by the
+recorded case inventory; do not use a selector or a generated shell pipeline:
 
 ```shell
-WEB_DEPLOYMENT=bluemap-perf-WEB-DEPLOYMENT
-WEB_POD=bluemap-perf-WEB-POD
-LARGE_OBJECT=$(jq -r '.largeObject' \
-  benchmarks/web-performance/artifacts/snapshot/manifest.json)
-rm -f /tmp/bluemap-slow-reader.ready.json \
-  /tmp/bluemap-slow-reader.result.json \
-  /tmp/bluemap-slow-reader.expected.json \
-  /tmp/bluemap-slow-reader.expected-body \
-  /tmp/bluemap-slow-reader.expected-headers
+WEB_DEPLOYMENT=bluemap-perf-java-new-postgresql
+WEB_POD=bluemap-perf-java-new-postgresql-REPLICASET-POD
+EXPERIMENT_ID=java-new-postgresql
 
-kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
-  port-forward "pod/$WEB_POD" 18100:8100 \
-  > /tmp/bluemap-slow-reader-port-forward.log 2>&1 &
-PORT_FORWARD_PID=$!
-for _ in {1..100}; do
-  grep -q 'Forwarding from 127.0.0.1:' \
-    /tmp/bluemap-slow-reader-port-forward.log && break
-  if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-    wait "$PORT_FORWARD_PID"
-    exit 1
-  fi
-  sleep 0.1
-done
-grep -q 'Forwarding from 127.0.0.1:' \
-  /tmp/bluemap-slow-reader-port-forward.log
-
-# Fetch one complete stored representation first. curl dechunks the transfer
-# but does not decode zstd because --compressed is deliberately absent.
-curl --fail --silent --show-error \
-  --header 'Accept-Encoding: zstd' \
-  --dump-header /tmp/bluemap-slow-reader.expected-headers \
-  --output /tmp/bluemap-slow-reader.expected-body \
-  "http://127.0.0.1:18100$LARGE_OBJECT"
-EXPECTED_LENGTH=$(wc -c < /tmp/bluemap-slow-reader.expected-body)
-EXPECTED_SHA256=$(sha256sum /tmp/bluemap-slow-reader.expected-body |
-  awk '{print $1}')
-jq -n \
-  --arg path "$LARGE_OBJECT" \
-  --arg encoding zstd \
-  --argjson length "$EXPECTED_LENGTH" \
-  --arg sha256 "$EXPECTED_SHA256" \
-  '{
-    path: $path,
-    acceptEncoding: $encoding,
-    storedRepresentationLength: $length,
-    storedRepresentationSha256: $sha256
-  }' > /tmp/bluemap-slow-reader.expected.json
-
-python3 benchmarks/web-performance/tools/slow_reader.py \
-  "http://127.0.0.1:18100$LARGE_OBJECT" \
-  --accept-encoding zstd \
-  --expected-length "$EXPECTED_LENGTH" \
-  --expected-sha256 "$EXPECTED_SHA256" \
+python3 benchmarks/web-performance/tools/run_guarded_slow_reader.py \
+  --kubeconfig /root/.kube/guenter-cloud \
+  --namespace minecraft \
+  --deployment "$WEB_DEPLOYMENT" \
+  --pod "$WEB_POD" \
+  --experiment-id "$EXPERIMENT_ID" \
+  --confirm-delete-pod "$WEB_POD" \
+  --manifest benchmarks/web-performance/artifacts/snapshot/manifest.json \
+  --artifact-dir \
+    "benchmarks/web-performance/artifacts/drain/$EXPERIMENT_ID" \
   --bytes-per-second 1048576 \
   --initial-delay-seconds 2 \
-  --timeout-seconds 90 \
-  --ready-file /tmp/bluemap-slow-reader.ready.json \
-  --output /tmp/bluemap-slow-reader.result.json &
-SLOW_READER_PID=$!
-
-while test ! -s /tmp/bluemap-slow-reader.ready.json; do
-  if ! kill -0 "$SLOW_READER_PID" 2>/dev/null; then
-    wait "$SLOW_READER_PID"
-    exit 1
-  fi
-  sleep 0.1
-done
-kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
-  delete pod "$WEB_POD" --grace-period=30 --wait=false
-
-wait "$SLOW_READER_PID"
-jq -e '.complete == true' /tmp/bluemap-slow-reader.result.json
-kill "$PORT_FORWARD_PID" 2>/dev/null || true
-wait "$PORT_FORWARD_PID" 2>/dev/null || true
-kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
-  rollout status "deployment/$WEB_DEPLOYMENT" --timeout=120s
+  --request-timeout-seconds 90 \
+  --grace-period-seconds 30 \
+  --rollout-timeout-seconds 120
 ```
 
-`slow_reader.py` refuses to run without an independently captured expected
-length or SHA-256; the canonical procedure supplies both. Archive
-`expected.json`, the response headers, and the ready/result JSON. The
-temporary expected body may be deleted after its metadata has been archived.
+The helper fails closed unless both exact names begin with `bluemap-perf-`;
+it explicitly rejects `minecraft` and `minecraft-data`. Both the Deployment
+and Pod must have
+`app.kubernetes.io/part-of=bluemap-web-performance` and the exact, nonempty
+experiment ID supplied on the command line. The Pod must be Running and Ready,
+be selected by the named Deployment, and be controlled by a ReplicaSet owned
+by that exact Deployment and UID.
+
+Those identities and labels are checked before opening the local forwarding
+connection, after it opens, and immediately before termination. Termination
+uses the verified Pod UID as an API precondition, so a same-name replacement
+cannot be removed by a time-of-check/time-of-use race. No other resource is
+deleted. The helper waits for the complete transferred representation, the
+old Pod to disappear, and the named Deployment rollout to become ready.
+
+The artifact directory must not already exist. It receives the verified
+target identities, expected response headers/hash/length, ready/result JSON,
+termination response, logs, and final run state. A successful run has
+`complete: true`, `podDeletionSubmitted: true`, and
+`replacementRolloutReady: true` in the printed result.
 
 Choose a byte rate that makes the response last several seconds but complete
 comfortably inside both the application and Kubernetes grace periods. Archive
 the Pod events, termination timestamps, and server logs.
 Wait for the replacement Deployment to become fully available before a
 measured case. Never run this procedure against `deployment/minecraft` or any
-non-disposable Pod.
+non-disposable Pod, and never pass a resource type, selector, wildcard, or
+partial name where an exact name is required.
 
 For public delivery tests, use
 `https://bluemap-test.guenter.cloud` and a unique experiment ID. Any temporary

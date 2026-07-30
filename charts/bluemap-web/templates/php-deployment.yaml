@@ -5,6 +5,9 @@ metadata:
   name: {{ include "bluemap-web.phpFullname" . }}
   labels:
     {{- include "bluemap-web.phpLabels" . | nindent 4 }}
+    {{- with .Values.phpFpm.deploymentLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   replicas: {{ .Values.phpFpm.replicaCount }}
   selector:

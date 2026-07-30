@@ -1,19 +1,22 @@
-fullnameOverride: bluemap-perf-java
+# Optimized Java/PostgreSQL benchmark candidate. Install this only from the
+# full-SHA OCI chart documented in ../README.md. The empty image tag resolves
+# to that packaged chart's immutable appVersion.
+fullnameOverride: bluemap-perf-java-new-postgresql
 
 replicaCount: 1
 
 image:
   repository: ghcr.io/jan-guenter/bluemap-web
-  tag: sha-2e4af8f
+  tag: ""
   pullPolicy: IfNotPresent
 
 podLabels:
   app.kubernetes.io/part-of: bluemap-web-performance
-  bluemap.guenter.cloud/experiment-id: java-postgresql
+  bluemap.guenter.cloud/experiment-id: java-new-postgresql
 
 deploymentLabels:
   app.kubernetes.io/part-of: bluemap-web-performance
-  bluemap.guenter.cloud/experiment-id: java-postgresql
+  bluemap.guenter.cloud/experiment-id: java-new-postgresql
 
 storage:
   id: performance
@@ -26,7 +29,8 @@ storage:
     database: bluemap
     connectionUrl: >-
       jdbc:postgresql://bluemap-perf-postgres.minecraft.svc.cluster.local:5432/bluemap?sslmode=verify-full&sslrootcert=/etc/bluemap-database/ca.crt
-    maxConnections: 10
+    # The r1 and r3 variants keep the aggregate SQL pool at 12.
+    maxConnections: 12
     credentials:
       existingSecret: bluemap-perf-postgres
       usernameKey: superuser-username
