@@ -521,6 +521,8 @@ fi
     die "Slow-reader helper is unavailable"
 [[ -f "$SCRIPT_DIR/generate_schedule.py" ]] ||
     die "Schedule validator is unavailable"
+[[ -f "$SCRIPT_DIR/check_arrival_gate.py" ]] ||
+    die "Arrival-gate helper is unavailable"
 [[ -f "$KUBECONFIG_PATH" ]] || die "Kubeconfig '$KUBECONFIG_PATH' is not a regular file"
 
 for command in kubectl jq sha256sum tee diff; do
@@ -1293,30 +1295,22 @@ copy_remote_file() {
 validate_arrival_gate() {
     local summary="$1"
     local destination="$2"
-    local minimum_rate
-    minimum_rate="$(
-        "$PYTHON_BIN" -c \
-            'import sys; print(float(sys.argv[1]) * float(sys.argv[2]))' \
-            "$EXPECTED_ITERATION_RATE" "$MIN_ACHIEVED_RATE_RATIO"
-    )" || return 1
-
-    jq \
-        --argjson offeredIterationsPerSecond "$EXPECTED_ITERATION_RATE" \
-        --argjson minimumAchievedRatio "$MIN_ACHIEVED_RATE_RATIO" \
-        --argjson minimumIterationsPerSecond "$minimum_rate" \
-        '{
-            offeredIterationsPerSecond: $offeredIterationsPerSecond,
-            minimumAchievedRateRatio: $minimumAchievedRatio,
-            minimumIterationsPerSecond: $minimumIterationsPerSecond,
-            achievedIterationsPerSecond: .metrics.iterations.values.rate,
-            droppedIterations: (.metrics.dropped_iterations.values.count // 0),
-            passed: (
-                (.metrics.dropped_iterations.values.count // 0) == 0
-                and .metrics.iterations.values.rate >= $minimumIterationsPerSecond
-            )
-        }' "$summary" > "$destination" || return 1
-
-    jq -e '.passed == true' "$destination" >/dev/null
+    local duration="$3"
+    local -a arguments=(
+        "$summary"
+        --output "$destination"
+        --profile "$PROFILE"
+        --rate "$RATE"
+        --viewers "$VIEWERS"
+        --marker-interval-seconds "$MARKER_INTERVAL_SECONDS"
+        --duration "$duration"
+        --minimum-achieved-ratio "$MIN_ACHIEVED_RATE_RATIO"
+    )
+    if [[ "$PROFILE" == "live-viewers" ]] &&
+        (($(jq '.markers | length' "$MANIFEST") > 0)); then
+        arguments+=(--markers-present)
+    fi
+    "$PYTHON_BIN" "$SCRIPT_DIR/check_arrival_gate.py" "${arguments[@]}"
 }
 
 validate_latency_gate() {
@@ -1326,20 +1320,18 @@ validate_latency_gate() {
     jq \
         --argjson maximumP95Milliseconds "$EFFECTIVE_LATENCY_P95_MS" \
         --argjson maximumP99Milliseconds "$EFFECTIVE_LATENCY_P99_MS" \
-        '{
+        '(.metrics["http_req_duration{traffic:workload}"] // {}) as $metric
+        | ($metric.values // $metric) as $values
+        | {
             maximumP95Milliseconds: $maximumP95Milliseconds,
             maximumP99Milliseconds: $maximumP99Milliseconds,
-            observedP95Milliseconds: .metrics[
-                "http_req_duration{traffic:workload}"
-            ].values["p(95)"],
-            observedP99Milliseconds: .metrics[
-                "http_req_duration{traffic:workload}"
-            ].values["p(99)"],
+            observedP95Milliseconds: $values["p(95)"],
+            observedP99Milliseconds: $values["p(99)"],
             passed: (
-                (.metrics["http_req_duration{traffic:workload}"].values["p(95)"] | type) == "number"
-                and (.metrics["http_req_duration{traffic:workload}"].values["p(99)"] | type) == "number"
-                and .metrics["http_req_duration{traffic:workload}"].values["p(95)"] < $maximumP95Milliseconds
-                and .metrics["http_req_duration{traffic:workload}"].values["p(99)"] < $maximumP99Milliseconds
+                ($values["p(95)"] | type) == "number"
+                and ($values["p(99)"] | type) == "number"
+                and $values["p(95)"] < $maximumP95Milliseconds
+                and $values["p(99)"] < $maximumP99Milliseconds
             )
         }' "$summary" > "$destination" || return 1
 
@@ -1422,9 +1414,10 @@ run_k6_phase() {
     if [[ -s "$local_dir/summary.json" ]] &&
         ! validate_arrival_gate \
             "$local_dir/summary.json" \
-            "$local_dir/arrival-gate.json"; then
+            "$local_dir/arrival-gate.json" \
+            "$duration"; then
         record_failure \
-            "Repetition $repetition $phase: offered/achieved-rate or dropped-iteration gate failed"
+            "Repetition $repetition $phase: scheduled/completed or dropped-iteration gate failed"
         artifact_failure=1
     fi
     if [[ "$phase" == "measurement" &&
@@ -1548,6 +1541,7 @@ write_workload_metadata() {
         --arg runnerSha256 "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')" \
         --arg configSanitizerSha256 "$(sha256sum "$SCRIPT_DIR/sanitize_configmap.py" | awk '{print $1}')" \
         --arg configMapReferencesSha256 "$(sha256sum "$SCRIPT_DIR/configmap_references.py" | awk '{print $1}')" \
+        --arg arrivalGateSha256 "$(sha256sum "$SCRIPT_DIR/check_arrival_gate.py" | awk '{print $1}')" \
         --arg slowReaderSha256 "$(sha256sum "$SCRIPT_DIR/slow_reader.py" | awk '{print $1}')" \
         --argjson mapIds "$MANIFEST_MAP_IDS_JSON" \
         --argjson configMaps "$CONFIGMAPS_JSON" \
@@ -1679,6 +1673,7 @@ write_workload_metadata() {
                 runnerSha256: $runnerSha256,
                 configSanitizerSha256: $configSanitizerSha256,
                 configMapReferencesSha256: $configMapReferencesSha256,
+                arrivalGateSha256: $arrivalGateSha256,
                 slowReaderSha256: $slowReaderSha256
             }
         }' > "$ARTIFACT_DIR/inputs/workload.json"
@@ -1777,6 +1772,8 @@ cp -- "$SCRIPT_DIR/configmap_references.py" \
     "$ARTIFACT_DIR/inputs/configmap_references.py"
 cp -- "$SCRIPT_DIR/capture_prometheus.py" \
     "$ARTIFACT_DIR/inputs/capture_prometheus.py"
+cp -- "$SCRIPT_DIR/check_arrival_gate.py" \
+    "$ARTIFACT_DIR/inputs/check_arrival_gate.py"
 cp -- "$SCRIPT_DIR/slow_reader.py" \
     "$ARTIFACT_DIR/inputs/slow_reader.py"
 cp -- "$SCRIPT_DIR/generate_schedule.py" \
@@ -1799,6 +1796,7 @@ write_workload_metadata
         sanitize_configmap.py \
         configmap_references.py \
         capture_prometheus.py \
+        check_arrival_gate.py \
         slow_reader.py \
         generate_schedule.py \
         workload.json > SHA256SUMS

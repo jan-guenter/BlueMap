@@ -19,6 +19,7 @@ TOOLS_DIR = BENCHMARK_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
 import capture_prometheus
+import check_arrival_gate
 import configmap_references
 import generate_schedule
 import probe_delivery_cache
@@ -432,6 +433,7 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("--database-backend", result.stdout)
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
         self.assertIn("configmap_references.py", runner)
+        self.assertIn("check_arrival_gate.py", runner)
         self.assertIn("DESIRED_WEB_REPLICA_COUNT", runner)
 
     def test_formal_schedule_is_seeded_balanced_and_tamper_evident(self) -> None:
@@ -501,6 +503,11 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("exec.scenario.iterationInTest", script)
         self.assertIn("TRACE_SEED", script)
         self.assertIn("http_req_duration", script)
+        self.assertIn('"iterations{scenario:workload}"', script)
+        self.assertIn('"iterations{scenario:playerPolling}"', script)
+        self.assertIn('"iterations{scenario:markerPolling}"', script)
+        self.assertIn("minimumIterationCountThreshold", script)
+        self.assertNotRegex(script, r"iterations\s*:\s*\[\s*`rate>=")
         self.assertNotIn("Math.random()", script)
 
     def test_file_cases_do_not_require_a_database_target(self) -> None:
@@ -603,6 +610,170 @@ class SlowReaderTests(unittest.TestCase):
                     output=Path("/tmp/unused-output.json"),
                 )
             )
+
+
+class ArrivalGateTests(unittest.TestCase):
+    @staticmethod
+    def summary(
+        scenarios: dict[str, int],
+        *,
+        wall_clock_rate: float,
+        dropped: int = 0,
+    ) -> dict[str, object]:
+        total = sum(scenarios.values())
+        metrics: dict[str, object] = {
+            "iterations": {
+                "count": total,
+                "rate": wall_clock_rate,
+            },
+            "dropped_iterations": {"count": dropped},
+        }
+        for scenario, count in scenarios.items():
+            metrics[f"iterations{{scenario:{scenario}}}"] = {
+                "count": count
+            }
+        return {"metrics": metrics}
+
+    def test_slow_final_request_does_not_reduce_achieved_rate_gate(self) -> None:
+        self.assertEqual(check_arrival_gate.duration_seconds("5m"), 300)
+        result = check_arrival_gate.evaluate(
+            self.summary({"workload": 301}, wall_clock_rate=9.74),
+            profile="map-data-mixed",
+            rate=10,
+            viewers=100,
+            marker_interval_seconds=10,
+            markers_present=True,
+            duration="30s",
+            minimum_achieved_ratio=0.99,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["scenarios"][0]["completedIterations"], 301)
+        self.assertAlmostEqual(
+            result["totals"][
+                "achievedIterationsPerSecondOverConfiguredDuration"
+            ],
+            301 / 30,
+        )
+        self.assertEqual(
+            result["totals"]["k6WallClockIterationsPerSecond"],
+            9.74,
+        )
+
+    def test_incomplete_scheduled_count_still_fails(self) -> None:
+        result = check_arrival_gate.evaluate(
+            self.summary({"workload": 296}, wall_clock_rate=10),
+            profile="map-data-mixed",
+            rate=10,
+            viewers=100,
+            marker_interval_seconds=10,
+            markers_present=False,
+            duration="30s",
+            minimum_achieved_ratio=0.99,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["scenarios"][0]["passed"])
+
+    def test_dropped_or_unattributed_iterations_still_fail(self) -> None:
+        dropped = check_arrival_gate.evaluate(
+            self.summary(
+                {"workload": 301},
+                wall_clock_rate=9.74,
+                dropped=1,
+            ),
+            profile="map-data-mixed",
+            rate=10,
+            viewers=100,
+            marker_interval_seconds=10,
+            markers_present=False,
+            duration="30s",
+            minimum_achieved_ratio=0.99,
+        )
+        mismatched_summary = self.summary(
+            {"workload": 301},
+            wall_clock_rate=9.74,
+        )
+        mismatched_summary["metrics"]["iterations"]["count"] = 302
+        mismatched = check_arrival_gate.evaluate(
+            mismatched_summary,
+            profile="map-data-mixed",
+            rate=10,
+            viewers=100,
+            marker_interval_seconds=10,
+            markers_present=False,
+            duration="30s",
+            minimum_achieved_ratio=0.99,
+        )
+
+        self.assertFalse(dropped["passed"])
+        self.assertEqual(dropped["droppedIterations"], 1)
+        self.assertFalse(mismatched["passed"])
+        self.assertFalse(mismatched["scenarioCountsEqualOverall"])
+
+    def test_live_viewer_scenarios_are_gated_independently(self) -> None:
+        failed = check_arrival_gate.evaluate(
+            self.summary(
+                {
+                    "playerPolling": 3001,
+                    "markerPolling": 296,
+                },
+                wall_clock_rate=100,
+            ),
+            profile="live-viewers",
+            rate=1,
+            viewers=100,
+            marker_interval_seconds=10,
+            markers_present=True,
+            duration="30s",
+            minimum_achieved_ratio=0.99,
+        )
+        passed = check_arrival_gate.evaluate(
+            self.summary(
+                {
+                    "playerPolling": 3001,
+                    "markerPolling": 301,
+                },
+                wall_clock_rate=100,
+            ),
+            profile="live-viewers",
+            rate=1,
+            viewers=100,
+            marker_interval_seconds=10,
+            markers_present=True,
+            duration="30s",
+            minimum_achieved_ratio=0.99,
+        )
+
+        self.assertFalse(failed["passed"])
+        self.assertFalse(failed["scenarios"][1]["passed"])
+        self.assertTrue(passed["passed"])
+        self.assertEqual(
+            [scenario["scenario"] for scenario in passed["scenarios"]],
+            ["playerPolling", "markerPolling"],
+        )
+        self.assertEqual(passed["scenarioCompletedIterations"], 3302)
+        self.assertTrue(passed["scenarioCountsEqualOverall"])
+
+    def test_accepts_nested_values_from_older_summary_shape(self) -> None:
+        summary = self.summary({"workload": 301}, wall_clock_rate=9.74)
+        summary["metrics"] = {
+            name: {"values": values}
+            for name, values in summary["metrics"].items()
+        }
+
+        result = check_arrival_gate.evaluate(
+            summary,
+            profile="map-data-mixed",
+            rate=10,
+            viewers=100,
+            marker_interval_seconds=10,
+            markers_present=False,
+            duration="30s",
+            minimum_achieved_ratio=0.99,
+        )
+
+        self.assertTrue(result["passed"])
 
 
 class DeliveryCacheProbeTests(unittest.TestCase):

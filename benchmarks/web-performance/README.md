@@ -342,7 +342,8 @@ with `browser-mixed` or `static`.
 
 Every measured run records:
 
-- offered and achieved requests per second;
+- offered iterations per second and completed iterations divided by the
+  configured phase duration;
 - response status counts and failure rate;
 - p50, p90, p95, p99, p99.9, maximum, and time to first byte;
 - bytes received and sent;
@@ -571,12 +572,21 @@ k6 run \
 ```
 
 Every arrival-rate run has two independent saturation gates:
-`dropped_iterations` must be zero and the achieved iteration rate must be at
-least `MIN_ACHIEVED_RATE_RATIO` (0.99 by default) times the offered rate. The
-runner independently rechecks both values in k6's exported summary and writes
-`arrival-gate.json`. Measurement runs also enforce p95/p99 on
-`http_req_duration{traffic:workload}` and expose workload-only byte
-submetrics; conditional setup traffic is separately tagged and excluded.
+`dropped_iterations` must be zero, and each workload scenario must complete at
+least its offered rate times the configured phase duration times
+`MIN_ACHIEVED_RATE_RATIO` (0.99 by default). k6 enforces scenario-tagged
+iteration-count thresholds. The runner independently rechecks the exported
+counts and writes `arrival-gate.json`. It derives achieved throughput as
+completed iterations divided by the configured phase duration; k6's
+wall-clock `iterations.rate` is retained only as a diagnostic because it
+includes a slow final request or graceful tail after scheduling has stopped.
+
+For `live-viewers`, player and marker polling are checked independently, and
+their completed counts must sum exactly to k6's overall iteration count. A
+well-performing scenario therefore cannot hide an under-delivering peer.
+Measurement runs also enforce p95/p99 on
+`http_req_duration{traffic:workload}` and expose workload-only byte submetrics;
+conditional setup traffic is separately tagged and excluded.
 
 ## Delivery/cache probe
 

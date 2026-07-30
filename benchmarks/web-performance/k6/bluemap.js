@@ -8,6 +8,7 @@ const BASE_URL = requiredEnv("BASE_URL").replace(/\/+$/, "");
 const PROFILE = __ENV.PROFILE || "map-data-mixed";
 const RATE = positiveInteger(__ENV.RATE || "100", "RATE");
 const DURATION = __ENV.DURATION || "5m";
+const DURATION_SECONDS = durationSeconds(DURATION, "DURATION");
 const PRE_ALLOCATED_VUS = positiveInteger(
   __ENV.PRE_ALLOCATED_VUS || "32",
   "PRE_ALLOCATED_VUS",
@@ -220,7 +221,11 @@ function buildOptions() {
         gracefulStop: "30s",
       },
     };
-    let expectedIterationsPerSecond = VIEWERS;
+    const iterationThresholds = {
+      "iterations{scenario:playerPolling}": [
+        minimumIterationCountThreshold(VIEWERS),
+      ],
+    };
     if (manifest.markers.length > 0) {
       scenarios.markerPolling = {
         executor: "constant-arrival-rate",
@@ -233,16 +238,16 @@ function buildOptions() {
         maxVUs: MAX_VUS,
         gracefulStop: "30s",
       };
-      expectedIterationsPerSecond += VIEWERS / MARKER_INTERVAL_SECONDS;
+      iterationThresholds["iterations{scenario:markerPolling}"] = [
+        minimumIterationCountThreshold(VIEWERS / MARKER_INTERVAL_SECONDS),
+      ];
     }
     return {
       discardResponseBodies: true,
       scenarios,
       thresholds: {
         ...commonThresholds,
-        iterations: [
-          `rate>=${expectedIterationsPerSecond * MIN_ACHIEVED_RATE_RATIO}`,
-        ],
+        ...iterationThresholds,
       },
       summaryTrendStats,
     };
@@ -263,7 +268,7 @@ function buildOptions() {
     },
     thresholds: {
       ...commonThresholds,
-      iterations: [`rate>=${RATE * MIN_ACHIEVED_RATE_RATIO}`],
+      "iterations{scenario:workload}": [minimumIterationCountThreshold(RATE)],
     },
     summaryTrendStats,
   };
@@ -405,6 +410,10 @@ function effectiveLatencyGates() {
   return { p95: LATENCY_P95_MS, p99: LATENCY_P99_MS };
 }
 
+function minimumIterationCountThreshold(offeredRate) {
+  return `count>=${offeredRate * DURATION_SECONDS * MIN_ACHIEVED_RATE_RATIO}`;
+}
+
 function validateMapRoutes(parsed) {
   const prefixes = parsed.mapIds.map((mapId) => `/maps/${mapId}/`);
   const mapRouteFields = [
@@ -503,6 +512,17 @@ function positiveNumber(value, name) {
     throw new Error(`${name} must be a positive number`);
   }
   return parsed;
+}
+
+function durationSeconds(value, name) {
+  const match = /^([1-9][0-9]*)(ms|s|m|h)$/.exec(value);
+  if (!match) {
+    throw new Error(
+      `${name} must be a positive integer followed by ms, s, m, or h`,
+    );
+  }
+  const multipliers = { ms: 0.001, s: 1, m: 60, h: 3600 };
+  return Number.parseInt(match[1], 10) * multipliers[match[2]];
 }
 
 function optionalPositiveNumber(value, name) {
