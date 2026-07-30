@@ -17,6 +17,7 @@ spec:
     metadata:
       annotations:
         checksum/nginx: {{ include (print $.Template.BasePath "/php-nginx-configmap.yaml") . | sha256sum }}
+        checksum/php-fpm: {{ include (print $.Template.BasePath "/php-fpm-configmap.yaml") . | sha256sum }}
         checksum/sql-secret: {{ include (print $.Template.BasePath "/sql-secret.yaml") . | sha256sum }}
         {{- with .Values.phpFpm.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -67,6 +68,10 @@ spec:
               mountPath: /tmp
             - name: php-run
               mountPath: /usr/local/var/run
+            - name: php-fpm-config
+              mountPath: /usr/local/etc/php-fpm.d/zz-bluemap.conf
+              subPath: zz-bluemap.conf
+              readOnly: true
         - name: nginx
           image: "{{ .Values.phpFpm.nginx.image.repository }}:{{ .Values.phpFpm.nginx.image.tag }}"
           imagePullPolicy: {{ .Values.phpFpm.nginx.image.pullPolicy }}
@@ -93,6 +98,9 @@ spec:
             - name: nginx-tmp
               mountPath: /tmp
       volumes:
+        - name: php-fpm-config
+          configMap:
+            name: {{ include "bluemap-web.phpFullname" . }}-fpm
         - name: nginx-config
           configMap:
             name: {{ include "bluemap-web.phpFullname" . }}-nginx

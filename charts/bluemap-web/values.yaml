@@ -183,6 +183,9 @@ secretConfig:
 phpFpm:
   enabled: false
   replicaCount: 2
+  # Maximum concurrent PHP requests (and therefore transient PDO
+  # connections) per replica.
+  maxChildren: 8
   image:
     repository: ghcr.io/bluemap-minecraft/bluemap-web-php
     tag: ""

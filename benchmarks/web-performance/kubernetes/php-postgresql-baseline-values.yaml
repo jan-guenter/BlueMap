@@ -5,6 +5,9 @@
 phpFpm:
   enabled: true
   replicaCount: 1
+  # One request owns one transient PDO connection. Match the 12-connection
+  # aggregate ceiling used by every other one-replica SQL variant.
+  maxChildren: 12
   image:
     repository: ghcr.io/jan-guenter/bluemap-web-php
     tag: sha-2e4af8f

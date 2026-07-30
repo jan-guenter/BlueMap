@@ -318,6 +318,7 @@ Enable that tier with:
 phpFpm:
   enabled: true
   replicaCount: 4
+  maxChildren: 8
 
 ingress:
   enabled: true
@@ -345,6 +346,12 @@ the chart adds `/maps` as a `Prefix` route to the PHP Service; the existing `/`
 route continues to use the Java web Service. `phpFpm.ingress.path` can add a
 base path when the web app is hosted in a subfolder, but it must end in
 `/maps`, for example `/bluemap/maps`.
+
+`phpFpm.maxChildren` configures a fixed-size PHP-FPM worker pool and caps
+concurrent PHP requests per replica. Since the unchanged script opens one
+non-persistent PDO connection per request, the maximum PHP database concurrency is
+approximately
+`phpFpm.replicaCount * phpFpm.maxChildren`.
 
 PHP-FPM can only be enabled with `storage.type: sql`, and BlueMap's script
 supports MySQL, MariaDB, and PostgreSQL. Helm rendering fails for file storage
@@ -385,7 +392,8 @@ all Java replicas and the Minecraft writer. A positive value also caps
 in-flight SQL response bodies per Java replica; excess reads fail fast with
 `503 Service Unavailable` and `Retry-After: 1` instead of accumulating behind
 the connection pool. The PHP data tier is independently scalable through
-`phpFpm.replicaCount`.
+`phpFpm.replicaCount`; size `phpFpm.maxChildren` as a per-replica request and
+transient database-connection ceiling.
 
 The default liveness probe is a TCP check. It verifies that the listener still
 exists without competing for one of the bounded HTTP connection slots.

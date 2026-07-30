@@ -1,0 +1,13 @@
+{{- if .Values.phpFpm.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bluemap-web.phpFullname" . }}-fpm
+  labels:
+    {{- include "bluemap-web.phpLabels" . | nindent 4 }}
+data:
+  zz-bluemap.conf: |
+    [www]
+    pm = static
+    pm.max_children = {{ .Values.phpFpm.maxChildren }}
+{{- end }}

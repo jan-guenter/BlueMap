@@ -62,6 +62,7 @@ jobs:
           helm lint charts/bluemap-web
           charts/bluemap-web/ci/test-rust.sh
           charts/bluemap-web/ci/test-workflow.sh
+          benchmarks/web-performance/kubernetes/test-helm-values.sh
 
   build:
     name: Build web server

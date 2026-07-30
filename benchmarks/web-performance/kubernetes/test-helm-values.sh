@@ -103,6 +103,7 @@ assert_contains "$temporary/rust-r1.yaml" \
 assert_contains "$temporary/rust-r1.yaml" "replicas: 1"
 assert_contains "$temporary/rust-r1.yaml" "max_connections = 12"
 assert_contains "$temporary/rust-r1.yaml" "max_in_flight_requests = 12"
+assert_contains "$temporary/rust-r1.yaml" "max_object_bytes = 33554432"
 assert_contains "$temporary/rust-r1.yaml" "mode = \"verify-full\""
 assert_contains "$temporary/rust-r1.yaml" \
     "ca = \"/run/secrets/database-ca/ca.crt\""
@@ -130,6 +131,11 @@ assert_absent "$temporary/rust-r3.yaml" "kind: Secret"
 
 assert_count_at_least "$temporary/php.yaml" \
     "bluemap.guenter.cloud/experiment-id: php-postgresql-baseline" 2
+assert_contains "$temporary/php.yaml" "pm = static"
+assert_contains "$temporary/php.yaml" "pm.max_children = 12"
+assert_contains "$temporary/php.yaml" \
+    "mountPath: /usr/local/etc/php-fpm.d/zz-bluemap.conf"
+assert_contains "$temporary/php.yaml" "max-connections: 12"
 
 for values in "$java_values" "$rust_values"; do
     assert_contains "$values" 'tag: ""'

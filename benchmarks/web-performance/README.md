@@ -263,8 +263,10 @@ helm upgrade --install bluemap-perf-rust-postgresql-r3 "$CHART" \
 
 The one-replica values allow 12 database connections. The replica-three
 overlays allow four per process, preserving the same aggregate 12-connection
-budget. Rust's in-flight request limit follows the same 12/4 split. Run only
-one candidate release at a time during measurement.
+budget. Rust's in-flight request limit follows the same 12/4 split, and the
+PHP baseline sets `pm.max_children` to 12 because each active request owns one
+transient PDO connection. Run only one candidate release at a time during
+measurement.
 
 ## Fixed comparison controls
 

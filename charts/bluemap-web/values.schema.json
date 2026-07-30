@@ -62,7 +62,7 @@
                 "maxObjectBytes": {
                   "type": "integer",
                   "minimum": 1,
-                  "maximum": 9223372036854775807
+                  "maximum": 9007199254740991
                 },
                 "tileCacheMaxAgeSeconds": {
                   "type": "integer",
@@ -281,6 +281,10 @@
           "type": "integer",
           "minimum": 1
         },
+        "maxChildren": {
+          "type": "integer",
+          "minimum": 1
+        },
         "image": {
           "$ref": "#/definitions/image"
         },
@@ -319,6 +323,7 @@
       "required": [
         "enabled",
         "replicaCount",
+        "maxChildren",
         "image",
         "deploymentLabels",
         "nginx",
