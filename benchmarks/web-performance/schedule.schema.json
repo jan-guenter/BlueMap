@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:bluemap:web-performance-schedule:2",
+  "$id": "urn:bluemap:web-performance-schedule:3",
   "title": "BlueMap generated formal web-performance schedule",
   "type": "object",
   "additionalProperties": false,
@@ -15,7 +15,7 @@
   ],
   "properties": {
     "formatVersion": {
-      "const": 2
+      "const": 3
     },
     "matrixSha256": {
       "$ref": "#/$defs/sha256"
@@ -121,6 +121,7 @@
         "benchmarkGitRevision",
         "expectedImages",
         "expectedSanitizedConfigSha256",
+        "expectedSanitizedRuntimeSpecSha256",
         "acceptEncoding",
         "storedEncoding",
         "traceSeed",
@@ -232,6 +233,9 @@
           }
         },
         "expectedSanitizedConfigSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expectedSanitizedRuntimeSpecSha256": {
           "$ref": "#/$defs/sha256"
         },
         "acceptEncoding": {

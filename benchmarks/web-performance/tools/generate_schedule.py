@@ -65,8 +65,8 @@ def matrix_sha256(path: Path) -> str:
 
 
 def validate_matrix(matrix: dict[str, Any]) -> None:
-    if matrix.get("formatVersion") != 2:
-        raise ValueError("matrix formatVersion must be 2")
+    if matrix.get("formatVersion") != 3:
+        raise ValueError("matrix formatVersion must be 3")
     if not isinstance(matrix.get("repetitions"), int) or matrix["repetitions"] < 1:
         raise ValueError("matrix repetitions must be a positive integer")
     validate_git_revision(
@@ -147,6 +147,11 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
         validate_digest(
             variant.get("expectedSanitizedConfigSha256"),
             f"variant {variant['id']} expectedSanitizedConfigSha256",
+            prefix=False,
+        )
+        validate_digest(
+            variant.get("expectedSanitizedRuntimeSpecSha256"),
+            f"variant {variant['id']} expectedSanitizedRuntimeSpecSha256",
             prefix=False,
         )
         variant_ids.append(variant["id"])
@@ -247,6 +252,9 @@ def build_schedule(
                         "expectedSanitizedConfigSha256": variants[variant_id][
                             "expectedSanitizedConfigSha256"
                         ],
+                        "expectedSanitizedRuntimeSpecSha256": variants[variant_id][
+                            "expectedSanitizedRuntimeSpecSha256"
+                        ],
                         "acceptEncoding": case["acceptEncoding"],
                         "storedEncoding": case["storedEncoding"],
                         "traceSeed": matrix["traceSeed"],
@@ -271,7 +279,7 @@ def build_schedule(
                     }
                 )
     return {
-        "formatVersion": 2,
+        "formatVersion": 3,
         "matrixSha256": matrix_digest,
         "scheduleSeed": schedule_seed,
         "traceSeed": matrix["traceSeed"],

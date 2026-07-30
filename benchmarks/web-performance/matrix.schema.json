@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:bluemap:web-performance-matrix:2",
+  "$id": "urn:bluemap:web-performance-matrix:3",
   "title": "BlueMap formal web-performance matrix",
   "type": "object",
   "additionalProperties": false,
@@ -18,7 +18,7 @@
   ],
   "properties": {
     "formatVersion": {
-      "const": 2
+      "const": 3
     },
     "repetitions": {
       "type": "integer",
@@ -168,7 +168,8 @@
         "databaseBackend",
         "replicaCount",
         "expectedImages",
-        "expectedSanitizedConfigSha256"
+        "expectedSanitizedConfigSha256",
+        "expectedSanitizedRuntimeSpecSha256"
       ],
       "properties": {
         "id": {
@@ -212,6 +213,9 @@
           }
         },
         "expectedSanitizedConfigSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expectedSanitizedRuntimeSpecSha256": {
           "$ref": "#/$defs/sha256"
         }
       },

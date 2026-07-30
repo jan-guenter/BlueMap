@@ -368,7 +368,7 @@ both hashes before the first run. `matrix.example.json` deliberately contains
 invalid `REPLACE_WITH_...` values and cannot generate a schedule as checked
 in. This prevents an unresolved example from being mistaken for a formal
 matrix. `matrix.schema.json` and `schedule.schema.json` describe format
-version 2; `generate_schedule.py` additionally enforces ordering,
+version 3; `generate_schedule.py` additionally enforces ordering,
 cross-reference, balance, and placeholder rules.
 
 First deploy each frozen candidate and collect its expected runtime identity
@@ -393,6 +393,14 @@ kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
     -o json |
   python3 benchmarks/web-performance/tools/runtime_identity.py configmaps \
   > "$benchmark_identity_dir/$variant_id-config.json"
+
+kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
+  get \
+    service/bluemap-perf-java-new-postgresql \
+    deployment/bluemap-perf-java-new-postgresql \
+    -o json |
+  python3 benchmarks/web-performance/tools/runtime_identity.py runtime-specs \
+  > "$benchmark_identity_dir/$variant_id-runtime-spec.json"
 ```
 
 Repeat this for every variant using exactly the ConfigMaps that will be passed
@@ -404,13 +412,22 @@ JSON for each sanitized `.data` object, sorts the
 ConfigMap names are therefore part of the identity; capture timestamps,
 resource versions, labels, and Secrets are not. The output's
 `sanitizedConfigSha256` is the variant's
-`expectedSanitizedConfigSha256`.
+`expectedSanitizedConfigSha256`. The runtime-spec identity separately hashes
+the exact Service routing and load-balancing fields plus each selected
+Deployment selector and sanitized Pod template. It excludes only the assigned
+`clusterIP`/`clusterIPs` values while including whether the Service is
+headless, its address-family policy, external and load-balancer IPs, and any
+health-check node port. Deployment replica counts and Secret contents are
+excluded; replica counts are checked independently against the schedule.
+Literal sensitive environment values are redacted, while Secret names and keys
+remain part of the identity. Its `sanitizedRuntimeSpecSha256` is the variant's
+`expectedSanitizedRuntimeSpecSha256`.
 
 Copy the example, replace `benchmarkGitRevision` with the exact checked-out
 40-character commit, replace `manifestSha256`, and set each variant's complete
-`expectedImages` array and `expectedSanitizedConfigSha256` from those helper
-outputs. Do not edit the tracked example in place because formal runs require
-a clean tracked worktree:
+`expectedImages` array, `expectedSanitizedConfigSha256`, and
+`expectedSanitizedRuntimeSpecSha256` from those helper outputs. Do not edit the
+tracked example in place because formal runs require a clean tracked worktree:
 
 ```shell
 benchmark_git_revision="$(git rev-parse --verify 'HEAD^{commit}')"
@@ -421,8 +438,9 @@ cp benchmarks/web-performance/matrix.example.json \
   benchmarks/web-performance/artifacts/snapshot/matrix.json
 
 # Resolve every REPLACE_WITH_... value in the copied matrix. For each variant,
-# paste the entire *-images.json array and the corresponding config output's
-# sanitizedConfigSha256. Then set the two common identities:
+# paste the entire *-images.json array, the corresponding config output's
+# sanitizedConfigSha256, and the runtime-spec output's
+# sanitizedRuntimeSpecSha256. Then set the two common identities:
 matrix_tmp="$(mktemp)"
 jq \
   --arg revision "$benchmark_git_revision" \
@@ -447,12 +465,13 @@ sha256sum \
 Every block contains every case/variant combination exactly once. Each matrix
 variant explicitly records its implementation, storage type, database backend,
 replica count, resolved image identities, and sanitized rendered-configuration
-identity. The exact benchmark Git revision is copied into the schedule and
-every entry. The generator deterministically shuffles case order and
-creates a seeded variant base order, then rotates the latter across blocks so
-every variant occupies each ordinal position equally, or within one occurrence
-when the repetition count is not divisible by the variant count. Its validator
-reconstructs the complete schedule and rejects omissions, duplicates,
+and runtime-spec identities. The exact benchmark Git revision is copied into
+the schedule and every entry. The generator deterministically shuffles case
+order and creates a seeded variant base order, then rotates the latter across
+blocks so every variant occupies each ordinal position equally, or within one
+occurrence when the repetition count is not divisible by the variant count.
+Its validator reconstructs the complete schedule and rejects omissions,
+duplicates,
 reordering, position imbalance, or edits. Pass `--matrix`, `--schedule`, the
 exact `--schedule-entry`, and all four variant identity flags to every formal
 runner invocation. The runner rejects any identity, service shape, case ID,
@@ -462,10 +481,18 @@ schedule replica count to equal both the number of named web Pods and the sum
 of desired replicas in the named Deployments. Before any correctness request,
 warm-up, or measured load, it also requires a clean tracked worktree at the
 scheduled commit, verifies the committed runner/workload/helper bytes, captures
-the selected Pods and ConfigMaps, and requires their actual image and sanitized
-configuration identities to exactly match the entry. A mismatch is written to
+the selected Service, Deployments, Pods, and ConfigMaps, verifies each Pod's
+exact Pod-to-ReplicaSet-to-selected-Deployment controller chain and UID, and
+requires the actual image, sanitized configuration, and runtime-spec identities
+to exactly match the entry. A mismatch is written to
 `cluster/runtime-identity-before.json` and aborts the run before load
-generation.
+generation. The runner rechecks every selected web Pod's complete normal,
+init, and ephemeral-container image identity from each live restart snapshot,
+including immediately before the restart-count baseline and after load. This
+prevents a restart and mutable-tag repull between the initial snapshot and
+measurement from silently changing the tested image. Every sample must also
+retain the original Pod UID, and that UID remains part of restart-count
+comparisons, so a same-name Pod replacement cannot reset the baseline.
 
 The resulting order has this shape:
 
@@ -566,7 +593,12 @@ missing explicit `--configmap` rejects the case.
 Ready EndpointSlice membership must equal the named web Pods before/after the
 case, repetition, correctness, warm-up, measurement, and cool-down boundaries.
 It is additionally sampled throughout measurement at the metrics interval;
-any change or sampling failure rejects the case.
+any change or sampling failure rejects the case. Each named web Pod must also
+be controlled by a ReplicaSet controlled by one of the exact named
+Deployments, with matching UIDs, the Deployment's current revision, and
+per-Deployment desired replica counts. Each Deployment must have fully
+converged on its current Pod template; paused, rolling, or surplus old-revision
+Pods reject the case.
 
 The runner does not apply, patch, scale, restart, delete, or replace Kubernetes
 resources. It only reads exact resources and `metrics.k8s.io`, opens a local

@@ -36,6 +36,7 @@ import {getLocalStorage, round, setLocalStorage} from "./Utils";
 import {
     isRequiredEncodingError,
     RevalidatingFileLoader,
+    rethrowRequiredEncodingError,
     showRequiredEncodingError
 } from "./util/RevalidatingFileLoader";
 import {i18n, setLanguage} from "../i18n";
@@ -182,14 +183,13 @@ export class BlueMapApp {
                 this.resetCamera();
             }
         } catch (e) {
+            rethrowRequiredEncodingError(e);
             console.error("Failed to load map!", e);
-            if (!isRequiredEncodingError(e) || showRequiredEncodingError(e)) {
-                alert(
-                    this.events,
-                    e instanceof Error ? e.message : `Failed to load map: ${e}`,
-                    "error"
-                );
-            }
+            alert(
+                this.events,
+                e instanceof Error ? e.message : `Failed to load map: ${e}`,
+                "error"
+            );
         }
 
         // map position address
@@ -334,13 +334,8 @@ export class BlueMapApp {
 
                 return map.loadSettings(this.mapViewer.revalidatedUrls)
                     .catch(error => {
-                        if (isRequiredEncodingError(error)) {
-                            if (showRequiredEncodingError(error)) {
-                                alert(this.events, error.message, "error");
-                            }
-                        } else {
-                            alert(this.events, `Failed to load settings for map '${map.data.id}':` + error, "warning");
-                        }
+                        rethrowRequiredEncodingError(error);
+                        alert(this.events, `Failed to load settings for map '${map.data.id}':` + error, "warning");
                     });
             })
 

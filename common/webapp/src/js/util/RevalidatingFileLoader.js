@@ -36,6 +36,10 @@ export function isRequiredEncodingError(error) {
     return error?.code === "bluemap_required_content_encoding";
 }
 
+export function rethrowRequiredEncodingError(error) {
+    if (isRequiredEncodingError(error)) throw error;
+}
+
 export function showRequiredEncodingError(error) {
     if (!isRequiredEncodingError(error)) return false;
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import sanitize_configmap
+import sanitize_kubernetes_resource
 
 
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -29,6 +30,26 @@ IMAGE_KINDS = {
         "ephemeralContainerStatuses",
     ),
     "initContainer": ("initContainers", "initContainerStatuses"),
+}
+SERVICE_RUNTIME_SPEC_FIELDS = {
+    "allocateLoadBalancerNodePorts",
+    "externalName",
+    "externalIPs",
+    "externalTrafficPolicy",
+    "healthCheckNodePort",
+    "ipFamilies",
+    "ipFamilyPolicy",
+    "internalTrafficPolicy",
+    "loadBalancerClass",
+    "loadBalancerIP",
+    "loadBalancerSourceRanges",
+    "ports",
+    "publishNotReadyAddresses",
+    "selector",
+    "sessionAffinity",
+    "sessionAffinityConfig",
+    "trafficDistribution",
+    "type",
 }
 
 
@@ -238,6 +259,127 @@ def config_identity_from_snapshots(
     }
 
 
+def snapshot_resource(value: dict[str, Any], kind: str) -> dict[str, Any]:
+    resource = value.get("resource", value)
+    if not isinstance(resource, dict) or resource.get("kind") != kind:
+        raise ValueError(f"runtime-spec identity requires a Kubernetes {kind}")
+    return resource
+
+
+def resource_identity(resource: dict[str, Any], label: str) -> tuple[str, str]:
+    metadata = resource.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{label} has no metadata")
+    name = metadata.get("name")
+    namespace = metadata.get("namespace")
+    if (
+        not isinstance(name, str)
+        or len(name) > 253
+        or RESOURCE_NAME.fullmatch(name) is None
+    ):
+        raise ValueError(f"{label} has no valid metadata.name")
+    if (
+        not isinstance(namespace, str)
+        or not namespace
+        or len(namespace) > 253
+        or RESOURCE_NAME.fullmatch(namespace) is None
+    ):
+        raise ValueError(f"{label} has no valid metadata.namespace")
+    return name, namespace
+
+
+def runtime_spec_identity_from_snapshots(
+    service_snapshot: dict[str, Any],
+    deployment_snapshots: list[dict[str, Any]],
+) -> dict[str, object]:
+    service = snapshot_resource(service_snapshot, "Service")
+    service_name, service_namespace = resource_identity(service, "Service")
+    service_spec = service.get("spec")
+    if not isinstance(service_spec, dict):
+        raise ValueError("Service has no spec")
+    serving_spec_source = {
+        key: service_spec[key]
+        for key in sorted(SERVICE_RUNTIME_SPEC_FIELDS)
+        if key in service_spec
+    }
+    serving_spec_source["headless"] = service_spec.get("clusterIP") == "None"
+    serving_spec = sanitize_kubernetes_resource.sanitize(serving_spec_source)
+    service_entry = {
+        "name": service_name,
+        "namespace": service_namespace,
+        "sanitizedServingSpecSha256": hashlib.sha256(
+            canonical_json(serving_spec)
+        ).hexdigest(),
+    }
+
+    if not deployment_snapshots:
+        raise ValueError("runtime-spec identity requires at least one Deployment")
+    deployment_entries: list[dict[str, str]] = []
+    seen_deployments: set[tuple[str, str]] = set()
+    for snapshot in deployment_snapshots:
+        deployment = snapshot_resource(snapshot, "Deployment")
+        name, namespace = resource_identity(deployment, "Deployment")
+        if namespace != service_namespace:
+            raise ValueError(
+                f"Deployment {name!r} namespace does not match the Service"
+            )
+        identity = (namespace, name)
+        if identity in seen_deployments:
+            raise ValueError(
+                f"runtime-spec identity contains duplicate Deployment {name!r}"
+            )
+        seen_deployments.add(identity)
+
+        spec = deployment.get("spec")
+        if not isinstance(spec, dict):
+            raise ValueError(f"Deployment {name!r} has no spec")
+        selector = spec.get("selector")
+        template = spec.get("template")
+        if not isinstance(selector, dict) or not isinstance(template, dict):
+            raise ValueError(f"Deployment {name!r} has no selector or Pod template")
+        template_metadata = template.get("metadata", {})
+        template_spec = template.get("spec")
+        if not isinstance(template_metadata, dict) or not isinstance(
+            template_spec, dict
+        ):
+            raise ValueError(f"Deployment {name!r} has an invalid Pod template")
+
+        runtime_spec = sanitize_kubernetes_resource.sanitize(
+            {
+                "selector": selector,
+                "template": {
+                    "metadata": {
+                        key: template_metadata[key]
+                        for key in ("annotations", "labels")
+                        if key in template_metadata
+                    },
+                    "spec": template_spec,
+                },
+            }
+        )
+        deployment_entries.append(
+            {
+                "name": name,
+                "namespace": namespace,
+                "sanitizedPodTemplateSha256": hashlib.sha256(
+                    canonical_json(runtime_spec)
+                ).hexdigest(),
+            }
+        )
+
+    deployment_entries.sort(key=lambda item: (item["namespace"], item["name"]))
+    identity_bundle = {
+        "service": service_entry,
+        "deployments": deployment_entries,
+    }
+    return {
+        **identity_bundle,
+        "sanitizedRuntimeSpecSha256": hashlib.sha256(
+            canonical_json(identity_bundle)
+        ).hexdigest(),
+    }
+
+
 def sanitize_configmaps(value: dict[str, Any]) -> list[dict[str, Any]]:
     if value.get("kind") == "List":
         resources = value.get("items")
@@ -251,6 +393,31 @@ def sanitize_configmaps(value: dict[str, Any]) -> list[dict[str, Any]]:
             raise ValueError("ConfigMap input contains a non-object")
         snapshots.append(sanitize_configmap.snapshot(resource, "identity"))
     return snapshots
+
+
+def sanitize_runtime_specs(
+    value: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    resources = value.get("items") if value.get("kind") == "List" else [value]
+    if not isinstance(resources, list):
+        raise ValueError("runtime-spec input List has no items array")
+
+    services: list[dict[str, Any]] = []
+    deployments: list[dict[str, Any]] = []
+    for resource in resources:
+        if not isinstance(resource, dict):
+            raise ValueError("runtime-spec input contains a non-object")
+        kind = resource.get("kind")
+        snapshot = sanitize_kubernetes_resource.snapshot(resource, "identity")
+        if kind == "Service":
+            services.append(snapshot)
+        elif kind == "Deployment":
+            deployments.append(snapshot)
+        else:
+            raise ValueError("runtime-spec input accepts only Service and Deployment")
+    if len(services) != 1:
+        raise ValueError("runtime-spec input requires exactly one Service")
+    return services[0], deployments
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -267,6 +434,15 @@ def parse_args() -> argparse.Namespace:
     snapshots = subparsers.add_parser("config-snapshots")
     snapshots.add_argument("snapshot", nargs="+", type=Path)
     subparsers.add_parser("configmaps")
+    runtime_snapshots = subparsers.add_parser("runtime-spec-snapshots")
+    runtime_snapshots.add_argument("--service", required=True, type=Path)
+    runtime_snapshots.add_argument(
+        "--deployment",
+        required=True,
+        action="append",
+        type=Path,
+    )
+    subparsers.add_parser("runtime-specs")
     return parser.parse_args()
 
 
@@ -282,11 +458,22 @@ def main() -> int:
             result = config_identity_from_snapshots(
                 [load_json(path) for path in args.snapshot]
             )
-        else:
+        elif args.command == "configmaps":
             resource = json.load(sys.stdin)
             if not isinstance(resource, dict):
                 raise ValueError("ConfigMap input must be a JSON object")
             result = config_identity_from_snapshots(sanitize_configmaps(resource))
+        elif args.command == "runtime-spec-snapshots":
+            result = runtime_spec_identity_from_snapshots(
+                load_json(args.service),
+                [load_json(path) for path in args.deployment],
+            )
+        else:
+            resource = json.load(sys.stdin)
+            if not isinstance(resource, dict):
+                raise ValueError("runtime-spec input must be a JSON object")
+            service, deployments = sanitize_runtime_specs(resource)
+            result = runtime_spec_identity_from_snapshots(service, deployments)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"RUNTIME IDENTITY FAILURE: {error}", file=sys.stderr)
         return 1

@@ -27,10 +27,7 @@ import * as Vue from 'vue';
 import App from './App.vue';
 import * as BlueMap from "./js/BlueMap";
 import {BlueMapApp} from "./js/BlueMapApp";
-import {
-  isRequiredEncodingError,
-  showRequiredEncodingError
-} from "./js/util/RevalidatingFileLoader";
+import {isRequiredEncodingError} from "./js/util/RevalidatingFileLoader";
 import {i18nModule, loadLanguageSettings} from "./i18n";
 
 // utils
@@ -64,7 +61,6 @@ async function load() {
   } catch (e) {
     console.error("Failed to load BlueMap webapp!", e);
     const requiredEncodingError = isRequiredEncodingError(e);
-    showRequiredEncodingError(e);
     document.body.innerHTML = `
     <div id="bm-app-err">
       <div>

@@ -1,5 +1,5 @@
 {
-  "formatVersion": 2,
+  "formatVersion": 3,
   "repetitions": 5,
   "scheduleSeed": "bluemap-web-performance-schedule-v1",
   "traceSeed": "bluemap-web-performance-v1",
@@ -34,7 +34,8 @@
           "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
         }
       ],
-      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256",
+      "expectedSanitizedRuntimeSpecSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_RUNTIME_SPEC_SHA256"
     },
     {
       "id": "java-old-postgresql",
@@ -55,7 +56,8 @@
           "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
         }
       ],
-      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256",
+      "expectedSanitizedRuntimeSpecSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_RUNTIME_SPEC_SHA256"
     },
     {
       "id": "java-new-postgresql",
@@ -76,7 +78,8 @@
           "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
         }
       ],
-      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256",
+      "expectedSanitizedRuntimeSpecSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_RUNTIME_SPEC_SHA256"
     },
     {
       "id": "rust-postgresql",
@@ -92,7 +95,8 @@
           "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
         }
       ],
-      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256",
+      "expectedSanitizedRuntimeSpecSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_RUNTIME_SPEC_SHA256"
     },
     {
       "id": "java-new-postgresql-r3",
@@ -113,7 +117,8 @@
           "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
         }
       ],
-      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256",
+      "expectedSanitizedRuntimeSpecSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_RUNTIME_SPEC_SHA256"
     },
     {
       "id": "rust-postgresql-r3",
@@ -129,7 +134,8 @@
           "digest": "sha256:REPLACE_WITH_64_CHARACTER_OCI_DIGEST"
         }
       ],
-      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256"
+      "expectedSanitizedConfigSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_CONFIG_SHA256",
+      "expectedSanitizedRuntimeSpecSha256": "REPLACE_WITH_64_CHARACTER_SANITIZED_RUNTIME_SPEC_SHA256"
     }
   ],
   "cases": [

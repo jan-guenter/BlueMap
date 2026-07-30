@@ -84,6 +84,7 @@ DESIRED_WEB_REPLICA_COUNT="0"
 BENCHMARK_COMMIT=""
 EXPECTED_IMAGES_JSON=""
 EXPECTED_SANITIZED_CONFIG_SHA256=""
+EXPECTED_SANITIZED_RUNTIME_SPEC_SHA256=""
 
 usage() {
     cat <<'EOF'
@@ -636,6 +637,9 @@ if ((schedule_option_count == 3)); then
     EXPECTED_SANITIZED_CONFIG_SHA256="$(
         jq -er '.expectedSanitizedConfigSha256' <<<"$SCHEDULE_ENTRY_JSON"
     )" || die "Formal schedule entry has no expected configuration identity"
+    EXPECTED_SANITIZED_RUNTIME_SPEC_SHA256="$(
+        jq -er '.expectedSanitizedRuntimeSpecSha256' <<<"$SCHEDULE_ENTRY_JSON"
+    )" || die "Formal schedule entry has no expected runtime-spec identity"
     jq -e \
         --arg caseId "$CASE_ID" \
         --arg variantId "$VARIANT_ID" \
@@ -913,9 +917,15 @@ validate_available_deployment() {
     kube get deployment "$deployment" -o json |
         jq -e '
             (.spec.replicas // 0) > 0
-            and (.status.availableReplicas // 0) >= (.spec.replicas // 0)
+            and (.spec.paused // false) == false
+            and (.status.observedGeneration // 0) == .metadata.generation
+            and (.status.replicas // 0) == .spec.replicas
+            and (.status.updatedReplicas // 0) == .spec.replicas
+            and (.status.readyReplicas // 0) == .spec.replicas
+            and (.status.availableReplicas // 0) == .spec.replicas
+            and (.status.unavailableReplicas // 0) == 0
         ' >/dev/null ||
-        die "Deployment '$deployment' does not have all requested replicas available"
+        die "Deployment '$deployment' has not converged on its current Pod template"
 }
 
 verify_service_endpoints() {
@@ -985,6 +995,202 @@ verify_service_endpoints() {
         .allReadyEndpointsReferencePods == true
         and .readyPods == .expectedReadyPods
     ' "$destination" >/dev/null
+}
+
+verify_web_pod_ownership() {
+    local label="$1"
+    local items_file="$ARTIFACT_DIR/cluster/.ownership-$label.ndjson"
+    local destination="$ARTIFACT_DIR/cluster/ownership-$label.json"
+    local selected
+    : > "$items_file"
+
+    for pod in "${WEB_PODS[@]}"; do
+        local pod_payload
+        local pod_uid
+        local snapshot_pod_uid
+        local pod_controller
+        local replicaset_name
+        local replicaset_uid
+        local replicaset_payload
+        local replicaset_controller
+        local deployment_name
+        local deployment_uid
+        local deployment_snapshot
+        local deployment_payload
+        local deployment_resource_version
+        local deployment_revision
+        local replicaset_revision
+        local selected_deployment=false
+
+        pod_payload="$(kube get pod "$pod" -o json)" || return 1
+        pod_uid="$(jq -er '.metadata.uid' <<<"$pod_payload")" || return 1
+        snapshot_pod_uid="$(
+            jq -er '.resource.metadata.uid' \
+                "$ARTIFACT_DIR/cluster/$label/pod-$pod.json"
+        )" || return 1
+        [[ "$pod_uid" == "$snapshot_pod_uid" ]] || return 1
+        pod_controller="$(
+            jq -ce '
+                [.metadata.ownerReferences[]?
+                 | select(.controller == true)] as $controllers
+                | if ($controllers | length) != 1
+                     or $controllers[0].apiVersion != "apps/v1"
+                     or $controllers[0].kind != "ReplicaSet"
+                     or ($controllers[0].name | type) != "string"
+                     or ($controllers[0].uid | type) != "string"
+                  then error(
+                      "Pod must have exactly one apps/v1 ReplicaSet controller"
+                  )
+                  else $controllers[0]
+                  end
+            ' <<<"$pod_payload"
+        )" || return 1
+        replicaset_name="$(jq -er '.name' <<<"$pod_controller")" || return 1
+        replicaset_uid="$(jq -er '.uid' <<<"$pod_controller")" || return 1
+        validate_prefixed_name "ReplicaSet" "$replicaset_name"
+
+        replicaset_payload="$(
+            kube get replicaset "$replicaset_name" -o json
+        )" || return 1
+        jq -e \
+            --arg namespace "$NAMESPACE" \
+            --arg name "$replicaset_name" \
+            --arg uid "$replicaset_uid" \
+            '.apiVersion == "apps/v1"
+             and .kind == "ReplicaSet"
+             and .metadata.namespace == $namespace
+             and .metadata.name == $name
+             and .metadata.uid == $uid' <<<"$replicaset_payload" >/dev/null ||
+            return 1
+        replicaset_controller="$(
+            jq -ce '
+                [.metadata.ownerReferences[]?
+                 | select(.controller == true)] as $controllers
+                | if ($controllers | length) != 1
+                     or $controllers[0].apiVersion != "apps/v1"
+                     or $controllers[0].kind != "Deployment"
+                     or ($controllers[0].name | type) != "string"
+                     or ($controllers[0].uid | type) != "string"
+                  then error(
+                      "ReplicaSet must have exactly one apps/v1 Deployment controller"
+                  )
+                  else $controllers[0]
+                  end
+            ' <<<"$replicaset_payload"
+        )" || return 1
+        deployment_name="$(
+            jq -er '.name' <<<"$replicaset_controller"
+        )" || return 1
+        deployment_uid="$(jq -er '.uid' <<<"$replicaset_controller")" ||
+            return 1
+
+        for selected in "${WEB_DEPLOYMENTS[@]}"; do
+            if [[ "$selected" == "$deployment_name" ]]; then
+                selected_deployment=true
+                break
+            fi
+        done
+        [[ "$selected_deployment" == true ]] || return 1
+        deployment_snapshot="$ARTIFACT_DIR/cluster/$label/deployment-$deployment_name.json"
+        jq -e \
+            --arg namespace "$NAMESPACE" \
+            --arg name "$deployment_name" \
+            --arg uid "$deployment_uid" \
+            '.resource.apiVersion == "apps/v1"
+             and .resource.kind == "Deployment"
+             and .resource.metadata.namespace == $namespace
+             and .resource.metadata.name == $name
+             and .resource.metadata.uid == $uid' \
+            "$deployment_snapshot" >/dev/null ||
+            return 1
+
+        deployment_resource_version="$(
+            jq -er '.resource.metadata.resourceVersion' "$deployment_snapshot"
+        )" || return 1
+        deployment_payload="$(
+            kube get deployment "$deployment_name" -o json
+        )" || return 1
+        jq -e \
+            --arg namespace "$NAMESPACE" \
+            --arg name "$deployment_name" \
+            --arg uid "$deployment_uid" \
+            --arg resourceVersion "$deployment_resource_version" \
+            '.apiVersion == "apps/v1"
+             and .kind == "Deployment"
+             and .metadata.namespace == $namespace
+             and .metadata.name == $name
+             and .metadata.uid == $uid
+             and .metadata.resourceVersion == $resourceVersion
+             and (.spec.paused // false) == false
+             and (.status.observedGeneration // 0) == .metadata.generation
+             and (.status.replicas // 0) == .spec.replicas
+             and (.status.updatedReplicas // 0) == .spec.replicas
+             and (.status.readyReplicas // 0) == .spec.replicas
+             and (.status.availableReplicas // 0) == .spec.replicas
+             and (.status.unavailableReplicas // 0) == 0' \
+            <<<"$deployment_payload" >/dev/null ||
+            return 1
+        deployment_revision="$(
+            jq -er '.metadata.annotations["deployment.kubernetes.io/revision"]' \
+                <<<"$deployment_payload"
+        )" || return 1
+        replicaset_revision="$(
+            jq -er '.metadata.annotations["deployment.kubernetes.io/revision"]' \
+                <<<"$replicaset_payload"
+        )" || return 1
+        [[ "$deployment_revision" =~ ^[1-9][0-9]*$ ]] || return 1
+        [[ "$replicaset_revision" == "$deployment_revision" ]] || return 1
+
+        jq -nc \
+            --arg pod "$pod" \
+            --arg podUid "$pod_uid" \
+            --arg replicaSet "$replicaset_name" \
+            --arg replicaSetUid "$replicaset_uid" \
+            --arg revision "$replicaset_revision" \
+            --arg deployment "$deployment_name" \
+            --arg deploymentUid "$deployment_uid" \
+            '{
+                pod: {name: $pod, uid: $podUid},
+                replicaSet: {
+                    name: $replicaSet,
+                    uid: $replicaSetUid,
+                    revision: $revision
+                },
+                deployment: {
+                    name: $deployment,
+                    uid: $deploymentUid,
+                    revision: $revision
+                }
+            }' >> "$items_file" ||
+            return 1
+    done
+
+    for deployment in "${WEB_DEPLOYMENTS[@]}"; do
+        local desired_replicas
+        local owned_pods
+        desired_replicas="$(
+            jq -er '.resource.spec.replicas' \
+                "$ARTIFACT_DIR/cluster/$label/deployment-$deployment.json"
+        )" || return 1
+        owned_pods="$(
+            jq -s --arg deployment "$deployment" \
+                '[.[] | select(.deployment.name == $deployment)] | length' \
+                "$items_file"
+        )" || return 1
+        [[ "$owned_pods" == "$desired_replicas" ]] || return 1
+    done
+
+    jq -s \
+        --arg capturedAt "$(timestamp)" \
+        --arg service "$SERVICE" \
+        '{
+            capturedAt: $capturedAt,
+            service: $service,
+            passed: true,
+            pods: .
+        }' "$items_file" > "$destination" ||
+        return 1
+    rm -f -- "$items_file"
 }
 
 sample_service_endpoints() {
@@ -1076,14 +1282,22 @@ capture_configmap_set() {
 capture_snapshot_set() {
     local label="$1"
     local directory="$ARTIFACT_DIR/cluster/$label"
+    local -a runtime_spec_arguments=()
     mkdir -- "$directory" || return 1
 
     snapshot_resource service "$SERVICE" "$directory/service-$SERVICE.json" ||
         return 1
+    runtime_spec_arguments=(
+        runtime-spec-snapshots
+        --service "$directory/service-$SERVICE.json"
+    )
     for deployment in "${WEB_DEPLOYMENTS[@]}"; do
         snapshot_resource deployment "$deployment" \
             "$directory/deployment-$deployment.json" ||
             return 1
+        runtime_spec_arguments+=(
+            --deployment "$directory/deployment-$deployment.json"
+        )
     done
     for target in "${SAMPLE_TARGETS[@]}"; do
         local pod="${target#*:}"
@@ -1091,6 +1305,13 @@ capture_snapshot_set() {
             return 1
     done
     capture_configmap_set "$label" || return 1
+    "$PYTHON_BIN" "$RUNTIME_IDENTITY_SCRIPT" \
+        "${runtime_spec_arguments[@]}" |
+        jq \
+            --arg capturedAt "$(timestamp)" \
+            '. + {capturedAt: $capturedAt}' \
+            > "$ARTIFACT_DIR/cluster/runtime-spec-digests-$label.json" ||
+        return 1
 
     jq -s '{
         pods: map(.resource | {
@@ -1116,8 +1337,11 @@ verify_formal_runtime_identity() {
 
     local identity_items="$ARTIFACT_DIR/cluster/.runtime-identities.ndjson"
     local config_identity_file="$ARTIFACT_DIR/cluster/config-digests-before.json"
+    local runtime_spec_identity_file="$ARTIFACT_DIR/cluster/runtime-spec-digests-before.json"
     local actual_config_sha256
+    local actual_runtime_spec_sha256
     local config_passed=false
+    local runtime_spec_passed=false
     local mismatch=0
     : > "$identity_items"
 
@@ -1162,6 +1386,18 @@ verify_formal_runtime_identity() {
     else
         mismatch=1
     fi
+    actual_runtime_spec_sha256="$(
+        jq -er '.sanitizedRuntimeSpecSha256' "$runtime_spec_identity_file"
+    )" || {
+        rm -f -- "$identity_items"
+        return 1
+    }
+    if [[ "$actual_runtime_spec_sha256" == \
+        "$EXPECTED_SANITIZED_RUNTIME_SPEC_SHA256" ]]; then
+        runtime_spec_passed=true
+    else
+        mismatch=1
+    fi
 
     jq -s \
         --arg benchmarkGitRevision "$BENCHMARK_COMMIT" \
@@ -1169,6 +1405,10 @@ verify_formal_runtime_identity() {
             "$EXPECTED_SANITIZED_CONFIG_SHA256" \
         --arg actualSanitizedConfigSha256 "$actual_config_sha256" \
         --argjson configPassed "$config_passed" \
+        --arg expectedSanitizedRuntimeSpecSha256 \
+            "$EXPECTED_SANITIZED_RUNTIME_SPEC_SHA256" \
+        --arg actualSanitizedRuntimeSpecSha256 "$actual_runtime_spec_sha256" \
+        --argjson runtimeSpecPassed "$runtime_spec_passed" \
         '{
             benchmarkGitRevision: $benchmarkGitRevision,
             webPods: .,
@@ -1179,8 +1419,16 @@ verify_formal_runtime_identity() {
                     $actualSanitizedConfigSha256,
                 passed: $configPassed
             },
+            runtimeSpec: {
+                expectedSanitizedRuntimeSpecSha256:
+                    $expectedSanitizedRuntimeSpecSha256,
+                actualSanitizedRuntimeSpecSha256:
+                    $actualSanitizedRuntimeSpecSha256,
+                passed: $runtimeSpecPassed
+            },
             passed: (
                 $configPassed
+                and $runtimeSpecPassed
                 and all(.[]; .passed == true)
             )
         }' "$identity_items" \
@@ -1195,44 +1443,103 @@ verify_formal_runtime_identity() {
 capture_restart_counts() {
     local destination="$1"
     local items_file="${destination%.json}.items.ndjson"
+    local runtime_identity_mismatch=0
     : > "$items_file"
 
     for target in "${SAMPLE_TARGETS[@]}"; do
         local role="${target%%:*}"
         local pod="${target#*:}"
-        kube get pod "$pod" -o json |
-            jq -c \
-                --arg capturedAt "$(timestamp)" \
-                --arg role "$role" \
-                '{
-                    capturedAt: $capturedAt,
-                    role: $role,
-                    pod: .metadata.name,
-                    uid: .metadata.uid,
-                    containers: [
-                        .status.containerStatuses[]? | {
-                            name,
-                            image,
-                            imageID,
-                            ready,
-                            restartCount
-                        }
-                    ]
-                }' >> "$items_file" ||
+        local pod_payload
+        local actual_pod_uid
+        local expected_pod_uid
+        local pod_identity_passed=false
+        local actual_images_json="null"
+        local expected_images_json="null"
+        local image_identity_passed="null"
+
+        pod_payload="$(kube get pod "$pod" -o json)" || return 1
+        actual_pod_uid="$(jq -er '.metadata.uid' <<<"$pod_payload")" || return 1
+        expected_pod_uid="$(
+            jq -er '.resource.metadata.uid' \
+                "$ARTIFACT_DIR/cluster/before/pod-$pod.json"
+        )" || return 1
+        if [[ "$actual_pod_uid" == "$expected_pod_uid" ]]; then
+            pod_identity_passed=true
+        else
+            runtime_identity_mismatch=1
+        fi
+
+        if [[ "$role" == "web" && -n "$SCHEDULE_ENTRY_JSON" ]]; then
+            actual_images_json="$(
+                "$PYTHON_BIN" "$RUNTIME_IDENTITY_SCRIPT" pod-images \
+                    <<<"$pod_payload"
+            )" || return 1
+            actual_images_json="$(jq -ceS . <<<"$actual_images_json")" ||
+                return 1
+            expected_images_json="$EXPECTED_IMAGES_JSON"
+            if [[ "$actual_images_json" == "$EXPECTED_IMAGES_JSON" ]]; then
+                image_identity_passed=true
+            else
+                image_identity_passed=false
+                runtime_identity_mismatch=1
+            fi
+        fi
+
+        jq -c \
+            --arg capturedAt "$(timestamp)" \
+            --arg role "$role" \
+            --arg actualPodUid "$actual_pod_uid" \
+            --arg expectedPodUid "$expected_pod_uid" \
+            --argjson podIdentityPassed "$pod_identity_passed" \
+            --argjson actualImages "$actual_images_json" \
+            --argjson expectedImages "$expected_images_json" \
+            --argjson imageIdentityPassed "$image_identity_passed" \
+            '{
+                capturedAt: $capturedAt,
+                role: $role,
+                pod: .metadata.name,
+                uid: .metadata.uid,
+                podIdentity: {
+                    expectedUid: $expectedPodUid,
+                    actualUid: $actualPodUid,
+                    passed: $podIdentityPassed
+                },
+                containers: [
+                    .status.containerStatuses[]? | {
+                        name,
+                        image,
+                        imageID,
+                        ready,
+                        restartCount
+                    }
+                ],
+                imageIdentity: (
+                    if $imageIdentityPassed == null then null
+                    else {
+                        expectedImages: $expectedImages,
+                        actualImages: $actualImages,
+                        passed: $imageIdentityPassed
+                    }
+                    end
+                )
+            }' <<<"$pod_payload" >> "$items_file" ||
             return 1
     done
 
     jq -s '{pods: .}' "$items_file" > "$destination" || return 1
     rm -f -- "$items_file"
+    ((runtime_identity_mismatch == 0))
 }
 
 normalized_restarts() {
     jq -S '[
         .pods[] |
         .pod as $pod |
+        .uid as $uid |
         .containers[] |
         {
             pod: $pod,
+            uid: $uid,
             name,
             restartCount
         }
@@ -2068,11 +2375,14 @@ copy_local_file "$K6_SCRIPT" "$REMOTE_ROOT/inputs/bluemap.js" ||
     die "Could not copy and verify the k6 script in the load-generator Pod"
 
 capture_snapshot_set before
+verify_web_pod_ownership before ||
+    die "Named web Pods are not owned by the selected Deployments"
 verify_formal_runtime_identity ||
-    die "Formal runtime image or sanitized configuration identity does not match"
+    die "Formal runtime image, configuration, or runtime-spec identity does not match"
 verify_service_endpoints before ||
     die "Ready EndpointSlice Pod targets do not exactly match --web-pod targets"
-capture_restart_counts "$ARTIFACT_DIR/cluster/restarts-case-before.json"
+capture_restart_counts "$ARTIFACT_DIR/cluster/restarts-case-before.json" ||
+    die "Could not capture restart counts or verify live Pod/image identities"
 
 CASE_START_EPOCH="$(date -u +%s)"
 CASE_START_TIMESTAMP="$(timestamp)"
@@ -2096,7 +2406,12 @@ for ((repetition = 1; repetition <= REPETITIONS; repetition++)); do
         case_failed=1
         break
     fi
-    capture_restart_counts "$repetition_dir/restarts-before.json"
+    if ! capture_restart_counts "$repetition_dir/restarts-before.json"; then
+        record_failure \
+            "Repetition $repetition: restart snapshot or live Pod/image identity failed before load"
+        case_failed=1
+        break
+    fi
 
     if ! verify_service_endpoints "repetition-$repetition_name-before"; then
         record_failure \
@@ -2154,7 +2469,11 @@ for ((repetition = 1; repetition <= REPETITIONS; repetition++)); do
         fi
     fi
 
-    capture_restart_counts "$repetition_dir/restarts-after.json"
+    if ! capture_restart_counts "$repetition_dir/restarts-after.json"; then
+        record_failure \
+            "Repetition $repetition: restart snapshot or live Pod/image identity failed after load"
+        case_failed=1
+    fi
     if ! verify_service_endpoints "repetition-$repetition_name-after"; then
         record_failure \
             "Repetition $repetition: ready EndpointSlice targets changed"
@@ -2194,12 +2513,17 @@ if ! capture_snapshot_set after; then
     record_failure "Final Kubernetes resource snapshot failed"
     case_failed=1
 fi
+if ! verify_web_pod_ownership after; then
+    record_failure \
+        "Named web Pod ownership changed or no longer matches the selected Deployments"
+    case_failed=1
+fi
 if ! verify_service_endpoints after; then
     record_failure "Ready EndpointSlice targets changed by the end of the case"
     case_failed=1
 fi
 if ! capture_restart_counts "$ARTIFACT_DIR/cluster/restarts-case-after.json"; then
-    record_failure "Final restart-count snapshot failed"
+    record_failure "Final restart-count snapshot or live Pod/image identity failed"
     case_failed=1
 fi
 if ! diff -u \
@@ -2214,6 +2538,15 @@ if ! diff -u \
     <(jq -S '.configMaps' "$ARTIFACT_DIR/cluster/config-digests-after.json") \
     > "$ARTIFACT_DIR/cluster/config-digests.diff"; then
     record_failure "A selected rendered ConfigMap changed during the case"
+    case_failed=1
+fi
+if ! diff -u \
+    <(jq -S 'del(.capturedAt)' \
+        "$ARTIFACT_DIR/cluster/runtime-spec-digests-before.json") \
+    <(jq -S 'del(.capturedAt)' \
+        "$ARTIFACT_DIR/cluster/runtime-spec-digests-after.json") \
+    > "$ARTIFACT_DIR/cluster/runtime-spec-digests.diff"; then
+    record_failure "A selected Service or Deployment runtime spec changed during the case"
     case_failed=1
 fi
 

@@ -325,6 +325,250 @@ class RuntimeIdentityTests(unittest.TestCase):
                 ]
             )
 
+    def test_runtime_spec_identity_freezes_serving_and_pod_configuration(
+        self,
+    ) -> None:
+        def resources(
+            *,
+            literal_password: str,
+            ssl_mode: str,
+            target_port: int,
+            replicas: int,
+            cluster_ip: str,
+        ) -> dict:
+            return {
+                "kind": "List",
+                "items": [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Service",
+                        "metadata": {
+                            "name": "bluemap-perf-web",
+                            "namespace": "minecraft",
+                            "resourceVersion": "ignored",
+                        },
+                        "spec": {
+                            "clusterIP": cluster_ip,
+                            "ports": [
+                                {
+                                    "name": "http",
+                                    "port": 8100,
+                                    "targetPort": target_port,
+                                }
+                            ],
+                            "selector": {"app": "bluemap-perf-web"},
+                            "sessionAffinity": "None",
+                            "type": "ClusterIP",
+                        },
+                    },
+                    {
+                        "apiVersion": "apps/v1",
+                        "kind": "Deployment",
+                        "metadata": {
+                            "name": "bluemap-perf-web",
+                            "namespace": "minecraft",
+                            "uid": "ignored",
+                        },
+                        "spec": {
+                            "replicas": replicas,
+                            "selector": {
+                                "matchLabels": {"app": "bluemap-perf-web"}
+                            },
+                            "template": {
+                                "metadata": {
+                                    "annotations": {
+                                        "bluemap.guenter.cloud/postgresql-tls": ssl_mode
+                                    },
+                                    "labels": {"app": "bluemap-perf-web"},
+                                },
+                                "spec": {
+                                    "containers": [
+                                        {
+                                            "name": "web",
+                                            "image": "example.invalid/web:test",
+                                            "env": [
+                                                {
+                                                    "name": "DATABASE_PASSWORD",
+                                                    "value": literal_password,
+                                                },
+                                                {
+                                                    "name": "PGSSLMODE",
+                                                    "value": ssl_mode,
+                                                },
+                                                {
+                                                    "name": "DATABASE_USERNAME",
+                                                    "valueFrom": {
+                                                        "secretKeyRef": {
+                                                            "name": "bluemap-perf-database",
+                                                            "key": "username",
+                                                        }
+                                                    },
+                                                },
+                                            ],
+                                            "volumeMounts": [
+                                                {
+                                                    "name": "database-ca",
+                                                    "mountPath": "/database",
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                    "volumes": [
+                                        {
+                                            "name": "database-ca",
+                                            "secret": {
+                                                "secretName": "bluemap-perf-ca"
+                                            },
+                                        }
+                                    ],
+                                },
+                            },
+                        },
+                        "status": {"availableReplicas": replicas},
+                    },
+                ],
+            }
+
+        def identity(value: dict) -> dict[str, object]:
+            service, deployments = runtime_identity.sanitize_runtime_specs(value)
+            return runtime_identity.runtime_spec_identity_from_snapshots(
+                service,
+                deployments,
+            )
+
+        first_resources = resources(
+            literal_password="first-secret",
+            ssl_mode="verify-full",
+            target_port=8100,
+            replicas=1,
+            cluster_ip="10.0.0.1",
+        )
+        first = identity(first_resources)
+        stable = identity(
+            resources(
+                literal_password="second-secret",
+                ssl_mode="verify-full",
+                target_port=8100,
+                replicas=3,
+                cluster_ip="10.0.0.2",
+            )
+        )
+        changed_deployment = identity(
+            resources(
+                literal_password="second-secret",
+                ssl_mode="require",
+                target_port=8100,
+                replicas=3,
+                cluster_ip="10.0.0.2",
+            )
+        )
+        changed_service = identity(
+            resources(
+                literal_password="second-secret",
+                ssl_mode="verify-full",
+                target_port=8080,
+                replicas=3,
+                cluster_ip="10.0.0.2",
+            )
+        )
+        changed_secret_reference_resources = json.loads(
+            json.dumps(first_resources)
+        )
+        changed_secret_reference_resources["items"][1]["spec"]["template"]["spec"][
+            "containers"
+        ][0]["env"][2]["valueFrom"]["secretKeyRef"]["key"] = "other-username"
+        changed_secret_reference = identity(changed_secret_reference_resources)
+
+        self.assertEqual(first, stable)
+        self.assertNotEqual(
+            first["sanitizedRuntimeSpecSha256"],
+            changed_deployment["sanitizedRuntimeSpecSha256"],
+        )
+        self.assertNotEqual(
+            first["sanitizedRuntimeSpecSha256"],
+            changed_service["sanitizedRuntimeSpecSha256"],
+        )
+        self.assertNotEqual(
+            first["sanitizedRuntimeSpecSha256"],
+            changed_secret_reference["sanitizedRuntimeSpecSha256"],
+        )
+        self.assertNotIn("first-secret", json.dumps(first))
+        self.assertNotIn("second-secret", json.dumps(stable))
+        for field, value in (
+            ("externalIPs", ["192.0.2.10"]),
+            ("healthCheckNodePort", 32080),
+            ("ipFamilyPolicy", "PreferDualStack"),
+            ("loadBalancerIP", "192.0.2.20"),
+            ("trafficDistribution", "PreferSameNode"),
+        ):
+            with self.subTest(service_field=field):
+                changed_resources = json.loads(json.dumps(first_resources))
+                changed_resources["items"][0]["spec"][field] = value
+                self.assertNotEqual(
+                    first["sanitizedRuntimeSpecSha256"],
+                    identity(changed_resources)["sanitizedRuntimeSpecSha256"],
+                )
+        headless_resources = json.loads(json.dumps(first_resources))
+        headless_resources["items"][0]["spec"]["clusterIP"] = "None"
+        self.assertNotEqual(
+            first["sanitizedRuntimeSpecSha256"],
+            identity(headless_resources)["sanitizedRuntimeSpecSha256"],
+        )
+
+    def test_runtime_spec_identity_rejects_duplicate_deployments(self) -> None:
+        service = sanitize_kubernetes_resource.snapshot(
+            {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {
+                    "name": "bluemap-perf-web",
+                    "namespace": "minecraft",
+                },
+                "spec": {"ports": [{"port": 8100}]},
+            },
+            "identity",
+        )
+        deployment = sanitize_kubernetes_resource.snapshot(
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "name": "bluemap-perf-web",
+                    "namespace": "minecraft",
+                },
+                "spec": {
+                    "selector": {"matchLabels": {"app": "web"}},
+                    "template": {
+                        "metadata": {"labels": {"app": "web"}},
+                        "spec": {"containers": [{"name": "web", "image": "test"}]},
+                    },
+                },
+            },
+            "identity",
+        )
+
+        with self.assertRaisesRegex(ValueError, "duplicate Deployment"):
+            runtime_identity.runtime_spec_identity_from_snapshots(
+                service,
+                [deployment, deployment],
+            )
+
+        wrong_namespace = json.loads(json.dumps(deployment))
+        wrong_namespace["resource"]["metadata"]["namespace"] = "other"
+        with self.assertRaisesRegex(ValueError, "namespace does not match"):
+            runtime_identity.runtime_spec_identity_from_snapshots(
+                service,
+                [wrong_namespace],
+            )
+
+        missing_namespace = json.loads(json.dumps(service))
+        del missing_namespace["resource"]["metadata"]["namespace"]
+        with self.assertRaisesRegex(ValueError, "metadata.namespace"):
+            runtime_identity.runtime_spec_identity_from_snapshots(
+                missing_namespace,
+                [deployment],
+            )
+
 
 class PrometheusCaptureTests(unittest.TestCase):
     def test_inspects_cluster_service_url_without_credentials(self) -> None:
@@ -700,6 +944,9 @@ class OriginRunnerStaticTests(unittest.TestCase):
             variant["expectedSanitizedConfigSha256"] = (
                 format(variant_index + 8, "x") * 64
             )
+            variant["expectedSanitizedRuntimeSpecSha256"] = (
+                format(variant_index + 1, "x") * 64
+            )
         return matrix
 
     def test_help_does_not_require_cluster_access(self) -> None:
@@ -759,11 +1006,15 @@ class OriginRunnerStaticTests(unittest.TestCase):
             generate_schedule.build_schedule(unresolved, digest)
 
         matrix = self.resolved_matrix()
+        incompatible = json.loads(json.dumps(matrix))
+        incompatible["formatVersion"] = 2
+        with self.assertRaisesRegex(ValueError, "formatVersion must be 3"):
+            generate_schedule.validate_matrix(incompatible)
         first = generate_schedule.build_schedule(matrix, digest)
         second = generate_schedule.build_schedule(matrix, digest)
 
         self.assertEqual(first, second)
-        self.assertEqual(first["formatVersion"], 2)
+        self.assertEqual(first["formatVersion"], 3)
         self.assertEqual(
             first["benchmarkGitRevision"],
             matrix["benchmarkGitRevision"],
@@ -798,6 +1049,10 @@ class OriginRunnerStaticTests(unittest.TestCase):
                 entry["expectedSanitizedConfigSha256"],
                 variant["expectedSanitizedConfigSha256"],
             )
+            self.assertEqual(
+                entry["expectedSanitizedRuntimeSpecSha256"],
+                variant["expectedSanitizedRuntimeSpecSha256"],
+            )
         self.assertTrue(all(count == 1 for count in counts.values()))
 
         for case in matrix["cases"]:
@@ -826,6 +1081,8 @@ class OriginRunnerStaticTests(unittest.TestCase):
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
         identity_call = runner.index(
             "capture_snapshot_set before\n"
+            "verify_web_pod_ownership before ||\n"
+            '    die "Named web Pods are not owned by the selected Deployments"\n'
             "verify_formal_runtime_identity ||"
         )
         case_start = runner.index('CASE_START_EPOCH="$(date -u +%s)"')
@@ -842,6 +1099,43 @@ class OriginRunnerStaticTests(unittest.TestCase):
         )
         self.assertIn("expectedImages", runner)
         self.assertIn("expectedSanitizedConfigSha256", runner)
+        self.assertIn("expectedSanitizedRuntimeSpecSha256", runner)
+        self.assertIn("verify_web_pod_ownership", runner)
+        self.assertIn('kube get replicaset "$replicaset_name"', runner)
+        self.assertIn("deployment.kubernetes.io/revision", runner)
+        self.assertIn(".status.updatedReplicas", runner)
+        self.assertGreaterEqual(
+            runner.count("(.spec.paused // false) == false"),
+            2,
+        )
+        restart_capture = runner[
+            runner.index("capture_restart_counts() {") :
+            runner.index("normalized_restarts() {")
+        ]
+        self.assertIn(
+            '"$RUNTIME_IDENTITY_SCRIPT" pod-images',
+            restart_capture,
+        )
+        self.assertIn(
+            '[[ "$actual_images_json" == "$EXPECTED_IMAGES_JSON" ]]',
+            restart_capture,
+        )
+        self.assertIn(
+            '"$ARTIFACT_DIR/cluster/before/pod-$pod.json"',
+            restart_capture,
+        )
+        self.assertIn(
+            '[[ "$actual_pod_uid" == "$expected_pod_uid" ]]',
+            restart_capture,
+        )
+        self.assertIn("runtime_identity_mismatch=1", restart_capture)
+        self.assertIn("((runtime_identity_mismatch == 0))", restart_capture)
+        normalized_restarts = runner[
+            runner.index("normalized_restarts() {") :
+            runner.index("record_phase_event() {")
+        ]
+        self.assertIn(".uid as $uid", normalized_restarts)
+        self.assertIn("uid: $uid", normalized_restarts)
 
     def test_identity_schemas_are_versioned_and_reject_placeholders(self) -> None:
         matrix_schema = json.loads(
@@ -851,8 +1145,8 @@ class OriginRunnerStaticTests(unittest.TestCase):
             (BENCHMARK_ROOT / "schedule.schema.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(matrix_schema["properties"]["formatVersion"]["const"], 2)
-        self.assertEqual(schedule_schema["properties"]["formatVersion"]["const"], 2)
+        self.assertEqual(matrix_schema["properties"]["formatVersion"]["const"], 3)
+        self.assertEqual(schedule_schema["properties"]["formatVersion"]["const"], 3)
         self.assertIn(
             "benchmarkGitRevision",
             matrix_schema["required"],
@@ -860,6 +1154,14 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn(
             "expectedImages",
             matrix_schema["$defs"]["variant"]["required"],
+        )
+        self.assertIn(
+            "expectedSanitizedRuntimeSpecSha256",
+            matrix_schema["$defs"]["variant"]["required"],
+        )
+        self.assertIn(
+            "expectedSanitizedRuntimeSpecSha256",
+            schedule_schema["$defs"]["entry"]["required"],
         )
         self.assertNotRegex(
             "REPLACE_WITH_40_CHARACTER_BENCHMARK_GIT_REVISION",
