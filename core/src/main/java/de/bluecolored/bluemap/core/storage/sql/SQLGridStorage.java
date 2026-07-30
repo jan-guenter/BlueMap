@@ -59,7 +59,7 @@ public class SQLGridStorage implements GridStorage {
     @Override
     public @Nullable CompressedInputStream read(int x, int z) throws IOException {
         CommandSet.StoredData stored =
-                sql.readGridItem(map, storage, x, z, compression);
+                sql.readGridItemData(map, storage, x, z, compression);
         if (stored == null) return null;
         return new CompressedInputStream(
                 new ByteArrayInputStream(stored.data()),

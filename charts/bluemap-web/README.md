@@ -383,12 +383,14 @@ exists without competing for one of the bounded HTTP connection slots.
 Readiness remains an HTTP request to `/health/ready`; a saturated or
 dependency-unhealthy replica can therefore be removed from Service traffic
 without Kubernetes restarting an otherwise live process. Java SQL readiness
-uses a cached background dependency probe, so the endpoint changes to `503`
-during a database outage without blocking on the JDBC pool and recovers after
-connectivity returns. The cached state also expires after ten seconds without
-any successful SQL operation, so a stalled JDBC call cannot leave readiness
-healthy indefinitely. Java connections accepted after
-`max-active-connections` is reached are closed immediately.
+uses a cached background `SELECT 1`; Java file readiness uses a daemon
+background check that the configured root is a directory and never creates or
+changes it. The readiness endpoint itself performs no storage dependency I/O.
+Both cached states expire after ten seconds without a successful check, so a
+stalled JDBC call or network filesystem cannot leave readiness healthy
+indefinitely. File storage starts unready until its first successful root
+probe. Java connections accepted after `max-active-connections` is reached are
+closed immediately.
 
 Rust validates all configured maps at startup, then keeps recurring readiness
 checks cheap with one SQL `SELECT 1` or a file-root handle check per interval

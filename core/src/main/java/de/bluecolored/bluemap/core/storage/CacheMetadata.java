@@ -27,9 +27,23 @@ package de.bluecolored.bluemap.core.storage;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Cache validators associated with the exact stored representation of an item.
+ * Cache validators associated with a stored representation of an item.
+ *
+ * @param weak whether the content hash is only a weak representation
+ *             validator
  */
-public record CacheMetadata(byte @Nullable [] contentHash, long updatedAt) {
+public record CacheMetadata(
+        byte @Nullable [] contentHash,
+        long updatedAt,
+        boolean weak
+) {
+
+    /**
+     * Creates cache metadata with a strong content validator.
+     */
+    public CacheMetadata(byte @Nullable [] contentHash, long updatedAt) {
+        this(contentHash, updatedAt, false);
+    }
 
     public CacheMetadata {
         contentHash = contentHash == null ? null : contentHash.clone();

@@ -26,6 +26,10 @@ import { Vector2, Scene, Group } from 'three';
 import  { Tile } from './Tile.js';
 import {alert, dispatchEvent, hashTile} from '../util/Utils.js';
 import {TileMap} from "./TileMap";
+import {
+    isRequiredEncodingError,
+    showRequiredEncodingError
+} from "../util/RevalidatingFileLoader";
 
 export class TileManager {
 
@@ -202,7 +206,14 @@ export class TileManager {
                 if (this.loadTimeout) clearTimeout(this.loadTimeout);
                 this.loadTimeout = setTimeout(this.loadCloseTiles, 0);
             })
-            .catch(error => {})
+            .catch(error => {
+                if (
+                    isRequiredEncodingError(error) &&
+                    showRequiredEncodingError(error)
+                ) {
+                    alert(this.events, error.message, "error");
+                }
+            })
             .finally(() => {
                 this.currentlyLoading--;
             });

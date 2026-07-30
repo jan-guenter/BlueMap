@@ -496,7 +496,13 @@ export class BlueMapApp {
                 this.playerMarkerManager.setAutoUpdateInterval(1000);
             })
             .catch(e => {
-                alert(this.events, e, "warning");
+                if (isRequiredEncodingError(e)) {
+                    if (showRequiredEncodingError(e)) {
+                        alert(this.events, e.message, "error");
+                    }
+                } else {
+                    alert(this.events, e, "warning");
+                }
                 this.playerMarkerManager.dispose();
             });
     }
@@ -514,7 +520,13 @@ export class BlueMapApp {
                 this.markerFileManager.setAutoUpdateInterval(1000 * 10);
             })
             .catch(e => {
-                alert(this.events, e, "warning");
+                if (isRequiredEncodingError(e)) {
+                    if (showRequiredEncodingError(e)) {
+                        alert(this.events, e.message, "error");
+                    }
+                } else {
+                    alert(this.events, e, "warning");
+                }
                 this.markerFileManager.dispose();
             });
     }

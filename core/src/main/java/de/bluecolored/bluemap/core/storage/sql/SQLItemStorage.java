@@ -56,7 +56,7 @@ public class SQLItemStorage implements ItemStorage {
     @Override
     public @Nullable CompressedInputStream read() throws IOException {
         CommandSet.StoredData stored =
-                sql.readItem(map, storage, compression);
+                sql.readItemData(map, storage, compression);
         if (stored == null) return null;
         return new CompressedInputStream(
                 new ByteArrayInputStream(stored.data()),

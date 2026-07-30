@@ -69,11 +69,17 @@ class SqliteCacheMetadataIntegrationTest {
             byte[] item = "settings".getBytes();
             commands.writeItem("map", Key.bluemap("settings"), Compression.NONE, item);
             CommandSet.StoredData storedItem =
-                    commands.readItem("map", Key.bluemap("settings"), Compression.NONE);
+                    commands.readItemData("map", Key.bluemap("settings"), Compression.NONE);
             assertNotNull(storedItem);
             assertArrayEquals(item, storedItem.data());
             assertArrayEquals(MessageDigest.getInstance("SHA-256").digest(item), storedItem.contentHash());
             assertTrue(storedItem.updatedAt() > 0);
+            assertArrayEquals(
+                    item,
+                    commands.readItem(
+                            "map", Key.bluemap("settings"), Compression.NONE
+                    )
+            );
             CommandSet.StoredMetadata itemMetadata =
                     commands.readItemMetadata(
                             "map", Key.bluemap("settings"), Compression.NONE
@@ -86,11 +92,20 @@ class SqliteCacheMetadataIntegrationTest {
             byte[] tile = "tile".getBytes();
             commands.writeGridItem("map", Key.bluemap("hires"), 1, -2, Compression.NONE, tile);
             CommandSet.StoredData storedTile =
-                    commands.readGridItem("map", Key.bluemap("hires"), 1, -2, Compression.NONE);
+                    commands.readGridItemData(
+                            "map", Key.bluemap("hires"), 1, -2, Compression.NONE
+                    );
             assertNotNull(storedTile);
             assertArrayEquals(tile, storedTile.data());
             assertArrayEquals(MessageDigest.getInstance("SHA-256").digest(tile), storedTile.contentHash());
             assertTrue(storedTile.updatedAt() > 0);
+            assertArrayEquals(
+                    tile,
+                    commands.readGridItem(
+                            "map", Key.bluemap("hires"), 1, -2,
+                            Compression.NONE
+                    )
+            );
             CommandSet.StoredMetadata tileMetadata =
                     commands.readGridItemMetadata(
                             "map", Key.bluemap("hires"), 1, -2, Compression.NONE

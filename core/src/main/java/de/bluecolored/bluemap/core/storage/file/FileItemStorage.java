@@ -43,6 +43,10 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.util.Objects;
 
 @RequiredArgsConstructor
@@ -82,10 +86,7 @@ public class FileItemStorage implements ItemStorage {
             return new CompressedInputStream(
                     Channels.newInputStream(openedFile.channel()),
                     compression,
-                    new CacheMetadata(
-                            null,
-                            attributes.lastModifiedTime().toMillis()
-                    )
+                    cacheMetadata(attributes)
             );
         } catch (RuntimeException e) {
             openedFile.close();
@@ -101,7 +102,7 @@ public class FileItemStorage implements ItemStorage {
             if (!attributes.isRegularFile()) return null;
             return new StoredDataMetadata(
                     compression,
-                    new CacheMetadata(null, attributes.lastModifiedTime().toMillis()),
+                    cacheMetadata(attributes),
                     attributes.size()
             );
         } catch (FileNotFoundException | NoSuchFileException ex) {
@@ -170,6 +171,50 @@ public class FileItemStorage implements ItemStorage {
         return before.isRegularFile() == after.isRegularFile()
                 && before.size() == after.size()
                 && before.lastModifiedTime().equals(after.lastModifiedTime());
+    }
+
+    /**
+     * Creates a representation validator from file metadata only. It is weak
+     * because an in-place writer can change content while preserving every
+     * available metadata field.
+     */
+    private static CacheMetadata cacheMetadata(BasicFileAttributes attributes) {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
+
+        updateDigest(digest, "bluemap-file-validator-v1");
+        Object fileKey = attributes.fileKey();
+        if (fileKey == null) {
+            digest.update((byte) 0);
+        } else {
+            digest.update((byte) 1);
+            updateDigest(digest, fileKey.getClass().getName());
+            updateDigest(digest, fileKey.toString());
+        }
+
+        Instant modified = attributes.lastModifiedTime().toInstant();
+        updateDigest(digest, Long.toString(modified.getEpochSecond()));
+        updateDigest(digest, Integer.toString(modified.getNano()));
+        updateDigest(digest, Long.toString(attributes.size()));
+
+        return new CacheMetadata(
+                digest.digest(),
+                attributes.lastModifiedTime().toMillis(),
+                true
+        );
+    }
+
+    private static void updateDigest(MessageDigest digest, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        digest.update((byte) (bytes.length >>> 24));
+        digest.update((byte) (bytes.length >>> 16));
+        digest.update((byte) (bytes.length >>> 8));
+        digest.update((byte) bytes.length);
+        digest.update(bytes);
     }
 
     @Override

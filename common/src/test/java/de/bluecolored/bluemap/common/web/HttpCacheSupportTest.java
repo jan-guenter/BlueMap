@@ -84,6 +84,17 @@ class HttpCacheSupportTest {
     }
 
     @Test
+    void formatsFileMetadataValidatorsAsWeakEntityTags() {
+        CacheMetadata metadata = new CacheMetadata(
+                new byte[] {0x01, 0x23},
+                1_700_000_000_999L,
+                true
+        );
+
+        assertEquals("W/\"0123\"", HttpCacheSupport.eTag(metadata));
+    }
+
+    @Test
     void ifNoneMatchWildcardMatchesExistingRepresentationWithoutHash() throws Exception {
         HttpRequest request = request();
         request.addHeader("If-None-Match", "*");

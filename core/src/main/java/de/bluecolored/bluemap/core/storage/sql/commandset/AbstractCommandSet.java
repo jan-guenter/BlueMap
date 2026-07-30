@@ -159,7 +159,17 @@ public abstract class AbstractCommandSet implements CommandSet {
     public abstract String itemStorageReadStatement();
 
     @Override
-    public @Nullable StoredData readItem(String mapId, Key key, Compression compression) throws IOException {
+    public byte @Nullable [] readItem(
+            String mapId, Key key, Compression compression
+    ) throws IOException {
+        StoredData stored = readItemData(mapId, key, compression);
+        return stored == null ? null : stored.data();
+    }
+
+    @Override
+    public @Nullable StoredData readItemData(
+            String mapId, Key key, Compression compression
+    ) throws IOException {
         Integer mapKey = findMapKey(mapId);
         Integer storageKey = findItemStorageKey(key);
         Integer compressionKey = findCompressionKey(compression);
@@ -254,7 +264,16 @@ public abstract class AbstractCommandSet implements CommandSet {
     public abstract String gridStorageReadStatement();
 
     @Override
-    public @Nullable StoredData readGridItem(
+    public byte @Nullable [] readGridItem(
+            String mapId, Key key, int x, int z, Compression compression
+    ) throws IOException {
+        StoredData stored =
+                readGridItemData(mapId, key, x, z, compression);
+        return stored == null ? null : stored.data();
+    }
+
+    @Override
+    public @Nullable StoredData readGridItemData(
             String mapId, Key key, int x, int z, Compression compression
     ) throws IOException {
         Integer mapKey = findMapKey(mapId);

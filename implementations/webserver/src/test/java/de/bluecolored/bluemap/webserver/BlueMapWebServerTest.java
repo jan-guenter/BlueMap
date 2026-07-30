@@ -29,6 +29,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -82,6 +83,7 @@ class BlueMapWebServerTest {
         Path config = Files.createDirectories(tempDir.resolve("config"));
         Files.createDirectories(config.resolve("maps"));
         Files.createDirectories(config.resolve("storages"));
+        Files.createDirectories(tempDir.resolve("maps"));
 
         String data = tempDir.resolve("data").toString().replace('\\', '/');
         String web = tempDir.resolve("web").toString().replace('\\', '/');
@@ -121,11 +123,20 @@ class BlueMapWebServerTest {
         assertFalse(server.isReady());
         try (server) {
             server.start();
-            assertTrue(server.isReady());
+            awaitReady(server);
         }
         assertFalse(server.isReady());
 
         assertTrue(Files.isRegularFile(Path.of(web).resolve("index.html")));
         assertTrue(Files.isRegularFile(Path.of(web).resolve("settings.json")));
+    }
+
+    private static void awaitReady(BlueMapWebServer server)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (!server.isReady() && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertTrue(server.isReady());
     }
 }

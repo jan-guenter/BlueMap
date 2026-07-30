@@ -45,7 +45,20 @@ public interface CommandSet extends Closeable {
 
     void writeItem(String mapId, Key key, Compression compression, byte[] bytes) throws IOException;
 
-    @Nullable StoredData readItem(String mapId, Key key, Compression compression) throws IOException;
+    byte @Nullable [] readItem(String mapId, Key key, Compression compression) throws IOException;
+
+    /**
+     * Reads an item together with cache metadata when available.
+     *
+     * <p>The default preserves compatibility with command sets implementing
+     * the original byte-array read contract.</p>
+     */
+    default @Nullable StoredData readItemData(
+            String mapId, Key key, Compression compression
+    ) throws IOException {
+        byte[] data = readItem(mapId, key, compression);
+        return data == null ? null : new StoredData(data, null, 0);
+    }
 
     default @Nullable StoredMetadata readItemMetadata(
             String mapId, Key key, Compression compression
@@ -62,9 +75,22 @@ public interface CommandSet extends Closeable {
             byte[] bytes
     ) throws IOException;
 
-    @Nullable StoredData readGridItem(
+    byte @Nullable [] readGridItem(
             String mapId, Key key, int x, int z, Compression compression
     ) throws IOException;
+
+    /**
+     * Reads a grid item together with cache metadata when available.
+     *
+     * <p>The default preserves compatibility with command sets implementing
+     * the original byte-array read contract.</p>
+     */
+    default @Nullable StoredData readGridItemData(
+            String mapId, Key key, int x, int z, Compression compression
+    ) throws IOException {
+        byte[] data = readGridItem(mapId, key, x, z, compression);
+        return data == null ? null : new StoredData(data, null, 0);
+    }
 
     default @Nullable StoredMetadata readGridItemMetadata(
             String mapId, Key key, int x, int z, Compression compression

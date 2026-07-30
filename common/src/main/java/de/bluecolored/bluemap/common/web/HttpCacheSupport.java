@@ -112,7 +112,8 @@ final class HttpCacheSupport {
 
     static @Nullable String eTag(@Nullable CacheMetadata metadata) {
         if (metadata == null || metadata.contentHash() == null) return null;
-        return "\"" + HexFormat.of().formatHex(metadata.contentHash()) + "\"";
+        return (metadata.weak() ? "W/" : "")
+                + "\"" + HexFormat.of().formatHex(metadata.contentHash()) + "\"";
     }
 
     static @Nullable String lastModified(@Nullable CacheMetadata metadata) {

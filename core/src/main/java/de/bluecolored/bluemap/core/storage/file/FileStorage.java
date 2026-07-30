@@ -33,20 +33,92 @@ import lombok.Getter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.Duration;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 import java.util.stream.Stream;
 
 public class FileStorage implements Storage {
 
+    private static final Duration DEFAULT_HEALTH_MAX_AGE =
+            Duration.ofSeconds(10);
+    private static final Duration DEFAULT_HEALTH_INTERVAL =
+            Duration.ofSeconds(1);
+    private static final long NEVER_PROBED = Long.MIN_VALUE;
+
     @Getter private final Path root;
     private final LoadingCache<String, FileMapStorage> mapStorages;
+    private final LongSupplier nanoTime;
+    private final long healthMaxAgeNanos;
+    private final long healthIntervalNanos;
+    private final RootProbe rootProbe;
+    private final AtomicBoolean closed = new AtomicBoolean();
+
+    private volatile long lastSuccessfulProbe = NEVER_PROBED;
+    private volatile boolean latestProbeHealthy;
+    private ScheduledExecutorService healthExecutor;
 
     public FileStorage(Path root, Compression compression, boolean atomic) {
+        this(
+                root,
+                compression,
+                atomic,
+                System::nanoTime,
+                DEFAULT_HEALTH_MAX_AGE,
+                DEFAULT_HEALTH_INTERVAL,
+                FileStorage::isDirectory
+        );
+    }
+
+    FileStorage(
+            Path root,
+            Compression compression,
+            boolean atomic,
+            LongSupplier nanoTime,
+            Duration healthMaxAge,
+            Duration healthInterval,
+            RootProbe rootProbe
+    ) {
         this.root = root;
+        this.nanoTime = nanoTime;
+        this.healthMaxAgeNanos = requirePositive(
+                healthMaxAge,
+                "healthMaxAge"
+        );
+        this.healthIntervalNanos = requirePositive(
+                healthInterval,
+                "healthInterval"
+        );
+        this.rootProbe = rootProbe;
         mapStorages = Caches.build(id -> new FileMapStorage(root.resolve(id), compression, atomic));
     }
 
     @Override
-    public void initialize() throws IOException {}
+    public synchronized void initialize() throws IOException {
+        if (closed.get()) {
+            throw new IOException("File storage is closed");
+        }
+        if (healthExecutor != null) return;
+
+        healthExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(
+                    task,
+                    "bluemap-file-storage-health"
+            );
+            thread.setDaemon(true);
+            return thread;
+        });
+        healthExecutor.scheduleWithFixedDelay(
+                this::refreshHealth,
+                0,
+                healthIntervalNanos,
+                TimeUnit.NANOSECONDS
+        );
+    }
 
     @Override
     public FileMapStorage map(String mapId) {
@@ -65,10 +137,65 @@ public class FileStorage implements Storage {
 
     @Override
     public boolean isClosed() {
-        return false;
+        return closed.get();
     }
 
     @Override
-    public void close() throws IOException {}
+    public boolean isHealthy() {
+        if (closed.get() || !latestProbeHealthy) return false;
+
+        long lastSuccess = lastSuccessfulProbe;
+        if (lastSuccess == NEVER_PROBED) return false;
+
+        long age = nanoTime.getAsLong() - lastSuccess;
+        return age >= 0 && age <= healthMaxAgeNanos;
+    }
+
+    @Override
+    public synchronized void close() {
+        if (!closed.compareAndSet(false, true)) return;
+
+        latestProbeHealthy = false;
+        lastSuccessfulProbe = NEVER_PROBED;
+        if (healthExecutor != null) healthExecutor.shutdownNow();
+    }
+
+    private void refreshHealth() {
+        if (closed.get()) return;
+
+        boolean healthy;
+        try {
+            healthy = rootProbe.isDirectory(root);
+        } catch (IOException | RuntimeException ignored) {
+            healthy = false;
+        }
+
+        if (closed.get()) return;
+        if (healthy) lastSuccessfulProbe = nanoTime.getAsLong();
+        latestProbeHealthy = healthy;
+    }
+
+    private static boolean isDirectory(Path path) throws IOException {
+        return Files.readAttributes(path, BasicFileAttributes.class)
+                .isDirectory();
+    }
+
+    private static long requirePositive(Duration duration, String name) {
+        if (duration.isZero() || duration.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        try {
+            return duration.toNanos();
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException(name + " is too large", e);
+        }
+    }
+
+    @FunctionalInterface
+    interface RootProbe {
+
+        boolean isDirectory(Path path) throws IOException;
+
+    }
 
 }

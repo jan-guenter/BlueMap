@@ -39,8 +39,13 @@ set BlueMap's `write-players-interval` and `write-markers-interval` to positive
 values in its plugin configuration.
 
 The server exposes `/health/live` and `/health/ready`. Readiness means that the
-generated webroot exists and all referenced storage backends initialized and
-remain open. It deliberately avoids a synchronous database query on every
+generated webroot exists and all referenced storage backends are healthy.
+Readiness never runs a synchronous storage dependency check. SQL storage uses
+a cached background `SELECT 1`; file storage uses a daemon background probe
+that verifies the configured root is a directory without creating or changing
+it. Both cached states expire after ten seconds without a successful check, so
+a stalled database or network filesystem cannot leave readiness healthy
+indefinitely. File storage starts unready until its first successful root
 probe.
 
 `webserver.conf` also controls `max-active-connections`,
