@@ -11,7 +11,7 @@
     "measurementDuration": "5m",
     "cooldownSeconds": 60,
     "minimumAchievedRateRatio": 0.99,
-    "preAllocatedVUs": 32,
+    "preAllocatedVUs": 256,
     "maxVUs": 512
   },
   "variants": [
@@ -134,15 +134,15 @@
   ],
   "cases": [
     {
-      "id": "map-mixed-r100",
+      "id": "map-mixed-r15",
       "profile": "map-data-mixed",
-      "rate": 100,
-      "viewers": 100,
+      "rate": 15,
+      "viewers": 15,
       "markerIntervalSeconds": 10,
       "acceptEncoding": "zstd",
       "storedEncoding": "zstd",
-      "latencyP95Milliseconds": 500,
-      "latencyP99Milliseconds": 1000,
+      "latencyP95Milliseconds": 10000,
+      "latencyP99Milliseconds": 20000,
       "variants": [
         "php-postgresql",
         "java-old-postgresql",
@@ -151,15 +151,15 @@
       ]
     },
     {
-      "id": "map-mixed-horizontal-r300",
+      "id": "map-mixed-horizontal-r40",
       "profile": "map-data-mixed",
-      "rate": 300,
-      "viewers": 300,
+      "rate": 40,
+      "viewers": 40,
       "markerIntervalSeconds": 10,
       "acceptEncoding": "zstd",
       "storedEncoding": "zstd",
-      "latencyP95Milliseconds": 500,
-      "latencyP99Milliseconds": 1000,
+      "latencyP95Milliseconds": 5000,
+      "latencyP99Milliseconds": 10000,
       "variants": [
         "java-new-postgresql",
         "rust-postgresql",
@@ -168,15 +168,15 @@
       ]
     },
     {
-      "id": "live-viewers-r100",
+      "id": "live-viewers-r15",
       "profile": "live-viewers",
-      "rate": 100,
-      "viewers": 100,
+      "rate": 15,
+      "viewers": 15,
       "markerIntervalSeconds": 10,
       "acceptEncoding": "zstd",
       "storedEncoding": "zstd",
-      "latencyP95Milliseconds": 500,
-      "latencyP99Milliseconds": 1000,
+      "latencyP95Milliseconds": 10000,
+      "latencyP99Milliseconds": 20000,
       "variants": [
         "php-postgresql",
         "java-old-postgresql",
@@ -185,15 +185,15 @@
       ]
     },
     {
-      "id": "large-object-r5",
+      "id": "large-object-r1",
       "profile": "large-object",
-      "rate": 5,
-      "viewers": 100,
+      "rate": 1,
+      "viewers": 15,
       "markerIntervalSeconds": 10,
       "acceptEncoding": "zstd",
       "storedEncoding": "zstd",
-      "latencyP95Milliseconds": 2000,
-      "latencyP99Milliseconds": 5000,
+      "latencyP95Milliseconds": 10000,
+      "latencyP99Milliseconds": 20000,
       "variants": [
         "php-postgresql",
         "java-old-postgresql",

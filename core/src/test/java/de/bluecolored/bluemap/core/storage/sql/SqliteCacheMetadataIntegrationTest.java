@@ -57,6 +57,35 @@ import static org.junit.jupiter.api.Assertions.*;
 class SqliteCacheMetadataIntegrationTest {
 
     @Test
+    void sqlStorageReadsExposeStoredRepresentationLength(@TempDir Path tempDir)
+            throws Exception {
+        String url = "jdbc:sqlite:" + tempDir.resolve("content-length.db");
+
+        try (Database database = new Database(url, Map.of(), 1);
+             CommandSet commands = new SqliteCommandSet(database)) {
+            commands.initializeTables();
+            SQLMapStorage storage =
+                    new SQLMapStorage("map", commands, Compression.ZSTD);
+
+            try (OutputStream output = storage.settings().write()) {
+                output.write("settings-content".getBytes());
+            }
+            try (OutputStream output = storage.hiresTiles().write(1, -2)) {
+                output.write("tile-content".getBytes());
+            }
+
+            try (var input = storage.settings().read()) {
+                assertNotNull(input);
+                assertEquals(input.readAllBytes().length, input.getContentLength());
+            }
+            try (var input = storage.hiresTiles().read(1, -2)) {
+                assertNotNull(input);
+                assertEquals(input.readAllBytes().length, input.getContentLength());
+            }
+        }
+    }
+
+    @Test
     void migratesLegacySchemaAndPersistsValidators(@TempDir Path tempDir) throws Exception {
         String url = "jdbc:sqlite:" + tempDir.resolve("bluemap.db");
         createLegacySchema(url);

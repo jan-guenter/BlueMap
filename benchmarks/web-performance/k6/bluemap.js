@@ -10,7 +10,7 @@ const RATE = positiveInteger(__ENV.RATE || "100", "RATE");
 const DURATION = __ENV.DURATION || "5m";
 const DURATION_SECONDS = durationSeconds(DURATION, "DURATION");
 const PRE_ALLOCATED_VUS = positiveInteger(
-  __ENV.PRE_ALLOCATED_VUS || "32",
+  __ENV.PRE_ALLOCATED_VUS || "256",
   "PRE_ALLOCATED_VUS",
 );
 const MAX_VUS = positiveInteger(__ENV.MAX_VUS || "512", "MAX_VUS");

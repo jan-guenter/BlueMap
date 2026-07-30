@@ -129,7 +129,11 @@ class TargetValidationTests(unittest.TestCase):
         self.assertEqual(target.pod_uid, "pod-uid")
 
     def test_explicitly_rejects_protected_and_nonbenchmark_names(self) -> None:
-        for name in ("minecraft", "minecraft-data"):
+        for name in (
+            "minecraft",
+            "minecraft-data",
+            "minecraft-maintenance-holder",
+        ):
             with (
                 self.subTest(name=name),
                 self.assertRaisesRegex(guarded.SafetyError, "explicitly rejects"),
@@ -358,7 +362,7 @@ class BenchmarkValuesTests(unittest.TestCase):
         self.assertIn("maxConnections: 4", java_overlay)
         self.assertIn("replicaCount: 3", rust_overlay)
         self.assertIn("maxConnections: 4", rust_overlay)
-        self.assertIn("maxInFlightRequests: 4", rust_overlay)
+        self.assertIn("maxInFlightRequests: 8", rust_overlay)
 
         variants = {variant["id"]: variant for variant in matrix["variants"]}
         self.assertEqual(variants["java-new-postgresql-r3"]["replicaCount"], 3)
@@ -366,7 +370,7 @@ class BenchmarkValuesTests(unittest.TestCase):
         horizontal = next(
             case
             for case in matrix["cases"]
-            if case["id"] == "map-mixed-horizontal-r300"
+            if case["id"] == "map-mixed-horizontal-r40"
         )
         self.assertEqual(
             horizontal["variants"],

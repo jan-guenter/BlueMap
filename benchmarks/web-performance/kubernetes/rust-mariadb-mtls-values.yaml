@@ -1,0 +1,64 @@
+# Rust/MariaDB correctness candidate. The database account referenced here is
+# provisioned separately with REQUIRE X509; no credentials are stored in this
+# file. Install only from the full-SHA OCI chart documented in ../README.md.
+fullnameOverride: bluemap-perf-rust-mariadb-mtls
+
+replicaCount: 1
+
+webserver:
+  implementation: rust
+  rust:
+    image:
+      repository: ghcr.io/jan-guenter/bluemap-web-rust
+      tag: ""
+      pullPolicy: IfNotPresent
+    config:
+      maxInFlightRequests: 12
+      maxObjectBytes: 33554432
+    maps:
+      - id: world
+        sorting: 0
+    databaseTls:
+      mode: verify-full
+      ca:
+        existingSecret: bluemap-perf-mariadb-ca
+        key: ca.crt
+      clientCertificate:
+        existingSecret: bluemap-perf-mariadb-client-cert
+        certKey: tls.crt
+        keyKey: tls.key
+
+podLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: rust-mariadb-mtls
+
+deploymentLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: rust-mariadb-mtls
+
+storage:
+  id: performance
+  type: sql
+  compression: zstd
+  sql:
+    databaseType: mariadb
+    host: bluemap-perf-mariadb.minecraft.svc.cluster.local
+    port: 3306
+    database: bluemap
+    maxConnections: 12
+    connectTimeoutSeconds: 10
+    credentials:
+      existingSecret: bluemap-perf-mariadb-mtls
+      usernameKey: username
+      passwordKey: password
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector:
+  kubernetes.io/hostname: contabo2

@@ -41,9 +41,14 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: benchmarks/web-performance/importer/requirements.txt
+          cache-dependency-path: |
+            benchmarks/web-performance/importer/requirements.txt
+            benchmarks/web-performance/tests/requirements.txt
       - name: Install benchmark dependencies
-        run: python -m pip install -r benchmarks/web-performance/importer/requirements.txt
+        run: >-
+          python -m pip install
+          -r benchmarks/web-performance/importer/requirements.txt
+          -r benchmarks/web-performance/tests/requirements.txt
       - name: Test benchmark harness
         run: |
           python -m unittest discover \

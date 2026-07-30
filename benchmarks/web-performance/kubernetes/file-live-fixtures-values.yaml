@@ -1,15 +1,35 @@
-# Project the same deterministic live-data fixtures used by the SQL importer
-# over the immutable file snapshot. The PVC itself remains untouched.
+# Self-contained file-storage source overlay. Apply this values file last:
+# Helm replaces list values, so both the immutable snapshot and deterministic
+# live fixtures are declared together. Both source mounts remain read-only.
+storage:
+  type: file
+  compression: gzip
+  file:
+    root: /snapshot/bluemap/web/maps
+
+persistence:
+  enabled: false
+  accessModes:
+    - ReadOnlyMany
+
 extraVolumes:
+  - name: benchmark-snapshot
+    persistentVolumeClaim:
+      claimName: bluemap-perf-snapshot
+      readOnly: true
   - name: benchmark-live-fixtures
     configMap:
       name: bluemap-perf-live-fixtures
+
 extraVolumeMounts:
+  - name: benchmark-snapshot
+    mountPath: /snapshot
+    readOnly: true
   - name: benchmark-live-fixtures
-    mountPath: /data/web/maps/world/live/players.json
+    mountPath: /snapshot/bluemap/web/maps/world/live/players.json
     subPath: players.json
     readOnly: true
   - name: benchmark-live-fixtures
-    mountPath: /data/web/maps/world/live/markers.json
+    mountPath: /snapshot/bluemap/web/maps/world/live/markers.json
     subPath: markers.json
     readOnly: true

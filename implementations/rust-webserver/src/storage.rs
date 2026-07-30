@@ -707,19 +707,8 @@ impl SqlBackend<MySqlPool> {
                 } else {
                     format!("bluemap:lowres/{lod}")
                 };
-                let hash = mysql_content_hash_projection(self.metadata.grid_content_hash);
-                let updated = mysql_updated_at_projection(self.metadata.grid_updated_at);
-                let data = mysql_data_projection(include_data);
                 let class = if lod == 0 { "hires" } else { "lowres" };
-                let statement = format!(
-                    "SELECT {data} c.`key` AS compression, {hash} AS content_hash, \
-                     {updated} AS updated_at_millis, '{class}' AS object_class \
-                     FROM bluemap_grid_storage_data d \
-                     JOIN bluemap_map m ON d.map = m.id \
-                     JOIN bluemap_grid_storage s ON d.storage = s.id \
-                     JOIN bluemap_compression c ON d.compression = c.id \
-                     WHERE m.map_id = ? AND s.`key` = ? AND d.x = ? AND d.z = ?"
-                );
+                let statement = mysql_grid_statement(include_data, self.metadata, class);
                 let mut query = sqlx::query(&statement);
                 if include_data {
                     query = query.bind(self.max_object_bytes);
@@ -737,19 +726,8 @@ impl SqlBackend<MySqlPool> {
             ObjectRequest::Tile { .. } => Ok(None),
             request => {
                 let (storage, class) = item_key(request);
-                let hash = mysql_content_hash_projection(self.metadata.item_content_hash);
-                let updated = mysql_updated_at_projection(self.metadata.item_updated_at);
-                let data = mysql_data_projection(include_data);
                 let class = class.database_name();
-                let statement = format!(
-                    "SELECT {data} c.`key` AS compression, {hash} AS content_hash, \
-                     {updated} AS updated_at_millis, '{class}' AS object_class \
-                     FROM bluemap_item_storage_data d \
-                     JOIN bluemap_map m ON d.map = m.id \
-                     JOIN bluemap_item_storage s ON d.storage = s.id \
-                     JOIN bluemap_compression c ON d.compression = c.id \
-                     WHERE m.map_id = ? AND s.`key` = ?"
-                );
+                let statement = mysql_item_statement(include_data, self.metadata, class);
                 let mut query = sqlx::query(&statement);
                 if include_data {
                     query = query.bind(self.max_object_bytes);
@@ -858,6 +836,41 @@ impl SqlBackend<PgPool> {
         }
     }
 }
+
+fn mysql_grid_statement(include_data: bool, metadata: SqlMetadata, class: &str) -> String {
+    let hash = mysql_content_hash_projection(metadata.grid_content_hash);
+    let updated = mysql_updated_at_projection(metadata.grid_updated_at);
+    let data = mysql_data_projection(include_data);
+    format!(
+        "SELECT {data} {MYSQL_COMPRESSION_PROJECTION} AS compression, \
+         {hash} AS content_hash, {updated} AS updated_at_millis, \
+         '{class}' AS object_class \
+         FROM bluemap_grid_storage_data d \
+         JOIN bluemap_map m ON d.map = m.id \
+         JOIN bluemap_grid_storage s ON d.storage = s.id \
+         JOIN bluemap_compression c ON d.compression = c.id \
+         WHERE m.map_id = ? AND s.`key` = ? AND d.x = ? AND d.z = ?"
+    )
+}
+
+fn mysql_item_statement(include_data: bool, metadata: SqlMetadata, class: &str) -> String {
+    let hash = mysql_content_hash_projection(metadata.item_content_hash);
+    let updated = mysql_updated_at_projection(metadata.item_updated_at);
+    let data = mysql_data_projection(include_data);
+    format!(
+        "SELECT {data} {MYSQL_COMPRESSION_PROJECTION} AS compression, \
+         {hash} AS content_hash, {updated} AS updated_at_millis, \
+         '{class}' AS object_class \
+         FROM bluemap_item_storage_data d \
+         JOIN bluemap_map m ON d.map = m.id \
+         JOIN bluemap_item_storage s ON d.storage = s.id \
+         JOIN bluemap_compression c ON d.compression = c.id \
+         WHERE m.map_id = ? AND s.`key` = ?"
+    )
+}
+
+const MYSQL_COMPRESSION_PROJECTION: &str = "\
+CAST(c.`key` AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci";
 
 fn item_key(request: ObjectRequest) -> (String, ObjectClass) {
     match request {
@@ -1200,6 +1213,30 @@ mod tests {
         let postgres_body = postgres_data_projection(true, 5);
         assert!(postgres_body.contains("CASE WHEN OCTET_LENGTH(d.data) <= $5"));
         assert!(postgres_body.contains("ELSE NULL::bytea END AS data"));
+    }
+
+    #[test]
+    fn mysql_queries_project_binary_collated_keys_as_text() {
+        let metadata = SqlMetadata {
+            item_content_hash: true,
+            item_updated_at: true,
+            grid_content_hash: true,
+            grid_updated_at: true,
+        };
+        let expected = format!("{MYSQL_COMPRESSION_PROJECTION} AS compression");
+        assert_eq!(
+            MYSQL_COMPRESSION_PROJECTION,
+            "CAST(c.`key` AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci"
+        );
+
+        let grid = mysql_grid_statement(true, metadata, "hires");
+        let item = mysql_item_statement(true, metadata, "settings");
+        for statement in [&grid, &item] {
+            assert!(statement.contains(&expected));
+            assert!(!statement.contains("c.`key` AS compression"));
+        }
+        assert!(grid.contains("FROM bluemap_grid_storage_data d"));
+        assert!(item.contains("FROM bluemap_item_storage_data d"));
     }
 
     #[test]

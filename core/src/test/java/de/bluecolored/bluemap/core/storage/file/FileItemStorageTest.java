@@ -69,6 +69,7 @@ class FileItemStorageTest {
 
         try (CompressedInputStream input = storage.read()) {
             assertNotNull(input);
+            assertEquals(Files.size(tempDir.resolve("item.bin")), input.getContentLength());
             assertNotNull(input.getCacheMetadata());
             assertEquals(
                     metadata.cacheMetadata().updatedAt(),

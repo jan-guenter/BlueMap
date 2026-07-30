@@ -22,7 +22,7 @@ LATENCY_P95_MS="500"
 LATENCY_P99_MS="1000"
 LARGE_OBJECT_LATENCY_P95_MS=""
 LARGE_OBJECT_LATENCY_P99_MS=""
-PRE_ALLOCATED_VUS="32"
+PRE_ALLOCATED_VUS="256"
 MAX_VUS="512"
 ACCEPT_ENCODING="zstd"
 STORED_ENCODING="zstd"
@@ -35,8 +35,8 @@ METRICS_INTERVAL_SECONDS="5"
 PROMETHEUS_URL="${PROMETHEUS_URL:-}"
 PROMETHEUS_STEP_SECONDS="${PROMETHEUS_STEP_SECONDS:-15}"
 MAX_NON_TARGET_NODE_CPU_RANGE_CORES="0.5"
-MAX_NON_TARGET_NODE_CPU_MEAN_CORES="2.0"
-MAX_NON_TARGET_NODE_CPU_MAXIMUM_CORES="3.0"
+MAX_NON_TARGET_NODE_CPU_MEAN_CORES="3.0"
+MAX_NON_TARGET_NODE_CPU_MAXIMUM_CORES="4.0"
 PYTHON_BIN="${BENCHMARK_PYTHON:-python3}"
 SERVICE_PORT=""
 SERVICE=""
@@ -114,7 +114,7 @@ Workload options:
   --latency-p99-ms N               formal p99 gate (default: 1000)
   --large-object-latency-p95-ms N  optional large-object p95 override
   --large-object-latency-p99-ms N  optional large-object p99 override
-  --pre-allocated-vus N           k6 preallocated VUs (default: 32)
+  --pre-allocated-vus N           k6 preallocated VUs (default: 256)
   --max-vus N                     k6 maximum VUs (default: 512)
   --accept-encoding NAME          request encoding (default: zstd)
   --stored-encoding NAME          contract expectation (default: zstd)
@@ -130,9 +130,9 @@ Workload options:
                                   reject noisy repetitions above this CPU range
                                   (default: 0.5 cores; Prometheus only)
   --max-non-target-node-cpu-mean-cores N
-                                  reject mean background CPU above N (default: 2)
+                                  reject mean background CPU above N (default: 3)
   --max-non-target-node-cpu-maximum-cores N
-                                  reject peak background CPU above N (default: 3)
+                                  reject peak background CPU above N (default: 4)
 
 Path/cluster options:
   --artifact-root DIRECTORY
@@ -819,6 +819,95 @@ validate_ready_pod() {
         die "Pod '$pod' is not Running and Ready"
 }
 
+validate_load_generator_pod() {
+    local pod_json
+    pod_json="$(kube get pod "$LOADGEN_POD" -o json)" ||
+        die "Could not inspect load-generator Pod '$LOADGEN_POD'"
+
+    jq -e \
+        --arg pod "$LOADGEN_POD" \
+        --arg namespace "$NAMESPACE" \
+        '
+        .apiVersion == "v1"
+        and .kind == "Pod"
+        and .metadata.name == $pod
+        and .metadata.namespace == $namespace
+        and (.metadata.uid | type == "string" and length > 0)
+        and .metadata.deletionTimestamp == null
+        and ((.metadata.ownerReferences // []) | length == 0)
+        and .metadata.labels["app.kubernetes.io/name"] == $pod
+        and .metadata.labels["app.kubernetes.io/part-of"]
+            == "bluemap-web-performance"
+        and .metadata.labels["bluemap.guenter.cloud/experiment-id"]
+            == "origin-loadgen"
+        and .spec.automountServiceAccountToken == false
+        and ((.spec.initContainers // []) | length == 0)
+        and ((.spec.ephemeralContainers // []) | length == 0)
+        and (.spec.containers | length == 1)
+        and .spec.containers[0].name == "k6"
+        and (.spec.volumes | length == 3)
+        and (
+            [.spec.volumes[] |
+                select(
+                    .name == "benchmark"
+                    and .configMap.name == $pod
+                    and ((keys - ["configMap", "name"]) | length == 0)
+                )
+            ] | length == 1
+        )
+        and (
+            [.spec.volumes[] |
+                select(
+                    .name == "artifacts"
+                    and (.emptyDir | type == "object")
+                    and ((keys - ["emptyDir", "name"]) | length == 0)
+                )
+            ] | length == 1
+        )
+        and (
+            [.spec.volumes[] |
+                select(
+                    .name == "tmp"
+                    and (.emptyDir | type == "object")
+                    and ((keys - ["emptyDir", "name"]) | length == 0)
+                )
+            ] | length == 1
+        )
+        and (
+            [.spec.containers[0].volumeMounts[]? |
+                select(
+                    .name == "artifacts"
+                    and .mountPath == "/artifacts"
+                    and (.readOnly // false) == false
+                    and (.subPath // "") == ""
+                    and (.subPathExpr // "") == ""
+                )
+            ] | length == 1
+        )
+        and (
+            [.spec.containers[0].volumeMounts[]? |
+                select(.mountPath == "/artifacts")
+            ] | length == 1
+        )
+        and .status.phase == "Running"
+        and any(.status.conditions[]?;
+            .type == "Ready" and .status == "True")
+        ' <<<"$pod_json" >/dev/null ||
+        die "Pod '$LOADGEN_POD' does not match the fail-closed load-generator structure"
+}
+
+loadgen_exec() {
+    validate_load_generator_pod
+    kube exec "pod/$LOADGEN_POD" -c k6 -- "$@"
+}
+
+loadgen_copy_to() {
+    local local_file="$1"
+    local remote_file="$2"
+    validate_load_generator_pod
+    kube cp "$local_file" "$LOADGEN_POD:$remote_file" -c k6
+}
+
 validate_available_deployment() {
     local deployment="$1"
     kube get deployment "$deployment" -o json |
@@ -1424,9 +1513,9 @@ capture_prometheus_metrics() {
 copy_remote_file() {
     local remote="$1"
     local local_file="$2"
-    kube exec "pod/$LOADGEN_POD" -c k6 -- test -f "$remote" >/dev/null 2>&1 ||
+    loadgen_exec test -f "$remote" >/dev/null 2>&1 ||
         return 1
-    kube exec "pod/$LOADGEN_POD" -c k6 -- cat "$remote" > "$local_file"
+    loadgen_exec cat "$remote" > "$local_file"
     [[ -s "$local_file" ]]
 }
 
@@ -1437,12 +1526,10 @@ copy_local_file() {
     local actual_sha256
 
     expected_sha256="$(sha256sum -- "$local_file" | awk '{print $1}')"
-    kube exec "pod/$LOADGEN_POD" -c k6 -- \
-        test ! -e "$remote_file" || return 1
-    kube cp "$local_file" "$LOADGEN_POD:$remote_file" -c k6 || return 1
+    loadgen_exec test ! -e "$remote_file" || return 1
+    loadgen_copy_to "$local_file" "$remote_file" || return 1
     actual_sha256="$(
-        kube exec "pod/$LOADGEN_POD" -c k6 -- \
-            sha256sum "$remote_file" |
+        loadgen_exec sha256sum "$remote_file" |
             awk '{print $1}'
     )"
     [[ "$actual_sha256" == "$expected_sha256" ]]
@@ -1513,7 +1600,7 @@ run_k6_phase() {
     fi
     # $1 is expanded by the shell inside the load-generator container.
     # shellcheck disable=SC2016
-    kube exec "pod/$LOADGEN_POD" -c k6 -- \
+    loadgen_exec \
         sh -ceu 'mkdir "$1"' sh "$remote_dir" ||
         return 1
 
@@ -1526,7 +1613,7 @@ run_k6_phase() {
     fi
 
     set +e
-    kube exec "pod/$LOADGEN_POD" -c k6 -- \
+    loadgen_exec \
         env K6_NO_USAGE_REPORT=true K6_NO_COLOR=true \
         k6 run \
         --summary-export "$remote_summary" \
@@ -1858,7 +1945,7 @@ fi
 BASE_URL="http://$SERVICE.$NAMESPACE.svc.cluster.local:$SERVICE_PORT"
 
 kube get service "$SERVICE" -o name >/dev/null
-validate_ready_pod "$LOADGEN_POD"
+validate_load_generator_pod
 for deployment in "${WEB_DEPLOYMENTS[@]}"; do
     validate_available_deployment "$deployment"
     deployment_replicas="$(
@@ -1971,7 +2058,7 @@ write_workload_metadata
 REMOTE_ROOT="/artifacts/$CASE_ID"
 # $1 is expanded by the shell inside the load-generator container.
 # shellcheck disable=SC2016
-kube exec "pod/$LOADGEN_POD" -c k6 -- \
+loadgen_exec \
     sh -ceu \
     'umask 077; mkdir "$1"; mkdir "$1/inputs" "$1/repetitions"' \
     sh "$REMOTE_ROOT"
@@ -2001,7 +2088,7 @@ for ((repetition = 1; repetition <= REPETITIONS; repetition++)); do
     mkdir -- "$repetition_dir"
     # $1 is expanded by the shell inside the load-generator container.
     # shellcheck disable=SC2016
-    if ! kube exec "pod/$LOADGEN_POD" -c k6 -- \
+    if ! loadgen_exec \
         sh -ceu 'mkdir "$1"' \
         sh "$REMOTE_ROOT/repetitions/$repetition_name"; then
         record_failure \

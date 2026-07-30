@@ -34,10 +34,10 @@ spec:
         bluemap.guenter.cloud/experiment-id: immutable-snapshot
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: false
       nodeSelector:
         kubernetes.io/hostname: contabo1
       securityContext:
-        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -58,8 +58,9 @@ spec:
               drop:
                 - ALL
             readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 1000
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
           resources:
             requests:
               cpu: 250m

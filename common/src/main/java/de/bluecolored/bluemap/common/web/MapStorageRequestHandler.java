@@ -295,7 +295,7 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
         HttpResponse response = new HttpResponse(HttpStatusCode.OK);
         addStoredHeaders(
                 response, compression, contentType, cacheControl,
-                eTag, lastModified, -1
+                eTag, lastModified, data.getContentLength()
         );
         if (head) {
             data.close();

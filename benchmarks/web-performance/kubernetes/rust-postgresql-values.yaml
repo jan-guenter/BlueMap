@@ -13,9 +13,10 @@ webserver:
       tag: ""
       pullPolicy: IfNotPresent
     config:
-      # Match the 12-request aggregate ceiling used by the r3 overlay while
-      # keeping each stored object bounded to 32 MiB.
-      maxInFlightRequests: 12
+      # Keep the aggregate HTTP admission ceiling at 24 for r1 and r3. This
+      # allows response streaming to overlap without increasing the separate
+      # 12-connection database budget.
+      maxInFlightRequests: 24
       maxObjectBytes: 33554432
     maps:
       - id: world

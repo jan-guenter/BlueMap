@@ -164,6 +164,11 @@ for database in mariadb postgresql; do
         "$temporary/rust-${database}.toml"
 done
 
+assert_contains "$temporary/rust-mariadb.yaml" \
+    "mountPath: /run/secrets/database-client"
+assert_contains "$temporary/rust-mariadb.yaml" \
+    'secretName: "bluemap-database-client"'
+
 python3 - "$temporary/rust-mariadb.toml" "$temporary/rust-postgresql.toml" <<'PY'
 import pathlib
 import sys
@@ -180,6 +185,15 @@ for path, expected_type, expected_port in (
     assert storage["username_env"] == "BLUEMAP_DATABASE_USERNAME"
     assert storage["password_env"] == "BLUEMAP_DATABASE_PASSWORD"
     assert storage["tls"]["ca"] == "/run/secrets/database-ca/ca.crt"
+    if expected_type == "mariadb":
+        assert (
+            storage["tls"]["client_cert"]
+            == "/run/secrets/database-client/tls.crt"
+        )
+        assert (
+            storage["tls"]["client_key"]
+            == "/run/secrets/database-client/tls.key"
+        )
 PY
 
 for values in "$script_directory"/invalid-rust-*-values.yaml; do

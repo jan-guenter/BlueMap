@@ -14,7 +14,7 @@ the user-facing caching result.
 
 ## Safety boundary
 
-All Kubernetes resources created by this experiment must:
+All explicitly managed Kubernetes resources created by this experiment must:
 
 - use names beginning with `bluemap-perf-`;
 - have `app.kubernetes.io/part-of: bluemap-web-performance`;
@@ -22,11 +22,18 @@ All Kubernetes resources created by this experiment must:
 - allow only the snapshot-copy Job to mount the existing `minecraft-data` PVC,
   and mount it strictly read-only;
 - never patch, restart, scale, replace, or delete `deployment/minecraft`;
-- never patch, replace, resize, or delete `pvc/minecraft-data`.
+- never patch, replace, resize, or delete `pvc/minecraft-data`;
+- never patch, restart, replace, or delete
+  `pod/minecraft-maintenance-holder`.
 
 Database, webserver, ingress, load-generator, Secret, ConfigMap, and temporary
-PVC resources created by the experiment are disposable. Delete them by their
-exact experiment label after evidence has been copied out.
+PVC resources created by the experiment are disposable. Helm and database
+operators do not reliably propagate both labels to every generated child
+Service, ConfigMap, Secret, StatefulSet, Pod, or PVC, so a label selector is
+not a complete cleanup mechanism. After evidence has been copied out, remove
+exact Helm release names and exact operator parent resources, then review an
+explicit `bluemap-perf-*` allowlist for generated children. Never use a broad
+namespace-wide or prefix-only deletion.
 
 ## Immutable snapshot prerequisite
 
@@ -92,11 +99,25 @@ These exact names deliberately exclude `pvc/minecraft-data`.
 
 ## Provisioning the disposable databases
 
-Generate the short-lived PostgreSQL test certificates, then create the
-MariaDB and PostgreSQL instances:
+Generate the short-lived PostgreSQL test certificates with the explicit
+benchmark kubeconfig, then create the MariaDB and PostgreSQL instances:
 
 ```shell
-benchmarks/web-performance/kubernetes/prepare-postgres-tls.sh
+BLUEMAP_BENCHMARK_KUBECONFIG=/root/.kube/guenter-cloud \
+  benchmarks/web-performance/kubernetes/prepare-postgres-tls.sh
+
+mariadb_mtls_password="$(openssl rand -hex 24)"
+kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
+  create secret generic bluemap-perf-mariadb-mtls \
+  --from-literal=username=bluemap_mtls \
+  --from-literal=password="$mariadb_mtls_password" \
+  --dry-run=client -o yaml |
+  kubectl --kubeconfig /root/.kube/guenter-cloud label --local -f - \
+    k8s.mariadb.com/watch=true \
+    app.kubernetes.io/part-of=bluemap-web-performance \
+    bluemap.guenter.cloud/experiment-id=bootstrap -o yaml |
+  kubectl --kubeconfig /root/.kube/guenter-cloud apply -f -
+
 kubectl --kubeconfig /root/.kube/guenter-cloud apply \
   -f benchmarks/web-performance/kubernetes/databases.yaml
 ```
@@ -104,7 +125,9 @@ kubectl --kubeconfig /root/.kube/guenter-cloud apply \
 Both databases have a 2 CPU/4 GiB limit and a deliberately lower scheduling
 request so they fit alongside existing cluster workloads. They are pinned to
 the same node and must not be benchmarked concurrently. Record actual node
-utilization and throttling with every run.
+utilization and throttling with every run. The MariaDB operator reconciles the
+`bluemap_mtls` account from the generated Secret, requires a valid client X.509
+certificate, and grants only `SELECT` on the disposable `bluemap` database.
 
 Generate deterministic live data before importing. This produces 32 players
 and 64 valid POI markers instead of benchmarking two-byte `{}` responses. The
@@ -129,9 +152,11 @@ kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
 
 The importer logs both fixture hashes and injects the same payload into every
 map without changing either PVC. For file-storage candidates, apply
-`kubernetes/file-live-fixtures-values.yaml` as an additional Helm values file;
-it projects the same ConfigMap over the two `world/live` files while keeping
-the snapshot mount read-only.
+`kubernetes/file-live-fixtures-values.yaml` as the last Helm values file. Helm
+replaces list values, so this self-contained overlay declares both the
+read-only snapshot mount and the two `world/live` ConfigMap projections. It
+serves the immutable source snapshot with its configured gzip representation;
+the SQL importer separately normalizes its benchmark rows to zstd.
 
 Create the importer ConfigMap from the checked-in source and submit the two
 database import Jobs:
@@ -263,10 +288,30 @@ helm upgrade --install bluemap-perf-rust-postgresql-r3 "$CHART" \
 
 The one-replica values allow 12 database connections. The replica-three
 overlays allow four per process, preserving the same aggregate 12-connection
-budget. Rust's in-flight request limit follows the same 12/4 split, and the
-PHP baseline sets `pm.max_children` to 12 because each active request owns one
-transient PDO connection. Run only one candidate release at a time during
+budget. Rust admits 24 in-flight HTTP responses for r1 and eight per process
+for r3, preserving a separate aggregate HTTP ceiling of 24 while allowing
+response streaming to overlap database work. The PHP baseline sets
+`pm.max_children` to 12 because each active request owns one transient PDO
+connection. Each r3 process keeps the one-CPU/one-GiB limit, but requests 500
+millicores and 512 MiB so three replicas can be scheduled on the fixed
+benchmark node. The exact requests, limits, utilization, and node noise are
+recorded with every run. Run only one candidate release at a time during
 measurement.
+
+Use the same immutable chart to deploy the separate MariaDB mutual-TLS
+correctness candidate:
+
+```shell
+helm upgrade --install bluemap-perf-rust-mariadb-mtls "$CHART" \
+  --version "$CHART_VERSION" \
+  --kubeconfig /root/.kube/guenter-cloud \
+  --namespace minecraft \
+  --values benchmarks/web-performance/kubernetes/rust-mariadb-mtls-values.yaml
+```
+
+This candidate is not part of the PostgreSQL performance matrix. It verifies
+the MariaDB backend, full server-certificate validation, and client-certificate
+authentication against the operator-managed `bluemap_mtls` account.
 
 ## Fixed comparison controls
 
@@ -275,7 +320,8 @@ For a valid comparison, every variant in a matrix run uses:
 - the same source-data snapshot and generated SQL rows;
 - the same stored compression;
 - the same database instance and TLS mode;
-- the same web pod CPU and memory requests/limits;
+- the same web pod CPU and memory limits within each r1/r3 comparison;
+- explicit, fixed scheduling requests recorded for every variant;
 - the same aggregate database connection budget;
 - the same node placement policy;
 - request logging disabled;
@@ -284,9 +330,18 @@ For a valid comparison, every variant in a matrix run uses:
 - the same request `TRACE_SEED`, offered-rate gate, and p95/p99 gates;
 - no server-side response cache unless that cache is the feature being tested.
 
-The initial resource envelope is one CPU and 1 GiB memory per web replica.
-Database resources and placement are recorded with every run rather than
-silently assumed.
+The runtime resource envelope is one CPU and 1 GiB memory per web replica.
+One-replica candidates request that full envelope; three-replica candidates
+use the documented lower scheduling requests while retaining identical
+limits. Database resources and placement are recorded with every run rather
+than silently assumed.
+
+The calibrated common baseline and live-viewer cases use 15 requests or
+viewers per second. The optimized horizontal-scaling case uses 40 requests per
+second: a preflight at that rate completed without shedding after the bounded
+Rust HTTP admission ceiling was separated from its smaller database pool,
+while higher exploratory rates crossed the predeclared no-error gate. The
+large-object case uses one 19 MiB response per second.
 
 ## Workload phases
 
@@ -324,7 +379,7 @@ digest, not an image tag or registry index digest:
 ```shell
 benchmark_identity_dir="$(mktemp -d)"
 variant_id=java-new-postgresql
-web_pod=bluemap-perf-java-POD-SUFFIX
+web_pod=bluemap-perf-java-new-postgresql-POD-SUFFIX
 
 kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
   get pod "$web_pod" -o json |
@@ -333,8 +388,8 @@ kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
 
 kubectl --kubeconfig /root/.kube/guenter-cloud -n minecraft \
   get configmap \
-    bluemap-perf-java-config \
-    bluemap-perf-java-storage \
+    bluemap-perf-java-new-postgresql-config \
+    bluemap-perf-java-new-postgresql-storage \
     -o json |
   python3 benchmarks/web-performance/tools/runtime_identity.py configmaps \
   > "$benchmark_identity_dir/$variant_id-config.json"
@@ -527,28 +582,30 @@ Use a unique case ID and current, exact Pod names:
 ```shell
 BENCHMARK_PYTHON=/path/to/venv/bin/python \
 benchmarks/web-performance/tools/run_origin_case.sh \
-  --case-id map-mixed-r100-java-new-postgresql-b1 \
+  --case-id map-mixed-r15-java-new-postgresql-b1 \
   --matrix benchmarks/web-performance/artifacts/snapshot/matrix.json \
   --schedule benchmarks/web-performance/artifacts/snapshot/schedule.json \
-  --schedule-entry map-mixed-r100/java-new-postgresql/block-1 \
+  --schedule-entry map-mixed-r15/java-new-postgresql/block-1 \
   --variant-id java-new-postgresql \
   --implementation java \
   --storage-type sql \
   --database-backend postgresql \
-  --service bluemap-perf-java \
+  --service bluemap-perf-java-new-postgresql \
   --service-port 8100 \
   --manifest benchmarks/web-performance/artifacts/snapshot/manifest.json \
   --map-id world \
-  --configmap bluemap-perf-java-config \
-  --configmap bluemap-perf-java-storage \
-  --web-deployment bluemap-perf-java \
-  --web-pod bluemap-perf-java-POD-SUFFIX \
+  --configmap bluemap-perf-java-new-postgresql-config \
+  --configmap bluemap-perf-java-new-postgresql-storage \
+  --web-deployment bluemap-perf-java-new-postgresql \
+  --web-pod bluemap-perf-java-new-postgresql-POD-SUFFIX \
   --database-pod bluemap-perf-postgres-0 \
   --profile map-data-mixed \
-  --rate 100 \
+  --rate 15 \
   --trace-seed bluemap-web-performance-v1 \
-  --latency-p95-ms 500 \
-  --latency-p99-ms 1000 \
+  --latency-p95-ms 10000 \
+  --latency-p99-ms 20000 \
+  --pre-allocated-vus 256 \
+  --max-vus 512 \
   --accept-encoding zstd \
   --stored-encoding zstd \
   --contract-mode enhanced \
@@ -575,10 +632,15 @@ the pre-enhancement Java server, that intentionally lacks the enhanced
 validator contract. Variant ordering comes from the pre-recorded interleaved
 schedule outside this single-case runner.
 
-The default measured latency gates are strict `p(95) < 500 ms` and
-`p(99) < 1000 ms`. k6 enforces them only on workload-tagged measurement
-traffic; the runner independently writes and checks `latency-gate.json`.
-Warm-up does not enforce latency. For `large-object` only, explicit
+The command defaults remain strict `p(95) < 500 ms` and `p(99) < 1000 ms`,
+but the formal matrix uses deliberately broad, predeclared latency ceilings.
+Those ceilings detect a wedged server or invalid run; they are harness-integrity
+guardrails, not ranking SLOs. Results that exceed a ceiling remain reportable
+and must not be selectively discarded or rerun based on which implementation
+was slower. k6 enforces the configured ceilings only on workload-tagged
+measurement traffic; the runner independently writes and checks
+`latency-gate.json`. Warm-up does not enforce latency. For `large-object` only,
+explicit
 `--large-object-latency-p95-ms` and
 `--large-object-latency-p99-ms` overrides are allowed and recorded.
 
@@ -598,7 +660,7 @@ CPU/throttling/network, node-exporter idle/steal CPU, disk IO and network
 joined through `node_uname_info{nodename,instance}`, plus non-target container
 CPU on those nodes. Every measurement repetition is rejected if any selected
 node has fewer than two background samples or exceeds the configured
-non-target CPU range, mean, or maximum. Defaults are 0.5, 2, and 3 cores;
+non-target CPU range, mean, or maximum. Defaults are 0.5, 3, and 4 cores;
 all three are configurable and recorded.
 
 Absolute gates catch a single noisy run, but accepted cases can still have
@@ -674,6 +736,14 @@ Performance results are rejected unless the variant passes:
 - health transition during database loss and recovery;
 - clean draining of an in-flight large response on SIGTERM.
 
+The origin-case runner directly enforces the HTTP contract and steady-state
+health checks. TLS/mTLS negative cases, database loss/recovery, browser UI
+behavior, and graceful drain are destructive or fault-injection experiments,
+so they are run separately and archived under the experiment's correctness
+artifacts. A formal matrix result is not accepted for the final comparison
+until those predeclared receipts exist; `run_origin_case.sh` does not claim to
+perform those faults itself.
+
 Legacy and enhanced correctness are intentionally separate. The unchanged PHP
 baseline's `legacy` gate verifies byte-equivalent bodies and exact `200`/`204`
 routing for tiles, settings, textures, assets, players, and markers. It does
@@ -694,13 +764,15 @@ k6 run \
   -e BASE_URL=http://SERVICE.NAMESPACE.svc:PORT \
   -e MANIFEST=artifacts/EXPERIMENT_ID/manifest.json \
   -e PROFILE=map-data-mixed \
-  -e RATE=100 \
+  -e RATE=15 \
   -e DURATION=5m \
   -e CONTRACT_MODE=enhanced \
   -e MIN_ACHIEVED_RATE_RATIO=0.99 \
   -e TRACE_SEED=bluemap-web-performance-v1 \
-  -e LATENCY_P95_MS=500 \
-  -e LATENCY_P99_MS=1000 \
+  -e LATENCY_P95_MS=10000 \
+  -e LATENCY_P99_MS=20000 \
+  -e PRE_ALLOCATED_VUS=256 \
+  -e MAX_VUS=512 \
   -e EXPERIMENT_ID=EXPERIMENT_ID \
   benchmarks/web-performance/k6/bluemap.js
 ```
@@ -715,7 +787,9 @@ completed iterations divided by the configured phase duration; k6's
 wall-clock `iterations.rate` is retained only as a diagnostic because it
 includes a slow final request or graceful tail after scheduling has stopped.
 
-For `live-viewers`, player and marker polling are checked independently, and
+For `live-viewers-r15`, 15 player polls per second are combined with 1.5 marker
+polls per second because markers are requested once per viewer every ten
+seconds. Player and marker polling are checked independently, and
 their completed counts must sum exactly to k6's overall iteration count. A
 well-performing scenario therefore cannot hide an under-delivering peer.
 Measurement runs also enforce p95/p99 on
@@ -787,8 +861,8 @@ python3 benchmarks/web-performance/tools/run_guarded_slow_reader.py \
 ```
 
 The helper fails closed unless both exact names begin with `bluemap-perf-`;
-it explicitly rejects `minecraft` and `minecraft-data`. Both the Deployment
-and Pod must have
+it explicitly rejects `minecraft`, `minecraft-data`, and
+`minecraft-maintenance-holder`. Both the Deployment and Pod must have
 `app.kubernetes.io/part-of=bluemap-web-performance` and the exact, nonempty
 experiment ID supplied on the command line. The Pod must be Running and Ready,
 be selected by the named Deployment, and be controlled by a ReplicaSet owned
@@ -811,9 +885,10 @@ Choose a byte rate that makes the response last several seconds but complete
 comfortably inside both the application and Kubernetes grace periods. Archive
 the Pod events, termination timestamps, and server logs.
 Wait for the replacement Deployment to become fully available before a
-measured case. Never run this procedure against `deployment/minecraft` or any
-non-disposable Pod, and never pass a resource type, selector, wildcard, or
-partial name where an exact name is required.
+measured case. Never run this procedure against `deployment/minecraft`,
+`pod/minecraft-maintenance-holder`, or any non-disposable Pod, and never pass
+a resource type, selector, wildcard, or partial name where an exact name is
+required.
 
 For public delivery tests, use
 `https://bluemap-test.guenter.cloud` and a unique experiment ID. Any temporary

@@ -24,7 +24,11 @@ PART_OF_LABEL = "app.kubernetes.io/part-of"
 PART_OF_VALUE = "bluemap-web-performance"
 EXPERIMENT_LABEL = "bluemap.guenter.cloud/experiment-id"
 BENCHMARK_PREFIX = "bluemap-perf-"
-PROTECTED_NAMES = {"minecraft", "minecraft-data"}
+PROTECTED_NAMES = {
+    "minecraft",
+    "minecraft-data",
+    "minecraft-maintenance-holder",
+}
 DNS_SUBDOMAIN = re.compile(r"^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$")
 LABEL_VALUE = re.compile(r"^[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?$")
 

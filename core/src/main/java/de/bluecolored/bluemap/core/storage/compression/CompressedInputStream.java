@@ -38,6 +38,7 @@ public class CompressedInputStream extends DelegateInputStream {
 
     private final Compression compression;
     private final @Nullable CacheMetadata cacheMetadata;
+    private final long contentLength;
 
     /**
      * Creates a new CompressedInputStream with {@link Compression#NONE} from an (uncompressed) {@link InputStream}.
@@ -57,9 +58,22 @@ public class CompressedInputStream extends DelegateInputStream {
     }
 
     public CompressedInputStream(InputStream in, Compression compression, @Nullable CacheMetadata cacheMetadata) {
+        this(in, compression, cacheMetadata, -1);
+    }
+
+    public CompressedInputStream(
+            InputStream in,
+            Compression compression,
+            @Nullable CacheMetadata cacheMetadata,
+            long contentLength
+    ) {
         super(in);
+        if (contentLength < -1) {
+            throw new IllegalArgumentException("contentLength must be -1 or non-negative");
+        }
         this.compression = compression;
         this.cacheMetadata = cacheMetadata;
+        this.contentLength = contentLength;
     }
 
     /**
@@ -78,6 +92,14 @@ public class CompressedInputStream extends DelegateInputStream {
 
     public @Nullable CacheMetadata getCacheMetadata() {
         return cacheMetadata;
+    }
+
+    /**
+     * Returns the exact length of the stored representation, or {@code -1} if
+     * the storage implementation does not provide it.
+     */
+    public long getContentLength() {
+        return contentLength;
     }
 
 }

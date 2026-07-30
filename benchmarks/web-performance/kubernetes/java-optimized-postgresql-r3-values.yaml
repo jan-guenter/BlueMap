@@ -12,3 +12,10 @@ deploymentLabels:
 storage:
   sql:
     maxConnections: 4
+
+# Three candidates must fit concurrently on the isolated web node. CPU limits
+# remain one core per replica; lower requests affect scheduling only.
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi

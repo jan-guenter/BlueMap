@@ -61,6 +61,10 @@ class MapStorageRequestHandlerTest {
             assertEquals(0, item.metadataReads);
             assertEquals("zstd", header(response, "Content-Encoding"));
             assertEquals(
+                    Integer.toString(item.data.length),
+                    header(response, "Content-Length")
+            );
+            assertEquals(
                     "public,no-cache,no-transform",
                     header(response, "Cache-Control")
             );
@@ -360,7 +364,8 @@ class MapStorageRequestHandlerTest {
             return new CompressedInputStream(
                     new ByteArrayInputStream(data),
                     compression,
-                    cacheMetadata
+                    cacheMetadata,
+                    data.length
             );
         }
 

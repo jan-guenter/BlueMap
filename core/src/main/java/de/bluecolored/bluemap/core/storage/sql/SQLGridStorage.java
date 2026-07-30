@@ -61,10 +61,12 @@ public class SQLGridStorage implements GridStorage {
         CommandSet.StoredData stored =
                 sql.readGridItemData(map, storage, x, z, compression);
         if (stored == null) return null;
+        byte[] data = stored.data();
         return new CompressedInputStream(
-                new ByteArrayInputStream(stored.data()),
+                new ByteArrayInputStream(data),
                 compression,
-                new CacheMetadata(stored.contentHash(), stored.updatedAt())
+                new CacheMetadata(stored.contentHash(), stored.updatedAt()),
+                data.length
         );
     }
 

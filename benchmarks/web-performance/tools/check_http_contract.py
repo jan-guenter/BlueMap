@@ -222,12 +222,25 @@ def check_enhanced_contract(
     require(head.body == b"", f"{tile}: HEAD returned a body")
     require(head.headers.get("ETag") == etag, f"{tile}: HEAD ETag differs from GET")
     require(
+        head.headers.get("Last-Modified") == last_modified,
+        f"{tile}: HEAD Last-Modified differs from GET",
+    )
+    require(
         head.headers.get("Content-Length") == content_length,
         f"{tile}: HEAD Content-Length differs from GET",
     )
     require(
-        "no-transform" in header_tokens(head, "Cache-Control"),
-        f"{tile}: HEAD permits intermediary transformation",
+        head.headers.get("Content-Encoding", "identity").lower()
+        == actual_encoding,
+        f"{tile}: HEAD Content-Encoding differs from GET",
+    )
+    require(
+        header_tokens(head, "Vary") == header_tokens(response, "Vary"),
+        f"{tile}: HEAD Vary differs from GET",
+    )
+    require(
+        header_tokens(head, "Cache-Control") == cache_control,
+        f"{tile}: HEAD Cache-Control differs from GET",
     )
 
     not_modified = fetch(
@@ -249,21 +262,33 @@ def check_enhanced_contract(
         f"{tile}: 304 omitted or changed ETag",
     )
     require(
-        "accept-encoding" in header_tokens(not_modified, "Vary"),
-        f"{tile}: 304 omitted Vary: Accept-Encoding",
+        not_modified.headers.get("Last-Modified") == last_modified,
+        f"{tile}: 304 omitted or changed Last-Modified",
     )
     require(
-        "no-transform" in header_tokens(not_modified, "Cache-Control"),
-        f"{tile}: 304 permits intermediary transformation",
+        not_modified.headers.get("Content-Encoding", "identity").lower()
+        == actual_encoding,
+        f"{tile}: 304 omitted or changed Content-Encoding",
+    )
+    require(
+        header_tokens(not_modified, "Vary") == header_tokens(response, "Vary"),
+        f"{tile}: 304 Vary differs from GET",
+    )
+    require(
+        header_tokens(not_modified, "Cache-Control") == cache_control,
+        f"{tile}: 304 Cache-Control differs from GET",
     )
 
+    alternate_strength_etag = (
+        str(etag)[2:] if str(etag).startswith("W/") else f"W/{etag}"
+    )
     weak_not_modified = fetch(
         base_url,
         tile,
         {
             **base_headers,
             "Accept-Encoding": stored_encoding,
-            "If-None-Match": f"W/{etag}",
+            "If-None-Match": alternate_strength_etag,
         },
     )
     require(
@@ -300,47 +325,60 @@ def check_enhanced_contract(
         f"{tile}: If-None-Match did not take precedence over If-Modified-Since",
     )
 
-    unsupported = fetch(
-        base_url,
-        tile,
-        {
-            **base_headers,
-            "Accept-Encoding": (
-                "gzip;q=0, deflate;q=0, zstd;q=0, identity;q=1, *;q=0"
-                if stored_encoding != "identity"
-                else "identity;q=0, *;q=0"
-            ),
-        },
-    )
-    require(
-        unsupported.status == 406,
-        f"{tile}: unsupported encoding expected 406, got {unsupported.status}",
-    )
-    require(
-        unsupported.headers.get("X-BlueMap-Required-Content-Encoding")
-        == stored_encoding,
-        f"{tile}: 406 omitted the required encoding",
-    )
-    require(
-        "no-store" in header_tokens(unsupported, "Cache-Control"),
-        f"{tile}: 406 is cacheable",
-    )
-    require(
-        "no-transform" in header_tokens(unsupported, "Cache-Control"),
-        f"{tile}: 406 permits intermediary transformation",
-    )
-    require(
-        "accept-encoding" in header_tokens(unsupported, "Vary"),
-        f"{tile}: 406 omitted Vary: Accept-Encoding",
-    )
-    try:
-        problem = json.loads(unsupported.body)
-    except json.JSONDecodeError as error:
-        raise ContractFailure(f"{tile}: 406 body is not JSON") from error
-    require(
-        problem.get("requiredEncoding") == stored_encoding,
-        f"{tile}: 406 JSON omitted the required encoding",
-    )
+    for offered_encoding in ("gzip", "deflate", "zstd", "identity", "lz4"):
+        if offered_encoding == stored_encoding:
+            continue
+        accept_encoding = (
+            "identity;q=1, *;q=0"
+            if offered_encoding == "identity"
+            else f"{offered_encoding};q=1, identity;q=0, *;q=0"
+        )
+        unsupported = fetch(
+            base_url,
+            tile,
+            {
+                **base_headers,
+                "Accept-Encoding": accept_encoding,
+            },
+        )
+        require(
+            unsupported.status == 406,
+            f"{tile}: offering only {offered_encoding} expected 406, "
+            f"got {unsupported.status}",
+        )
+        require(
+            unsupported.headers.get("X-BlueMap-Required-Content-Encoding")
+            == stored_encoding,
+            f"{tile}: 406 omitted the required encoding",
+        )
+        require(
+            unsupported.headers.get_content_type() == "application/problem+json",
+            f"{tile}: 406 Content-Type is not application/problem+json",
+        )
+        require(
+            "no-store" in header_tokens(unsupported, "Cache-Control"),
+            f"{tile}: 406 is cacheable",
+        )
+        require(
+            "no-transform" in header_tokens(unsupported, "Cache-Control"),
+            f"{tile}: 406 permits intermediary transformation",
+        )
+        require(
+            "accept-encoding" in header_tokens(unsupported, "Vary"),
+            f"{tile}: 406 omitted Vary: Accept-Encoding",
+        )
+        try:
+            problem = json.loads(unsupported.body)
+        except json.JSONDecodeError as error:
+            raise ContractFailure(f"{tile}: 406 body is not JSON") from error
+        require(
+            problem.get("code") == "bluemap_required_content_encoding",
+            f"{tile}: 406 JSON has the wrong problem code",
+        )
+        require(
+            problem.get("requiredEncoding") == stored_encoding,
+            f"{tile}: 406 JSON omitted the required encoding",
+        )
 
     if manifest["players"]:
         player = str(manifest["players"][0])

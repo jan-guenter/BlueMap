@@ -1,0 +1,29 @@
+# Java/file-storage correctness candidate. Apply
+# file-live-fixtures-values.yaml last to attach the immutable snapshot.
+fullnameOverride: bluemap-perf-java-file
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/jan-guenter/bluemap-web
+  tag: ""
+  pullPolicy: IfNotPresent
+
+podLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: java-file
+
+deploymentLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: java-file
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector:
+  kubernetes.io/hostname: contabo2

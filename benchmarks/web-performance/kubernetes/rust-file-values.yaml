@@ -1,0 +1,38 @@
+# Rust/file-storage correctness candidate. Apply
+# file-live-fixtures-values.yaml last to attach the immutable snapshot.
+fullnameOverride: bluemap-perf-rust-file
+
+replicaCount: 1
+
+webserver:
+  implementation: rust
+  rust:
+    image:
+      repository: ghcr.io/jan-guenter/bluemap-web-rust
+      tag: ""
+      pullPolicy: IfNotPresent
+    config:
+      maxInFlightRequests: 12
+      maxObjectBytes: 33554432
+    maps:
+      - id: world
+        sorting: 0
+
+podLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: rust-file
+
+deploymentLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: rust-file
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector:
+  kubernetes.io/hostname: contabo2

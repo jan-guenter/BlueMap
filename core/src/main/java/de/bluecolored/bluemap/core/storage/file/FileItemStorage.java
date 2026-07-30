@@ -86,7 +86,8 @@ public class FileItemStorage implements ItemStorage {
             return new CompressedInputStream(
                     Channels.newInputStream(openedFile.channel()),
                     compression,
-                    cacheMetadata(attributes)
+                    cacheMetadata(attributes),
+                    attributes.size()
             );
         } catch (RuntimeException e) {
             openedFile.close();

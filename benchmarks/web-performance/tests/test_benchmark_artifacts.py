@@ -16,8 +16,11 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
+import yaml
+
 BENCHMARK_ROOT = Path(__file__).parents[1]
 TOOLS_DIR = BENCHMARK_ROOT / "tools"
+KUBERNETES_DIR = BENCHMARK_ROOT / "kubernetes"
 sys.path.insert(0, str(TOOLS_DIR))
 
 import capture_prometheus
@@ -29,6 +32,20 @@ import runtime_identity
 import sanitize_kubernetes_resource
 import sanitize_configmap
 import slow_reader
+
+
+def persistent_volume_claim_references(value: object) -> list[dict[str, object]]:
+    references: list[dict[str, object]] = []
+    if isinstance(value, dict):
+        claim = value.get("persistentVolumeClaim")
+        if isinstance(claim, dict):
+            references.append(claim)
+        for child in value.values():
+            references.extend(persistent_volume_claim_references(child))
+    elif isinstance(value, list):
+        for child in value:
+            references.extend(persistent_volume_claim_references(child))
+    return references
 
 
 class KubernetesSnapshotTests(unittest.TestCase):
@@ -557,6 +574,119 @@ class PrometheusCaptureTests(unittest.TestCase):
         self.assertFalse(assessment["passed"])
 
 
+class ProtectedPvcManifestTests(unittest.TestCase):
+    def test_snapshot_copy_is_the_only_protected_pvc_consumer(self) -> None:
+        snapshot_path = KUBERNETES_DIR / "snapshot-copy.yaml"
+        snapshot_documents = list(
+            yaml.safe_load_all(snapshot_path.read_text(encoding="utf-8"))
+        )
+        protected_claims = [
+            claim
+            for document in snapshot_documents
+            for claim in persistent_volume_claim_references(document)
+            if claim.get("claimName") == "minecraft-data"
+        ]
+        self.assertEqual(
+            protected_claims,
+            [{"claimName": "minecraft-data", "readOnly": True}],
+        )
+
+        for path in sorted(KUBERNETES_DIR.glob("*.yaml")):
+            if path == snapshot_path:
+                continue
+            with self.subTest(path=path.name):
+                documents = yaml.safe_load_all(path.read_text(encoding="utf-8"))
+                claims = [
+                    claim
+                    for document in documents
+                    for claim in persistent_volume_claim_references(document)
+                    if claim.get("claimName") == "minecraft-data"
+                ]
+                self.assertEqual(claims, [])
+
+    def test_snapshot_source_is_read_only_without_pod_wide_ownership_changes(
+        self,
+    ) -> None:
+        documents = list(
+            yaml.safe_load_all(
+                (KUBERNETES_DIR / "snapshot-copy.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+        )
+        job = next(
+            document
+            for document in documents
+            if document.get("kind") == "Job"
+            and document["metadata"]["name"] == "bluemap-perf-snapshot-copy"
+        )
+        pod_spec = job["spec"]["template"]["spec"]
+
+        self.assertIs(pod_spec["automountServiceAccountToken"], False)
+        self.assertNotIn("fsGroup", pod_spec.get("securityContext", {}))
+
+        volumes = {volume["name"]: volume for volume in pod_spec["volumes"]}
+        self.assertEqual(
+            volumes["source"]["persistentVolumeClaim"],
+            {"claimName": "minecraft-data", "readOnly": True},
+        )
+        self.assertEqual(
+            volumes["destination"]["persistentVolumeClaim"],
+            {"claimName": "bluemap-perf-snapshot"},
+        )
+
+        self.assertEqual(len(pod_spec.get("initContainers", [])), 0)
+        self.assertEqual(len(pod_spec["containers"]), 1)
+        container = pod_spec["containers"][0]
+        self.assertEqual(container["name"], "copy")
+        self.assertEqual(
+            container["securityContext"],
+            {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+                "readOnlyRootFilesystem": True,
+                "runAsNonRoot": False,
+                "runAsUser": 0,
+                "runAsGroup": 0,
+            },
+        )
+
+        mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
+        self.assertEqual(
+            mounts["source"],
+            {"name": "source", "mountPath": "/source", "readOnly": True},
+        )
+        self.assertEqual(
+            mounts["destination"],
+            {"name": "destination", "mountPath": "/snapshot"},
+        )
+
+    def test_tls_secret_preparation_is_bound_to_benchmark_names_and_kubeconfig(
+        self,
+    ) -> None:
+        script = KUBERNETES_DIR / "prepare-postgres-tls.sh"
+        source = script.read_text(encoding="utf-8")
+
+        self.assertIn("BLUEMAP_BENCHMARK_KUBECONFIG", source)
+        self.assertIn(
+            'kubectl_command=(kubectl --kubeconfig "$kubeconfig_path")',
+            source,
+        )
+        result = subprocess.run(
+            ["bash", str(script)],
+            env={
+                "PATH": "/usr/bin:/bin",
+                "SECRET_NAME": "minecraft-data",
+                "BLUEMAP_BENCHMARK_KUBECONFIG": "/does/not/exist",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("beginning with bluemap-perf-", result.stderr)
+
+
 class OriginRunnerStaticTests(unittest.TestCase):
     @staticmethod
     def resolved_matrix() -> dict:
@@ -601,6 +731,25 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("verify_formal_runtime_identity", runner)
         self.assertIn("runtime_identity.py", runner)
         self.assertNotIn("printf 'unknown'", runner)
+
+    def test_documented_optimized_java_commands_target_the_optimized_release(
+        self,
+    ) -> None:
+        readme = (BENCHMARK_ROOT / "README.md").read_text(encoding="utf-8")
+        identity = readme.split(
+            "First deploy each frozen candidate", maxsplit=1
+        )[1].split("Repeat this for every variant", maxsplit=1)[0]
+        example = readme.split(
+            "Use a unique case ID and current, exact Pod names:", maxsplit=1
+        )[1].split(
+            "Repeat `--web-deployment`", maxsplit=1
+        )[0]
+
+        for section in (identity, example):
+            self.assertIn("bluemap-perf-java-new-postgresql", section)
+            self.assertNotIn("bluemap-perf-java-POD-SUFFIX", section)
+            self.assertNotIn("bluemap-perf-java-config", section)
+            self.assertNotIn("bluemap-perf-java-storage", section)
 
     def test_formal_schedule_is_seeded_balanced_and_tamper_evident(self) -> None:
         matrix_path = BENCHMARK_ROOT / "matrix.example.json"
@@ -740,6 +889,87 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertNotIn("data_received{traffic:workload}", script)
         self.assertNotIn("data_sent{traffic:workload}", script)
 
+    def test_http_contract_rejects_each_alternate_representation(self) -> None:
+        contract = (
+            TOOLS_DIR / "check_http_contract.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'for offered_encoding in ("gzip", "deflate", "zstd", '
+            '"identity", "lz4")',
+            contract,
+        )
+        self.assertIn(
+            'problem.get("code") == "bluemap_required_content_encoding"',
+            contract,
+        )
+        self.assertIn(
+            'get_content_type() == "application/problem+json"',
+            contract,
+        )
+        self.assertIn(
+            'head.headers.get("Last-Modified") == last_modified',
+            contract,
+        )
+        self.assertIn(
+            'not_modified.headers.get("Last-Modified") == last_modified',
+            contract,
+        )
+        self.assertIn(
+            'str(etag)[2:] if str(etag).startswith("W/") else f"W/{etag}"',
+            contract,
+        )
+
+    def test_calibrated_matrix_and_load_defaults_match(self) -> None:
+        matrix = generate_schedule.load_json(
+            BENCHMARK_ROOT / "matrix.example.json"
+        )
+        self.assertEqual(matrix["controls"]["preAllocatedVUs"], 256)
+        self.assertEqual(matrix["controls"]["maxVUs"], 512)
+
+        cases = {case["id"]: case for case in matrix["cases"]}
+        self.assertEqual(
+            set(cases),
+            {
+                "map-mixed-r15",
+                "map-mixed-horizontal-r40",
+                "live-viewers-r15",
+                "large-object-r1",
+            },
+        )
+        self.assertEqual(
+            (
+                cases["map-mixed-r15"]["rate"],
+                cases["map-mixed-r15"]["latencyP95Milliseconds"],
+                cases["map-mixed-r15"]["latencyP99Milliseconds"],
+            ),
+            (15, 10000, 20000),
+        )
+        self.assertEqual(
+            (
+                cases["map-mixed-horizontal-r40"]["rate"],
+                cases["map-mixed-horizontal-r40"][
+                    "latencyP95Milliseconds"
+                ],
+                cases["map-mixed-horizontal-r40"][
+                    "latencyP99Milliseconds"
+                ],
+            ),
+            (40, 5000, 10000),
+        )
+        self.assertEqual(cases["live-viewers-r15"]["viewers"], 15)
+        self.assertEqual(cases["large-object-r1"]["rate"], 1)
+
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+        script = (BENCHMARK_ROOT / "k6" / "bluemap.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('PRE_ALLOCATED_VUS="256"', runner)
+        self.assertIn('__ENV.PRE_ALLOCATED_VUS || "256"', script)
+        self.assertIn('MAX_NON_TARGET_NODE_CPU_RANGE_CORES="0.5"', runner)
+        self.assertIn('MAX_NON_TARGET_NODE_CPU_MEAN_CORES="3.0"', runner)
+        self.assertIn('MAX_NON_TARGET_NODE_CPU_MAXIMUM_CORES="4.0"', runner)
+
     def test_file_cases_do_not_require_a_database_target(self) -> None:
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
 
@@ -754,10 +984,56 @@ class OriginRunnerStaticTests(unittest.TestCase):
         )
         self.assertIn('[[ -f "$log_file" ]]', runner)
         self.assertIn(
-            'kube cp "$local_file" "$LOADGEN_POD:$remote_file" -c k6',
+            'loadgen_copy_to "$local_file" "$remote_file"',
             runner,
         )
         self.assertIn('[[ "$actual_sha256" == "$expected_sha256" ]]', runner)
+
+    def test_runner_validates_load_generator_before_every_exec_or_copy(
+        self,
+    ) -> None:
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+        validation = runner.split(
+            "validate_load_generator_pod() {", maxsplit=1
+        )[1].split("\n}", maxsplit=1)[0]
+        exec_wrapper = runner.split("loadgen_exec() {", maxsplit=1)[1].split(
+            "\n}", maxsplit=1
+        )[0]
+        copy_wrapper = runner.split(
+            "loadgen_copy_to() {", maxsplit=1
+        )[1].split("\n}", maxsplit=1)[0]
+
+        for required in (
+            ".metadata.ownerReferences // []",
+            '"app.kubernetes.io/part-of"',
+            '"bluemap.guenter.cloud/experiment-id"',
+            ".spec.automountServiceAccountToken == false",
+            ".spec.initContainers // []",
+            ".spec.ephemeralContainers // []",
+            ".spec.containers | length == 1",
+            ".spec.volumes | length == 3",
+            '.name == "benchmark"',
+            '.name == "artifacts"',
+            '.name == "tmp"',
+            '.mountPath == "/artifacts"',
+            '.emptyDir | type == "object"',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, validation)
+
+        self.assertLess(
+            exec_wrapper.index("validate_load_generator_pod"),
+            exec_wrapper.index('kube exec "pod/$LOADGEN_POD"'),
+        )
+        self.assertLess(
+            copy_wrapper.index("validate_load_generator_pod"),
+            copy_wrapper.index('kube cp "$local_file"'),
+        )
+        self.assertEqual(
+            runner.count('kube exec "pod/$LOADGEN_POD"'),
+            1,
+        )
+        self.assertEqual(runner.count('kube cp "$local_file"'), 1)
 
     def test_runner_closes_every_prometheus_jq_conditional(self) -> None:
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
@@ -777,6 +1053,9 @@ class OriginRunnerStaticTests(unittest.TestCase):
         snapshot = (
             BENCHMARK_ROOT / "kubernetes" / "snapshot-copy.yaml"
         ).read_text(encoding="utf-8")
+        databases = (
+            BENCHMARK_ROOT / "kubernetes" / "databases.yaml"
+        ).read_text(encoding="utf-8")
 
         self.assertNotIn("claimName: minecraft-data", imports)
         self.assertIn("claimName: bluemap-perf-snapshot", imports)
@@ -785,6 +1064,32 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("readOnly: true", snapshot)
         self.assertIn("claimName: bluemap-perf-snapshot", snapshot)
         self.assertIn("storageClassName: longhorn-static", snapshot)
+        self.assertIn("kind: User", databases)
+        self.assertIn("name: bluemap_mtls", databases)
+        self.assertIn("name: bluemap-perf-mariadb-mtls", databases)
+        self.assertIn("x509: true", databases)
+        self.assertIn("kind: Grant", databases)
+        self.assertIn("- SELECT", databases)
+        self.assertNotIn("kind: Secret", databases)
+
+        file_values = (
+            BENCHMARK_ROOT
+            / "kubernetes"
+            / "file-live-fixtures-values.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("root: /snapshot/bluemap/web/maps", file_values)
+        self.assertIn("claimName: bluemap-perf-snapshot", file_values)
+        self.assertIn(
+            "/snapshot/bluemap/web/maps/world/live/players.json",
+            file_values,
+        )
+        self.assertIn(
+            "/snapshot/bluemap/web/maps/world/live/markers.json",
+            file_values,
+        )
+        self.assertGreaterEqual(file_values.count("readOnly: true"), 3)
+        self.assertNotIn("/data/web/maps", file_values)
+        self.assertNotIn("claimName: minecraft-data", file_values)
 
     def test_documented_slow_reader_uses_guarded_verified_expectations(
         self,
