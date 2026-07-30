@@ -776,6 +776,12 @@ artifacts. A formal matrix result is not accepted for the final comparison
 until those predeclared receipts exist; `run_origin_case.sh` does not claim to
 perform those faults itself.
 
+The HTTP checker emits one JSON diagnostic event when each request starts,
+when its response headers arrive, and when its body finishes. If a request
+fails, the final event identifies the request path and whether it failed while
+opening the response or reading its body. Query strings and exception messages
+are deliberately excluded so correctness artifacts do not expose credentials.
+
 Legacy and enhanced correctness are intentionally separate. The unchanged PHP
 baseline's `legacy` gate verifies byte-equivalent bodies and exact `200`/`204`
 routing for tiles, settings, textures, assets, players, and markers. It does

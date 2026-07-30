@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import itertools
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +22,7 @@ from pathlib import Path
 import zstandard
 
 HTTP_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+REQUEST_IDS = itertools.count(1)
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,23 @@ class Response:
 
 class ContractFailure(AssertionError):
     pass
+
+
+def emit_http_event(event: str, **details: object) -> None:
+    """Write one machine-readable diagnostic event without request secrets."""
+    print(
+        json.dumps(
+            {
+                "source": "bluemap-http-contract",
+                "event": event,
+                **details,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,12 +78,69 @@ def fetch(
     method: str = "GET",
 ) -> Response:
     url = urllib.parse.urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/"))
+    safe_path = urllib.parse.urlsplit(url).path or "/"
+    request_id = next(REQUEST_IDS)
+    started = time.monotonic()
+    phase = "open"
+    emit_http_event(
+        "request-start",
+        requestId=request_id,
+        method=method,
+        path=safe_path,
+    )
     request = urllib.request.Request(url, headers=headers, method=method)
     try:
-        with HTTP_OPENER.open(request, timeout=20) as response:
-            return Response(response.status, response.headers, response.read())
-    except urllib.error.HTTPError as error:
-        return Response(error.code, error.headers, error.read())
+        try:
+            opened = HTTP_OPENER.open(request, timeout=20)
+        except urllib.error.HTTPError as error:
+            opened = error
+
+        with opened as response:
+            status = int(response.status)
+            emit_http_event(
+                "response-headers",
+                requestId=request_id,
+                method=method,
+                path=safe_path,
+                status=status,
+                contentLength=response.headers.get("Content-Length"),
+                contentEncoding=response.headers.get(
+                    "Content-Encoding", "identity"
+                ),
+                elapsedMilliseconds=round(
+                    (time.monotonic() - started) * 1000,
+                    3,
+                ),
+            )
+            phase = "body"
+            body = response.read()
+            emit_http_event(
+                "response-complete",
+                requestId=request_id,
+                method=method,
+                path=safe_path,
+                status=status,
+                bodyBytes=len(body),
+                elapsedMilliseconds=round(
+                    (time.monotonic() - started) * 1000,
+                    3,
+                ),
+            )
+            return Response(status, response.headers, body)
+    except Exception as error:
+        emit_http_event(
+            "request-error",
+            requestId=request_id,
+            method=method,
+            path=safe_path,
+            phase=phase,
+            errorType=type(error).__name__,
+            elapsedMilliseconds=round(
+                (time.monotonic() - started) * 1000,
+                3,
+            ),
+        )
+        raise
 
 
 def require(condition: bool, message: str) -> None:

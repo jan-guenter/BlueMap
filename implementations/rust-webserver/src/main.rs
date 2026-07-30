@@ -262,7 +262,11 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{
+        fs,
+        sync::{Arc, Condvar, Mutex},
+        time::Duration,
+    };
 
     use axum::{
         body::{Body, HttpBody as _},
@@ -273,6 +277,44 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    struct ReadGate {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        released: Mutex<bool>,
+        condition: Condvar,
+    }
+
+    impl ReadGate {
+        fn new() -> (Arc<Self>, tokio::sync::oneshot::Receiver<()>) {
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            (
+                Arc::new(Self {
+                    entered: Mutex::new(Some(entered_tx)),
+                    released: Mutex::new(false),
+                    condition: Condvar::new(),
+                }),
+                entered_rx,
+            )
+        }
+
+        fn hook(self: &Arc<Self>) -> crate::storage::FileReadHook {
+            let gate = self.clone();
+            Arc::new(move || {
+                if let Some(entered) = gate.entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                }
+                let mut released = gate.released.lock().unwrap();
+                while !*released {
+                    released = gate.condition.wait(released).unwrap();
+                }
+            })
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.condition.notify_all();
+        }
+    }
 
     async fn fixture() -> (TempDir, AppState) {
         fixture_with_limit(8).await
@@ -399,7 +441,7 @@ mod tests {
                 .unwrap(),
             "gzip"
         );
-        assert_eq!(backend.body_read_count(), 1);
+        assert_eq!(backend.body_read_count(), 0);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
@@ -686,7 +728,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.body_read_count(), 0);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "{\"name\":\"World\"}");
         assert_eq!(backend.body_read_count(), 1);
+        assert_eq!(backend.metadata_read_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn tiny_nested_asset_returns_headers_before_its_gated_descriptor_read() {
+        let (temporary, state) = fixture().await;
+        let asset = temporary
+            .path()
+            .join("maps/world/assets/playerheads/player.png");
+        fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        let expected = vec![0x5a; 391];
+        fs::write(&asset, &expected).unwrap();
+
+        let backend = match &state.backend {
+            Backend::File(backend) => backend.clone(),
+            _ => unreachable!(),
+        };
+        let (gate, entered) = ReadGate::new();
+        backend.set_read_hook(Some(gate.hook()));
+        let app = router(state);
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(500),
+            app.oneshot(
+                Request::get("/maps/world/assets/playerheads/player.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("response headers waited for the gated body read")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_LENGTH).unwrap(),
+            "391"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public,no-cache,no-transform"
+        );
+        assert!(response.headers().contains_key(header::ETAG));
+        assert!(response.headers().contains_key(header::LAST_MODIFIED));
+        assert_eq!(response.body().size_hint().exact(), Some(391));
+        assert_eq!(backend.object_open_count(), 1);
+        assert_eq!(backend.metadata_read_count(), 0);
+        assert_eq!(backend.body_read_count(), 0);
+
+        let body_task =
+            tokio::spawn(async move { response.into_body().collect().await.unwrap().to_bytes() });
+        entered.await.unwrap();
+        assert_eq!(backend.body_read_count(), 1);
+        assert!(!body_task.is_finished());
+        gate.release();
+        let body = body_task.await.unwrap();
+        assert_eq!(body.as_ref(), expected.as_slice());
+        assert_eq!(backend.object_open_count(), 1);
     }
 
     #[tokio::test]
@@ -728,6 +835,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.body_read_count(), 0);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "stored-compressed");
         assert_eq!(backend.body_read_count(), 1);
     }
 
@@ -759,6 +869,253 @@ mod tests {
                 .contains("stored map object exceeds server response limit")
         );
         assert_eq!(backend.body_read_count(), 0);
+        assert_eq!(backend.object_open_count(), 1);
+        assert_eq!(backend.metadata_read_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn in_place_growth_makes_the_fixed_length_stream_incomplete() {
+        let (temporary, state) = fixture().await;
+        let settings = temporary.path().join("maps/world/settings.json");
+        let advertised = 64 * 1024 + 128;
+        fs::write(&settings, vec![0x41; advertised]).unwrap();
+
+        let backend = match &state.backend {
+            Backend::File(backend) => backend.clone(),
+            _ => unreachable!(),
+        };
+        let hook_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_counter = hook_calls.clone();
+        let mutation_path = settings.clone();
+        backend.set_read_hook(Some(Arc::new(move || {
+            if hook_counter.fetch_add(1, Ordering::AcqRel) == 1 {
+                use std::io::Write;
+
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&mutation_path)
+                    .unwrap();
+                file.write_all(b"growth-must-not-be-read").unwrap();
+                file.sync_all().unwrap();
+            }
+        })));
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/maps/world/settings.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_LENGTH).unwrap(),
+            advertised.to_string().as_str()
+        );
+
+        let mut body = response.into_body();
+        let mut emitted = 0;
+        let mut failed = false;
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        emitted += data.len();
+                    }
+                }
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        backend.set_read_hook(None);
+
+        assert!(failed, "a changed descriptor completed successfully");
+        assert!(
+            emitted > 0,
+            "the stream did not exercise incremental delivery"
+        );
+        assert!(
+            emitted < advertised,
+            "the final chunk was emitted despite failed metadata validation"
+        );
+        assert_eq!(backend.object_open_count(), 1);
+        assert!(backend.body_read_count() >= 2);
+    }
+
+    #[tokio::test]
+    async fn shrink_to_early_eof_cannot_complete_the_fixed_length_stream() {
+        let (temporary, state) = fixture().await;
+        let settings = temporary.path().join("maps/world/settings.json");
+        let first_chunk = 64 * 1024;
+        let advertised = first_chunk + 128;
+        fs::write(&settings, vec![0x42; advertised]).unwrap();
+
+        let backend = match &state.backend {
+            Backend::File(backend) => backend.clone(),
+            _ => unreachable!(),
+        };
+        let hook_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_counter = hook_calls.clone();
+        let mutation_path = settings.clone();
+        backend.set_read_hook(Some(Arc::new(move || {
+            if hook_counter.fetch_add(1, Ordering::AcqRel) == 1 {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&mutation_path)
+                    .unwrap();
+                file.set_len(first_chunk as u64).unwrap();
+                file.sync_all().unwrap();
+            }
+        })));
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/maps/world/settings.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_LENGTH).unwrap(),
+            advertised.to_string().as_str()
+        );
+
+        let mut body = response.into_body();
+        let mut emitted = 0;
+        let mut failed = false;
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        emitted += data.len();
+                    }
+                }
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        backend.set_read_hook(None);
+
+        assert!(failed, "an early EOF completed successfully");
+        assert!(emitted > 0);
+        assert!(emitted < advertised);
+        assert!(backend.body_read_count() >= 2);
+    }
+
+    #[tokio::test]
+    async fn timed_out_body_read_truncates_after_200_and_retains_worker_capacity() {
+        let (_temporary, state) = fixture_with_limit(1).await;
+        let backend = match &state.backend {
+            Backend::File(backend) => backend.clone(),
+            _ => unreachable!(),
+        };
+        let (gate, entered) = ReadGate::new();
+        backend.set_read_hook(Some(gate.hook()));
+        let object = backend
+            .open_object("world", crate::storage::ObjectRequest::Settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = admission.clone().acquire_owned().await.unwrap();
+        let response = crate::web::file_object_response(
+            object,
+            "settings.json",
+            &axum::http::HeaderMap::new(),
+            &axum::http::Method::GET,
+            permit,
+            Duration::from_millis(20),
+            60,
+        );
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_LENGTH).unwrap(),
+            "16"
+        );
+        assert_eq!(response.body().size_hint().exact(), Some(16));
+        assert_eq!(backend.body_read_count(), 0);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), response.into_body().collect())
+            .await
+            .expect("body timeout did not terminate the response");
+        assert!(result.is_err(), "timed-out fixed-length body completed");
+        entered.await.unwrap();
+        assert_eq!(backend.body_read_count(), 1);
+        assert_eq!(admission.available_permits(), 1);
+        assert_eq!(
+            backend.available_worker_permits(),
+            0,
+            "body timeout released a still-blocked filesystem syscall"
+        );
+
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.available_worker_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(backend.available_worker_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_blocked_body_releases_http_but_not_worker_capacity() {
+        let (_temporary, state) = fixture_with_limit(1).await;
+        let backend = match &state.backend {
+            Backend::File(backend) => backend.clone(),
+            _ => unreachable!(),
+        };
+        let admission = state.clone();
+        let (gate, entered) = ReadGate::new();
+        backend.set_read_hook(Some(gate.hook()));
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/maps/world/settings.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(admission.available_in_flight_permits(), 0);
+        assert_eq!(backend.available_worker_permits(), 1);
+
+        let body_task = tokio::spawn(async move { response.into_body().collect().await.map(drop) });
+        entered.await.unwrap();
+        assert_eq!(backend.available_worker_permits(), 0);
+        assert_eq!(admission.available_in_flight_permits(), 0);
+
+        body_task.abort();
+        assert!(body_task.await.unwrap_err().is_cancelled());
+        assert_eq!(admission.available_in_flight_permits(), 1);
+        assert_eq!(
+            backend.available_worker_permits(),
+            0,
+            "dropping the async body released a still-blocked filesystem syscall"
+        );
+
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend.available_worker_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(backend.available_worker_permits(), 1);
     }
 
     #[tokio::test]

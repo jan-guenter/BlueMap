@@ -73,13 +73,16 @@ Credential values are redacted from debug output and configuration errors.
 Map IDs use BlueMap's canonical letters/digits/underscore form. File storage
 opens every path relative to a pre-opened root directory and rejects symlink
 components. This keeps a writer with access to the map tree from redirecting
-the read-only server to files outside that tree. A before/after metadata check
-fails a read if a writer changes the opened file in place, preventing a mixed
-representation from being returned. All map-root opens, metadata calls, and
-complete reads run on explicit blocking workers. Their concurrency is the
-smaller of `max_in_flight_requests` and eight, and a worker keeps its permit
-after an HTTP timeout until the underlying filesystem syscall really returns.
-This prevents a stalled NFS mount from filling Tokio's blocking pool.
+the read-only server to files outside that tree. A normal GET uses one securely
+opened descriptor for its headers and body. The body is read in bounded chunks,
+never beyond the initially advertised length, and the descriptor is checked
+again before the final chunk is released. Atomic path replacement keeps serving
+the opened version; in-place changes truncate the fixed-length response instead
+of completing with mixed data. File opens, metadata calls, and individual
+chunks run on explicit blocking workers. Their concurrency is the smaller of
+`max_in_flight_requests` and eight, and a worker keeps its permit after an HTTP
+timeout or cancellation until the underlying filesystem syscall really
+returns. This prevents a stalled NFS mount from filling Tokio's blocking pool.
 
 Database TLS modes are `disable`, `required`, `verify-ca`, and `verify-full`
 (the default). A custom CA and optional client certificate/key can be mounted
@@ -94,37 +97,52 @@ matches the `/maps` route implemented by this focused server.
 SQL users need only `SELECT` on the existing six `bluemap_*` tables. The
 Minecraft BlueMap instance owns schema creation and updates. Each replica has a
 bounded pool; keep `replicas * max_connections` within the database budget.
+Serving-time SQL connections are detached and discarded if their configured
+storage deadline is cancelled. This prevents a silent database or network
+failure from stranding a pool permit in SQLx 0.8.6's unbounded on-release ping
+([upstream issue #4349](https://github.com/transact-rs/sqlx/issues/4349));
+successful return-to-pool checks remain inside the same deadline. SQLx's
+implicit pre-acquire ping is disabled so I/O on an idle pooled connection
+cannot begin before that guard owns it; the guarded query detects and discards
+a stale connection instead.
 Keep the per-replica `max_in_flight_requests` near `max_connections`, so the
 aggregate in-flight limit stays near the aggregate pool capacity instead of
 retaining many SQL BLOBs above it. File deployments with multiple replicas
 require a shared RWX filesystem with reliable read-after-rename semantics.
 `storage_timeout_seconds` bounds startup discovery, HTTP storage queries, and
-readiness checks. The shutdown grace is a total budget shared by stopping the
-health monitor, HTTP draining, and database-pool cleanup. After that,
-`runtime_shutdown_seconds` bounds how long process exit waits for uncancellable
-blocking filesystem workers. Kubernetes must allow both budgets plus a small
-termination margin; the Helm chart calculates that total automatically.
+readiness checks, as well as each blocking file open and body-chunk operation.
+File status and headers are sent after the open, before the complete body is
+read. A later chunk timeout or I/O failure aborts the fixed-length body; it
+cannot be converted into a late HTTP error response. The shutdown grace is a
+total budget shared by stopping the health monitor, HTTP draining, and
+database-pool cleanup. After that, `runtime_shutdown_seconds` bounds how long
+process exit waits for uncancellable blocking filesystem workers. Kubernetes
+must allow both budgets plus a small termination margin; the Helm chart
+calculates that total automatically.
 
 `max_in_flight_requests` is a non-queuing map-response limit (default `8`,
 valid range `1..=1024`). `max_object_bytes` rejects any individual stored
-object above its default 32 MiB limit. Metadata is checked before a body read;
-file reads enforce the limit again inside the blocking worker, and SQL body
-queries use a size-bounded projection so an object that grows between queries
-is represented by metadata rather than materialized as a BLOB. Oversize
-responses are HTTP 500 problem documents with
+object above its default 32 MiB limit. File storage checks the securely opened
+descriptor before creating the response and streams at most that advertised
+length. SQL checks metadata before its body query and uses a size-bounded
+projection so an object that grows between queries is represented by metadata
+rather than materialized as a BLOB. Oversize responses are HTTP 500 problem
+documents with
 `Cache-Control: no-store,no-transform`; logs contain only the observed and
 configured byte counts.
 Excess map requests receive HTTP 503 with `Retry-After: 1`. A permit remains
-attached while the response body is streamed in bounded chunks, so slow clients
-cannot accumulate unlimited materialized SQL BLOBs after database connections
-return to the pool. The largest texture object in the reference data was
-20.2 MiB. Eight simultaneous objects can therefore account for at least
-161.6 MiB before database, TLS, allocator, runtime, and webapp overhead. The
-SQL decoding can transiently retain both the database row and the response
-copy, so budget for roughly twice
+attached for the response-body lifetime. File responses retain only a bounded
+chunk and one open descriptor per active request; keep a raised in-flight limit
+within the container's file-descriptor headroom. SQL responses remain
+materialized BLOBs after their database connections return to the pool. The
+largest texture object in the reference data was 20.2 MiB. Eight simultaneous
+SQL objects can therefore account for at least 161.6 MiB before database, TLS,
+allocator, runtime, and webapp overhead. SQL decoding can transiently retain
+both the database row and response copy, so budget SQL deployments for roughly
+twice
 `max_in_flight_requests * max_object_bytes`, plus database, TLS, allocator,
 runtime, and webapp overhead. The Helm examples use a 1 GiB limit; lower the
-object or in-flight limit when using a smaller pod memory budget.
+object or in-flight limit when using a smaller SQL pod memory budget.
 
 ## Build and test
 

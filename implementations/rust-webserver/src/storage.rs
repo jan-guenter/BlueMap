@@ -9,8 +9,9 @@ use std::{
 
 use bytes::Bytes;
 use sqlx::{
-    ConnectOptions, MySqlPool, PgPool, Row,
+    ConnectOptions, Database, MySqlPool, PgPool, Pool, Row,
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode},
+    pool::PoolConnection,
     postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode},
 };
 use tokio::sync::Semaphore;
@@ -63,6 +64,10 @@ pub struct FileBackend {
     body_reads: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     metadata_reads: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    object_opens: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    read_hook: Arc<std::sync::Mutex<Option<FileReadHook>>>,
 }
 
 #[derive(Clone)]
@@ -75,6 +80,74 @@ pub struct SqlBackend<P> {
     pool: P,
     metadata: SqlMetadata,
     max_object_bytes: i64,
+}
+
+/// Owns a checked-out SQLx connection so cancellation discards it synchronously.
+///
+/// SQLx 0.8.6 normally spawns an unbounded on-release ping when a
+/// `PoolConnection` is dropped. A silent network failure can therefore strand
+/// the pool permit forever (https://github.com/transact-rs/sqlx/issues/4349).
+/// All serving-time SQL operations use this guard inside the configured
+/// storage deadline. Cancellation detaches the connection, immediately
+/// releasing its pool permit; successful operations explicitly run the normal
+/// return-to-pool check inside that same deadline.
+struct DeadlineSafePoolConnection<DB: Database> {
+    connection: Option<PoolConnection<DB>>,
+}
+
+impl<DB: Database> DeadlineSafePoolConnection<DB> {
+    async fn acquire(pool: &Pool<DB>) -> std::result::Result<Self, sqlx::Error> {
+        match pool.acquire().await {
+            Ok(connection) => Ok(Self {
+                connection: Some(connection),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    pool_size = pool.size(),
+                    pool_idle = pool.num_idle(),
+                    "SQL pool acquisition failed"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn raw(&mut self) -> &mut DB::Connection {
+        &mut *self
+            .connection
+            .as_mut()
+            .expect("deadline-safe SQL connection is present")
+    }
+
+    async fn finish<T>(mut self, outcome: std::result::Result<T, sqlx::Error>) -> Result<T> {
+        match outcome {
+            Ok(value) => {
+                let mut connection = self
+                    .connection
+                    .take()
+                    .expect("deadline-safe SQL connection is present");
+                connection.return_to_pool().await;
+                Ok(value)
+            }
+            Err(error) => {
+                self.discard();
+                Err(AppError::Database(error))
+            }
+        }
+    }
+
+    fn discard(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            drop(connection.detach());
+        }
+    }
+}
+
+impl<DB: Database> Drop for DeadlineSafePoolConnection<DB> {
+    fn drop(&mut self) {
+        self.discard();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -101,6 +174,32 @@ pub struct StoredObject {
     pub data: Bytes,
     pub metadata: ObjectMetadata,
 }
+
+pub struct FileObject {
+    pub body: FileBody,
+    pub metadata: ObjectMetadata,
+}
+
+pub struct FileBody {
+    file: File,
+    initial_metadata: std::fs::Metadata,
+    remaining: u64,
+    display_path: PathBuf,
+    workers: BlockingFileWorkers,
+    #[cfg(test)]
+    body_reads: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    read_hook: Arc<std::sync::Mutex<Option<FileReadHook>>>,
+}
+
+pub struct FileChunk {
+    pub data: Bytes,
+    pub next: Option<FileBody>,
+    pub remaining: u64,
+}
+
+#[cfg(test)]
+pub(crate) type FileReadHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct ObjectMetadata {
@@ -162,13 +261,13 @@ impl Backend {
                 }
                 options = options.disable_statement_logging();
 
-                let pool = MySqlPoolOptions::new()
-                    .min_connections(0)
-                    .max_connections((*max_connections).max(1))
-                    .acquire_timeout(Duration::from_secs(*connect_timeout_seconds))
-                    .connect_with(options)
-                    .await
-                    .map_err(AppError::Database)?;
+                let pool = deadline_safe_mysql_pool_options(
+                    *max_connections,
+                    Duration::from_secs(*connect_timeout_seconds),
+                )
+                .connect_with(options)
+                .await
+                .map_err(AppError::Database)?;
                 let metadata = mysql_schema_metadata(&pool).await?;
                 Ok(Self::MariaDb(SqlBackend {
                     pool,
@@ -205,13 +304,13 @@ impl Backend {
                 }
                 options = options.disable_statement_logging();
 
-                let pool = PgPoolOptions::new()
-                    .min_connections(0)
-                    .max_connections((*max_connections).max(1))
-                    .acquire_timeout(Duration::from_secs(*connect_timeout_seconds))
-                    .connect_with(options)
-                    .await
-                    .map_err(AppError::Database)?;
+                let pool = deadline_safe_postgres_pool_options(
+                    *max_connections,
+                    Duration::from_secs(*connect_timeout_seconds),
+                )
+                .connect_with(options)
+                .await
+                .map_err(AppError::Database)?;
                 let metadata = postgres_schema_metadata(&pool).await?;
                 Ok(Self::PostgreSql(SqlBackend {
                     pool,
@@ -234,9 +333,15 @@ impl Backend {
         }
     }
 
-    pub async fn read(&self, map_id: &str, request: ObjectRequest) -> Result<Option<StoredObject>> {
+    pub async fn read_buffered(
+        &self,
+        map_id: &str,
+        request: ObjectRequest,
+    ) -> Result<Option<StoredObject>> {
         match self {
-            Self::File(backend) => backend.read(map_id, request).await,
+            Self::File(_) => Err(AppError::InvalidConfig(
+                "file objects must use descriptor-backed streaming".to_owned(),
+            )),
             Self::MariaDb(backend) => backend.read_mysql(map_id, request).await,
             Self::PostgreSql(backend) => backend.read_postgres(map_id, request).await,
         }
@@ -262,17 +367,19 @@ impl Backend {
         match self {
             Self::File(backend) => backend.probe().await,
             Self::MariaDb(backend) => {
-                sqlx::query("SELECT 1")
-                    .execute(&backend.pool)
+                let mut connection = DeadlineSafePoolConnection::acquire(&backend.pool)
                     .await
                     .map_err(AppError::Database)?;
+                let outcome = sqlx::query("SELECT 1").execute(connection.raw()).await;
+                connection.finish(outcome).await?;
                 Ok(())
             }
             Self::PostgreSql(backend) => {
-                sqlx::query("SELECT 1")
-                    .execute(&backend.pool)
+                let mut connection = DeadlineSafePoolConnection::acquire(&backend.pool)
                     .await
                     .map_err(AppError::Database)?;
+                let outcome = sqlx::query("SELECT 1").execute(connection.raw()).await;
+                connection.finish(outcome).await?;
                 Ok(())
             }
         }
@@ -285,6 +392,32 @@ impl Backend {
             Self::PostgreSql(backend) => backend.pool.close().await,
         }
     }
+}
+
+fn deadline_safe_mysql_pool_options(
+    max_connections: u32,
+    acquire_timeout: Duration,
+) -> MySqlPoolOptions {
+    MySqlPoolOptions::new()
+        .min_connections(0)
+        .max_connections(max_connections.max(1))
+        .acquire_timeout(acquire_timeout)
+        // The implicit ping runs before PoolConnection ownership reaches our
+        // deadline guard. Let the guarded query detect stale connections.
+        .test_before_acquire(false)
+}
+
+fn deadline_safe_postgres_pool_options(
+    max_connections: u32,
+    acquire_timeout: Duration,
+) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .min_connections(0)
+        .max_connections(max_connections.max(1))
+        .acquire_timeout(acquire_timeout)
+        // The implicit ping runs before PoolConnection ownership reaches our
+        // deadline guard. Let the guarded query detect stale connections.
+        .test_before_acquire(false)
 }
 
 impl FileBackend {
@@ -322,6 +455,10 @@ impl FileBackend {
             body_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             metadata_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            object_opens: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            read_hook: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -366,51 +503,52 @@ impl FileBackend {
             .await
     }
 
-    async fn read(&self, map_id: &str, request: ObjectRequest) -> Result<Option<StoredObject>> {
+    pub(crate) async fn open_object(
+        &self,
+        map_id: &str,
+        request: ObjectRequest,
+    ) -> Result<Option<FileObject>> {
         #[cfg(test)]
-        self.body_reads
+        self.object_opens
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (relative_path, encoding, class) = self.object_path(map_id, request)?;
         let root = self.root_directory.clone();
         let display_path = self.root.join(&relative_path);
         let root_path = self.root.clone();
         let max_object_bytes = self.max_object_bytes;
+        let workers = self.workers.clone();
+        #[cfg(test)]
+        let body_reads = self.body_reads.clone();
+        #[cfg(test)]
+        let read_hook = self.read_hook.clone();
         self.workers
-            .run("file-storage read", move || {
-                let mut file = match open_beneath(&root, &root_path, &relative_path) {
+            .run("file-storage open", move || {
+                let file = match open_beneath(&root, &root_path, &relative_path) {
                     Ok(file) => file,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                     Err(source) => return Err(AppError::StorageIo(display_path.clone(), source)),
                 };
-                let stat = file
+                let initial_metadata = file
                     .metadata()
                     .map_err(|source| AppError::StorageIo(display_path.clone(), source))?;
-                if !stat.is_file() {
+                if !initial_metadata.is_file() {
                     return Ok(None);
                 }
-                ensure_object_size(stat.len(), max_object_bytes)?;
-                let capacity = usize::try_from(stat.len()).unwrap_or(0);
-                let mut data = Vec::with_capacity(capacity);
-                (&mut file)
-                    .take(max_object_bytes + 1)
-                    .read_to_end(&mut data)
-                    .map_err(|source| AppError::StorageIo(display_path.clone(), source))?;
-                ensure_object_size(data.len() as u64, max_object_bytes)?;
-                let final_stat = file
-                    .metadata()
-                    .map_err(|source| AppError::StorageIo(display_path.clone(), source))?;
-                if !file_metadata_matches(&stat, &final_stat)
-                    || final_stat.len() != data.len() as u64
-                {
-                    return Err(AppError::StorageIo(
+                ensure_object_size(initial_metadata.len(), max_object_bytes)?;
+                let remaining = initial_metadata.len();
+                let metadata = file_metadata(&initial_metadata, encoding, class);
+                Ok(Some(FileObject {
+                    body: FileBody {
+                        file,
+                        initial_metadata,
+                        remaining,
                         display_path,
-                        io::Error::other("file changed while it was being read"),
-                    ));
-                }
-                let mut metadata = file_metadata(&final_stat, encoding, class);
-                metadata.content_length = Some(data.len() as u64);
-                Ok(Some(StoredObject {
-                    data: Bytes::from(data),
+                        workers,
+                        #[cfg(test)]
+                        body_reads,
+                        #[cfg(test)]
+                        read_hook,
+                    },
                     metadata,
                 }))
             })
@@ -423,7 +561,22 @@ impl FileBackend {
     }
 
     #[cfg(test)]
-    fn metadata_read_count(&self) -> usize {
+    pub(crate) fn object_open_count(&self) -> usize {
+        self.object_opens.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_worker_permits(&self) -> usize {
+        self.workers.available_permits()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_read_hook(&self, hook: Option<FileReadHook>) {
+        *self.read_hook.lock().unwrap() = hook;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metadata_read_count(&self) -> usize {
         self.metadata_reads
             .load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -494,6 +647,80 @@ impl FileBackend {
     }
 }
 
+impl FileBody {
+    pub(crate) fn remaining(&self) -> u64 {
+        self.remaining
+    }
+
+    pub(crate) fn display_path(&self) -> &Path {
+        &self.display_path
+    }
+
+    pub(crate) async fn read_chunk(mut self, max_bytes: usize) -> Result<FileChunk> {
+        let workers = self.workers.clone();
+        workers
+            .run("file-storage body read", move || {
+                if self.remaining == 0 {
+                    return Err(AppError::StorageIo(
+                        self.display_path,
+                        io::Error::other("attempted to read a completed file response"),
+                    ));
+                }
+
+                #[cfg(test)]
+                self.body_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(test)]
+                if let Some(hook) = self.read_hook.lock().unwrap().clone() {
+                    hook();
+                }
+
+                let requested = usize::try_from(self.remaining.min(max_bytes as u64))
+                    .expect("bounded file-response chunks fit in usize");
+                let mut data = vec![0; requested];
+                let read = loop {
+                    match self.file.read(&mut data) {
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        result => break result,
+                    }
+                }
+                .map_err(|source| AppError::StorageIo(self.display_path.clone(), source))?;
+                if read == 0 {
+                    return Err(AppError::StorageIo(
+                        self.display_path,
+                        io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "file became shorter while it was being streamed",
+                        ),
+                    ));
+                }
+
+                data.truncate(read);
+                self.remaining -= read as u64;
+                if self.remaining == 0 {
+                    let final_metadata = self
+                        .file
+                        .metadata()
+                        .map_err(|source| AppError::StorageIo(self.display_path.clone(), source))?;
+                    if !file_metadata_matches(&self.initial_metadata, &final_metadata) {
+                        return Err(AppError::StorageIo(
+                            self.display_path,
+                            io::Error::other("file changed while it was being streamed"),
+                        ));
+                    }
+                }
+
+                let remaining = self.remaining;
+                Ok(FileChunk {
+                    data: Bytes::from(data),
+                    next: (remaining > 0).then_some(self),
+                    remaining,
+                })
+            })
+            .await
+    }
+}
+
 impl BlockingFileWorkers {
     fn new(configured_limit: usize) -> Self {
         Self {
@@ -559,13 +786,17 @@ fn file_metadata(
 fn file_metadata_matches(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
 
+    let same_ctime = before.ctime() == after.ctime() && before.ctime_nsec() == after.ctime_nsec();
+    // A rename-over atomically unlinks the old inode and changes only its
+    // ctime/link count; the already-open descriptor still has stable bytes.
+    let unlinked_by_atomic_replacement = before.nlink() > 0 && after.nlink() == 0;
+
     before.len() == after.len()
         && before.dev() == after.dev()
         && before.ino() == after.ino()
         && before.mtime() == after.mtime()
         && before.mtime_nsec() == after.mtime_nsec()
-        && before.ctime() == after.ctime()
-        && before.ctime_nsec() == after.ctime_nsec()
+        && (same_ctime || unlinked_by_atomic_replacement)
 }
 
 #[cfg(not(unix))]
@@ -713,14 +944,17 @@ impl SqlBackend<MySqlPool> {
                 if include_data {
                     query = query.bind(self.max_object_bytes);
                 }
-                let row = query
+                let mut connection = DeadlineSafePoolConnection::acquire(&self.pool)
+                    .await
+                    .map_err(AppError::Database)?;
+                let outcome = query
                     .bind(map_id)
                     .bind(storage)
                     .bind(x)
                     .bind(z)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(AppError::Database)?;
+                    .fetch_optional(connection.raw())
+                    .await;
+                let row = connection.finish(outcome).await?;
                 Ok(row)
             }
             ObjectRequest::Tile { .. } => Ok(None),
@@ -732,12 +966,15 @@ impl SqlBackend<MySqlPool> {
                 if include_data {
                     query = query.bind(self.max_object_bytes);
                 }
-                let row = query
-                    .bind(map_id)
-                    .bind(storage)
-                    .fetch_optional(&self.pool)
+                let mut connection = DeadlineSafePoolConnection::acquire(&self.pool)
                     .await
                     .map_err(AppError::Database)?;
+                let outcome = query
+                    .bind(map_id)
+                    .bind(storage)
+                    .fetch_optional(connection.raw())
+                    .await;
+                let row = connection.finish(outcome).await?;
                 Ok(row)
             }
         }
@@ -801,10 +1038,11 @@ impl SqlBackend<PgPool> {
                 if include_data {
                     query = query.bind(self.max_object_bytes);
                 }
-                let row = query
-                    .fetch_optional(&self.pool)
+                let mut connection = DeadlineSafePoolConnection::acquire(&self.pool)
                     .await
                     .map_err(AppError::Database)?;
+                let outcome = query.fetch_optional(connection.raw()).await;
+                let row = connection.finish(outcome).await?;
                 Ok(row)
             }
             ObjectRequest::Tile { .. } => Ok(None),
@@ -827,10 +1065,11 @@ impl SqlBackend<PgPool> {
                 if include_data {
                     query = query.bind(self.max_object_bytes);
                 }
-                let row = query
-                    .fetch_optional(&self.pool)
+                let mut connection = DeadlineSafePoolConnection::acquire(&self.pool)
                     .await
                     .map_err(AppError::Database)?;
+                let outcome = query.fetch_optional(connection.raw()).await;
+                let row = connection.finish(outcome).await?;
                 Ok(row)
             }
         }
@@ -1160,6 +1399,165 @@ mod tests {
         "../../../core/src/main/java/de/bluecolored/bluemap/core/storage/sql/commandset/PostgreSQLCommandSet.java"
     );
 
+    async fn spawn_silent_postgres(
+        answer_first_sync: bool,
+    ) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = connections.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                accepted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut length = [0_u8; 4];
+                    if socket.read_exact(&mut length).await.is_err() {
+                        return;
+                    }
+                    let body_length = (u32::from_be_bytes(length) as usize).saturating_sub(4);
+                    let mut body = vec![0_u8; body_length];
+                    if socket.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+
+                    let mut reply = Vec::new();
+                    reply.extend([b'R', 0, 0, 0, 8, 0, 0, 0, 0]);
+                    for (key, value) in [
+                        ("server_version", "14.0"),
+                        ("client_encoding", "UTF8"),
+                        ("DateStyle", "ISO, MDY"),
+                    ] {
+                        let payload_length = 4 + key.len() + 1 + value.len() + 1;
+                        reply.push(b'S');
+                        reply.extend((payload_length as u32).to_be_bytes());
+                        reply.extend(key.as_bytes());
+                        reply.push(0);
+                        reply.extend(value.as_bytes());
+                        reply.push(0);
+                    }
+                    reply.extend([b'K', 0, 0, 0, 12]);
+                    reply.extend(1234_u32.to_be_bytes());
+                    reply.extend(5678_u32.to_be_bytes());
+                    reply.extend([b'Z', 0, 0, 0, 5, b'I']);
+                    if socket.write_all(&reply).await.is_err() {
+                        return;
+                    }
+
+                    if answer_first_sync {
+                        let mut sync = [0_u8; 5];
+                        if socket.read_exact(&mut sync).await.is_err()
+                            || sync != [b'S', 0, 0, 0, 4]
+                            || socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await.is_err()
+                        {
+                            return;
+                        }
+                    }
+
+                    let mut buffer = [0_u8; 4096];
+                    while socket.read(&mut buffer).await.is_ok_and(|read| read > 0) {}
+                });
+            }
+        });
+        (address, connections)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_sql_operation_releases_its_pool_permit() {
+        use std::sync::atomic::Ordering;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (address, connections) = spawn_silent_postgres(false).await;
+            let options = PgConnectOptions::new()
+                .host(&address.ip().to_string())
+                .port(address.port())
+                .username("user")
+                .database("db")
+                .ssl_mode(PgSslMode::Disable)
+                .disable_statement_logging();
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_millis(500))
+                .connect_lazy_with(options);
+
+            let operation = async {
+                let mut connection = DeadlineSafePoolConnection::acquire(&pool).await.unwrap();
+                let outcome = sqlx::query("SELECT 1").execute(connection.raw()).await;
+                connection.finish(outcome).await
+            };
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), operation)
+                    .await
+                    .is_err()
+            );
+
+            let replacement = tokio::time::timeout(
+                Duration::from_secs(1),
+                DeadlineSafePoolConnection::acquire(&pool),
+            )
+            .await
+            .expect("replacement connection acquisition timed out")
+            .expect("replacement connection acquisition failed");
+            drop(replacement);
+            assert_eq!(connections.load(Ordering::SeqCst), 2);
+        })
+        .await
+        .expect("silent SQL peer exhausted the pool");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_connection_io_starts_only_after_the_deadline_guard() {
+        use std::sync::atomic::Ordering;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (address, connections) = spawn_silent_postgres(true).await;
+            let options = PgConnectOptions::new()
+                .host(&address.ip().to_string())
+                .port(address.port())
+                .username("user")
+                .database("db")
+                .ssl_mode(PgSslMode::Disable)
+                .disable_statement_logging();
+            let pool = deadline_safe_postgres_pool_options(1, Duration::from_millis(500))
+                .connect_lazy_with(options);
+
+            let first = DeadlineSafePoolConnection::acquire(&pool).await.unwrap();
+            first.finish(Ok(())).await.unwrap();
+
+            let mut stale = tokio::time::timeout(
+                Duration::from_millis(100),
+                DeadlineSafePoolConnection::acquire(&pool),
+            )
+            .await
+            .expect("idle acquisition performed an implicit network ping")
+            .unwrap();
+            let operation = async {
+                let outcome = sqlx::query("SELECT 1").execute(stale.raw()).await;
+                stale.finish(outcome).await
+            };
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), operation)
+                    .await
+                    .is_err()
+            );
+
+            let replacement = tokio::time::timeout(
+                Duration::from_secs(1),
+                DeadlineSafePoolConnection::acquire(&pool),
+            )
+            .await
+            .expect("replacement connection acquisition timed out")
+            .expect("replacement connection acquisition failed");
+            drop(replacement);
+            assert_eq!(connections.load(Ordering::SeqCst), 2);
+        })
+        .await
+        .expect("idle connection I/O escaped the deadline-safe guard");
+    }
+
     #[test]
     fn file_grid_path_matches_java_character_sharding() {
         assert_eq!(
@@ -1326,10 +1724,10 @@ mod tests {
         let backend = FileBackend::open(maps, StoredEncoding::None, 8, 64 * 1024 * 1024)
             .await
             .unwrap();
-        let error = backend
-            .read("world", ObjectRequest::Settings)
-            .await
-            .unwrap_err();
+        let error = match backend.open_object("world", ObjectRequest::Settings).await {
+            Err(error) => error,
+            Ok(_) => panic!("symlink traversal unexpectedly opened a file"),
+        };
         assert!(matches!(error, AppError::StorageIo(_, _)));
     }
 
@@ -1345,7 +1743,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            backend.read("world", ObjectRequest::Settings).await,
+            backend.open_object("world", ObjectRequest::Settings).await,
             Err(AppError::ObjectTooLarge {
                 actual: 9,
                 limit: 8
@@ -1355,7 +1753,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn opened_file_handle_is_stable_across_path_replacement() {
+    fn opened_file_handle_is_stable_across_atomic_path_replacement() {
         use std::io::Read;
 
         let temporary = tempfile::TempDir::new().unwrap();
@@ -1365,12 +1763,15 @@ mod tests {
         std::fs::write(&path, b"original").unwrap();
         let root = File::open(&root_path).unwrap();
         let mut opened = open_beneath(&root, &root_path, Path::new("world/settings.json")).unwrap();
+        let before = opened.metadata().unwrap();
 
-        std::fs::rename(&path, root_path.join("world/old-settings.json")).unwrap();
-        std::fs::write(&path, b"replacement").unwrap();
+        let replacement = root_path.join("world/replacement.json");
+        std::fs::write(&replacement, b"replacement").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
         let mut data = String::new();
         opened.read_to_string(&mut data).unwrap();
         assert_eq!(data, "original");
+        assert!(file_metadata_matches(&before, &opened.metadata().unwrap()));
     }
 
     #[cfg(unix)]

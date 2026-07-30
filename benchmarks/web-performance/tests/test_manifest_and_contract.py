@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
+import io
+import json
 import sys
 import tempfile
 import unittest
 from email.message import Message
 from pathlib import Path
+from unittest import mock
 
 
 TOOLS_DIR = Path(__file__).parents[1] / "tools"
@@ -131,6 +135,99 @@ class ManifestTests(unittest.TestCase):
 
 
 class ContractHelperTests(unittest.TestCase):
+    def test_fetch_records_headers_and_body_completion_without_query_data(
+        self,
+    ) -> None:
+        class FakeResponse:
+            status = 200
+            headers = Message()
+
+            def __enter__(self) -> FakeResponse:
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b"response body"
+
+        FakeResponse.headers["Content-Length"] = "13"
+        FakeResponse.headers["Content-Encoding"] = "zstd"
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                check_http_contract.HTTP_OPENER,
+                "open",
+                return_value=FakeResponse(),
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            response = check_http_contract.fetch(
+                "http://127.0.0.1:8100",
+                "/maps/world/settings.json?credential=secret",
+                {"User-Agent": "test"},
+            )
+
+        events = [
+            json.loads(line)
+            for line in stderr.getvalue().splitlines()
+        ]
+        self.assertEqual(response.body, b"response body")
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["request-start", "response-headers", "response-complete"],
+        )
+        self.assertTrue(
+            all(
+                event["path"] == "/maps/world/settings.json"
+                for event in events
+            )
+        )
+        self.assertNotIn("secret", stderr.getvalue())
+        self.assertEqual(events[1]["contentLength"], "13")
+        self.assertEqual(events[2]["bodyBytes"], 13)
+
+    def test_fetch_records_the_phase_of_a_body_failure(self) -> None:
+        class FailingResponse:
+            status = 200
+            headers = Message()
+
+            def __enter__(self) -> FailingResponse:
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                raise TimeoutError("must not be included in diagnostics")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                check_http_contract.HTTP_OPENER,
+                "open",
+                return_value=FailingResponse(),
+            ),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(TimeoutError),
+        ):
+            check_http_contract.fetch(
+                "http://127.0.0.1:8100",
+                "/maps/world/asset",
+                {"User-Agent": "test"},
+            )
+
+        events = [
+            json.loads(line)
+            for line in stderr.getvalue().splitlines()
+        ]
+        self.assertEqual(events[-1]["event"], "request-error")
+        self.assertEqual(events[-1]["phase"], "body")
+        self.assertEqual(events[-1]["errorType"], "TimeoutError")
+        self.assertNotIn("must not be included", stderr.getvalue())
+
     def test_decodes_and_hashes_gzip_response(self) -> None:
         body = b"stored body"
         headers = Message()

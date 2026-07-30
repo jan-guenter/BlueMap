@@ -1,13 +1,16 @@
 use std::{
     collections::HashSet,
     convert::Infallible,
+    future::Future,
+    io,
+    path::PathBuf,
     pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -33,7 +36,10 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 use crate::{
     AppError, Result, VERSION,
     config::{Config, StoredEncoding},
-    storage::{Backend, ObjectClass, ObjectMetadata, ObjectRequest, StoredObject, grid_item_path},
+    storage::{
+        Backend, FileBody, FileChunk, FileObject, ObjectClass, ObjectMetadata, ObjectRequest,
+        StoredObject, grid_item_path,
+    },
     storage_operation,
 };
 
@@ -63,6 +69,11 @@ impl AppState {
             in_flight: Arc::new(Semaphore::new(max_in_flight_requests)),
             settings: Arc::new(settings),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_in_flight_permits(&self) -> usize {
+        self.in_flight.available_permits()
     }
 }
 
@@ -133,6 +144,39 @@ async fn map_data(
         Err(_) => return overload_response(),
     };
 
+    if let Backend::File(backend) = &state.backend {
+        let object = match storage_operation(
+            state.config.storage_timeout(),
+            "map file open",
+            backend.open_object(&map_id, request),
+        )
+        .await
+        {
+            Ok(Some(object)) => object,
+            Ok(None) if path.starts_with("tiles/") => return missing_tile_response(),
+            Ok(None) => return error_response(StatusCode::NOT_FOUND, "map object not found"),
+            Err(error) => return storage_error_response(error, &map_id, &path),
+        };
+        if let Some(response) = metadata_only_response(
+            &object.metadata,
+            &path,
+            &headers,
+            &method,
+            state.config.tile_cache_max_age_seconds,
+        ) {
+            return response;
+        }
+        return file_object_response(
+            object,
+            &path,
+            &headers,
+            &method,
+            permit,
+            state.config.storage_timeout(),
+            state.config.tile_cache_max_age_seconds,
+        );
+    }
+
     let metadata = match storage_operation(
         state.config.storage_timeout(),
         "map metadata query",
@@ -163,7 +207,7 @@ async fn map_data(
     match storage_operation(
         state.config.storage_timeout(),
         "map body query",
-        state.backend.read(&map_id, request),
+        state.backend.read_buffered(&map_id, request),
     )
     .await
     {
@@ -288,13 +332,44 @@ fn object_response(
 ) -> Response {
     representation_response(
         object.metadata,
-        Some(object.data),
+        Some(ResponseData::Buffered(object.data)),
         path,
         request_headers,
         method,
         Some(permit),
         tile_cache_max_age_seconds,
     )
+}
+
+pub(crate) fn file_object_response(
+    object: FileObject,
+    path: &str,
+    request_headers: &HeaderMap,
+    method: &Method,
+    permit: OwnedSemaphorePermit,
+    storage_timeout: Duration,
+    tile_cache_max_age_seconds: u64,
+) -> Response {
+    representation_response(
+        object.metadata,
+        Some(ResponseData::File {
+            body: Box::new(object.body),
+            timeout: storage_timeout,
+        }),
+        path,
+        request_headers,
+        method,
+        Some(permit),
+        tile_cache_max_age_seconds,
+    )
+}
+
+enum ResponseData {
+    Buffered(Bytes),
+    File {
+        body: Box<FileBody>,
+        timeout: Duration,
+    },
 }
 
 fn metadata_only_response(
@@ -325,7 +400,7 @@ fn metadata_only_response(
 
 fn representation_response(
     metadata: ObjectMetadata,
-    data: Option<Bytes>,
+    data: Option<ResponseData>,
     path: &str,
     request_headers: &HeaderMap,
     method: &Method,
@@ -349,10 +424,19 @@ fn representation_response(
         response
     } else {
         Response::new(match data {
-            Some(data) if *method != Method::HEAD => Body::new(LimitedResponseBody {
-                data,
-                _permit: permit.take().expect("map bodies hold an in-flight permit"),
-            }),
+            Some(ResponseData::Buffered(data)) if *method != Method::HEAD => {
+                Body::new(LimitedResponseBody {
+                    data,
+                    _permit: permit.take().expect("map bodies hold an in-flight permit"),
+                })
+            }
+            Some(ResponseData::File { body, timeout }) if *method != Method::HEAD => {
+                Body::new(FileResponseBody::new(
+                    body,
+                    timeout,
+                    permit.take().expect("map bodies hold an in-flight permit"),
+                ))
+            }
             _ => Body::empty(),
         })
     };
@@ -467,6 +551,108 @@ impl axum::body::HttpBody for LimitedResponseBody {
 
     fn size_hint(&self) -> SizeHint {
         SizeHint::with_exact(self.data.len() as u64)
+    }
+}
+
+type FileReadFuture =
+    Pin<Box<dyn Future<Output = std::result::Result<FileChunk, io::Error>> + Send + 'static>>;
+
+enum FileResponseState {
+    Ready(Box<FileBody>),
+    Reading(FileReadFuture),
+    Done,
+}
+
+struct FileResponseBody {
+    state: FileResponseState,
+    remaining: u64,
+    timeout: Duration,
+    display_path: PathBuf,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl FileResponseBody {
+    fn new(body: Box<FileBody>, timeout: Duration, permit: OwnedSemaphorePermit) -> Self {
+        let remaining = body.remaining();
+        let display_path = body.display_path().to_owned();
+        let state = if remaining == 0 {
+            FileResponseState::Done
+        } else {
+            FileResponseState::Ready(body)
+        };
+        Self {
+            state,
+            remaining,
+            timeout,
+            display_path,
+            _permit: permit,
+        }
+    }
+}
+
+impl axum::body::HttpBody for FileResponseBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+        let body = self.get_mut();
+        loop {
+            match std::mem::replace(&mut body.state, FileResponseState::Done) {
+                FileResponseState::Ready(source) => {
+                    let timeout = body.timeout;
+                    body.state = FileResponseState::Reading(Box::pin(async move {
+                        match tokio::time::timeout(
+                            timeout,
+                            (*source).read_chunk(RESPONSE_CHUNK_SIZE),
+                        )
+                        .await
+                        {
+                            Ok(Ok(chunk)) => Ok(chunk),
+                            Ok(Err(error)) => Err(io::Error::other(error.to_string())),
+                            Err(_) => Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "file response body read timed out",
+                            )),
+                        }
+                    }));
+                }
+                FileResponseState::Reading(mut future) => match future.as_mut().poll(context) {
+                    Poll::Pending => {
+                        body.state = FileResponseState::Reading(future);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Ok(chunk)) => {
+                        body.remaining = chunk.remaining;
+                        body.state = match chunk.next {
+                            Some(source) => FileResponseState::Ready(Box::new(source)),
+                            None => FileResponseState::Done,
+                        };
+                        return Poll::Ready(Some(Ok(Frame::data(chunk.data))));
+                    }
+                    Poll::Ready(Err(error)) => {
+                        tracing::warn!(
+                            error = %error,
+                            path = %body.display_path.display(),
+                            "file response body stream failed"
+                        );
+                        body.remaining = 0;
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                },
+                FileResponseState::Done => return Poll::Ready(None),
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        matches!(self.state, FileResponseState::Done)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.remaining)
     }
 }
 
