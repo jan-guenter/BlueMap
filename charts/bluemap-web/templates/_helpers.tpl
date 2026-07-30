@@ -47,6 +47,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-storage" (include "bluemap-web.fullname" .) }}
 {{- end }}
 
+{{- define "bluemap-web.rustConfigName" -}}
+{{- printf "%s-rust" (include "bluemap-web.fullname" .) }}
+{{- end }}
+
 {{- define "bluemap-web.sqlCredentialsSecretName" -}}
 {{- default (printf "%s-sql" (include "bluemap-web.fullname" .)) .Values.storage.sql.credentials.existingSecret }}
 {{- end }}
@@ -91,6 +95,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{- define "bluemap-web.validate" -}}
+{{- $isRust := eq .Values.webserver.implementation "rust" -}}
 {{- $configMapName := .Values.storage.sql.driver.existingConfigMap.name -}}
 {{- $configMapKey := .Values.storage.sql.driver.existingConfigMap.key -}}
 {{- $downloadUrl := .Values.storage.sql.driver.download.url -}}
@@ -142,10 +147,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and .Values.phpFpm.enabled (eq .Values.storage.sql.databaseType "sqlite") -}}
 {{- fail "phpFpm does not support SQLite; BlueMap's sql.php supports MySQL/MariaDB and PostgreSQL" -}}
 {{- end -}}
-{{- if and (gt (int .Values.replicaCount) 1) (eq .Values.storage.type "sql") (eq .Values.storage.sql.databaseType "sqlite") -}}
+{{- if and (not $isRust) (gt (int .Values.replicaCount) 1) (eq .Values.storage.type "sql") (eq .Values.storage.sql.databaseType "sqlite") -}}
 {{- fail "Java replicaCount greater than 1 is not supported with SQLite; use one replica or an external SQL database" -}}
 {{- end -}}
-{{- if gt (int .Values.replicaCount) 1 -}}
+{{- if and (not $isRust) (gt (int .Values.replicaCount) 1) -}}
 {{- range .Values.extraVolumes -}}
 {{- if eq (default "" .name) "webroot" -}}
 {{- fail "extraVolumes must not use the reserved name webroot when replicaCount is greater than 1" -}}
@@ -154,6 +159,68 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- range .Values.extraVolumeMounts -}}
 {{- if eq (default "" .mountPath) "/data/web" -}}
 {{- fail "extraVolumeMounts must not use the reserved /data/web mountPath when replicaCount is greater than 1" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $isRust -}}
+{{- if .Values.phpFpm.enabled -}}
+{{- fail "phpFpm.enabled is Java-only and cannot be used with webserver.implementation=rust" -}}
+{{- end -}}
+{{- if and (ne .Values.storage.type "file") (ne .Values.storage.type "sql") -}}
+{{- fail "the Rust webserver supports only file or sql storage; custom storage is not supported" -}}
+{{- end -}}
+{{- if and (eq .Values.storage.type "sql") (ne .Values.storage.sql.databaseType "mariadb") (ne .Values.storage.sql.databaseType "postgresql") -}}
+{{- fail "the Rust webserver supports only MariaDB or PostgreSQL SQL storage; MySQL and SQLite are not supported" -}}
+{{- end -}}
+{{- if and (eq .Values.storage.type "sql") (empty .Values.storage.sql.credentials.existingSecret) -}}
+{{- fail "the Rust webserver requires storage.sql.credentials.existingSecret for SQL credentials" -}}
+{{- end -}}
+{{- if or .Values.storage.sql.credentials.username .Values.storage.sql.credentials.password -}}
+{{- fail "inline storage.sql.credentials username/password are Java-only and cannot be used with the Rust webserver" -}}
+{{- end -}}
+{{- if .Values.storage.sql.connectionUrl -}}
+{{- fail "storage.sql.connectionUrl is JDBC-only and cannot be used with the Rust webserver" -}}
+{{- end -}}
+{{- if .Values.storage.sql.properties -}}
+{{- fail "storage.sql.properties are JDBC-only and cannot be used with the Rust webserver" -}}
+{{- end -}}
+{{- if or .Values.storage.sql.driver.className .Values.storage.sql.driver.existingConfigMap.name .Values.storage.sql.driver.existingConfigMap.key .Values.storage.sql.driver.download.url .Values.storage.sql.driver.download.sha256 -}}
+{{- fail "storage.sql.driver settings are JDBC-only and cannot be used with the Rust webserver" -}}
+{{- end -}}
+{{- if and (eq .Values.storage.type "sql") .Values.persistence.enabled -}}
+{{- fail "persistence is unused for Rust SQL storage; mount database TLS Secrets or use extraVolumes instead" -}}
+{{- end -}}
+{{- if and (eq .Values.storage.type "file") (or .Values.webserver.rust.databaseTls.ca.existingSecret .Values.webserver.rust.databaseTls.clientCertificate.existingSecret) -}}
+{{- fail "webserver.rust.databaseTls is only valid with SQL storage" -}}
+{{- end -}}
+{{- if and (eq .Values.webserver.rust.databaseTls.mode "disable") (or .Values.webserver.rust.databaseTls.ca.existingSecret .Values.webserver.rust.databaseTls.clientCertificate.existingSecret) -}}
+{{- fail "webserver.rust.databaseTls.mode=disable cannot be combined with CA or client-certificate Secrets" -}}
+{{- end -}}
+{{- if or .Values.config.existingConfigMap .Values.config.items .Values.secretConfig.existingSecret .Values.secretConfig.items .Values.secretConfig.files -}}
+{{- fail "external Java config/secretConfig sources cannot be used with the Rust webserver; use webserver.rust values" -}}
+{{- end -}}
+{{- $seenMaps := dict -}}
+{{- range .Values.webserver.rust.maps -}}
+{{- if hasKey $seenMaps .id -}}
+{{- fail (printf "duplicate webserver.rust.maps id %q" .id) -}}
+{{- end -}}
+{{- $_ := set $seenMaps .id true -}}
+{{- end -}}
+{{- range .Values.extraEnv -}}
+{{- $name := default "" .name -}}
+{{- if has $name (list "BLUEMAP_DATABASE_USERNAME" "BLUEMAP_DATABASE_PASSWORD" "BLUEMAP_SQL_USERNAME" "BLUEMAP_SQL_PASSWORD" "PGSSLROOTCERT" "PGSSLCERT" "PGSSLKEY" "PGOPTIONS" "PGAPPNAME") -}}
+{{- fail (printf "extraEnv variable %s is reserved or forbidden for the Rust webserver" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.extraVolumes -}}
+{{- if has (default "" .name) (list "rust-config" "data" "database-ca" "database-client") -}}
+{{- fail (printf "extraVolumes must not use Rust-reserved volume name %s" .name) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.extraVolumeMounts -}}
+{{- $mountPath := clean (default "" .mountPath) -}}
+{{- if or (eq $mountPath "/data") (hasPrefix "/data/" $mountPath) (eq $mountPath "/etc/bluemap-web") (hasPrefix "/etc/bluemap-web/" $mountPath) (eq $mountPath "/run/secrets/database-ca") (hasPrefix "/run/secrets/database-ca/" $mountPath) (eq $mountPath "/run/secrets/database-client") (hasPrefix "/run/secrets/database-client/" $mountPath) -}}
+{{- fail (printf "extraVolumeMounts must not use or shadow Rust-reserved mountPath %s" $mountPath) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

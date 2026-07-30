@@ -1,0 +1,10 @@
+webserver:
+  implementation: rust
+
+extraVolumes:
+  - name: shadow-maps
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: shadow-maps
+    mountPath: /data/maps

@@ -1,0 +1,38 @@
+webserver:
+  implementation: rust
+  rust:
+    maps:
+      - id: world
+        sorting: 0
+    databaseTls:
+      mode: verify-full
+      ca:
+        existingSecret: bluemap-database-ca
+        key: ca.crt
+      clientCertificate:
+        existingSecret: bluemap-database-client
+        certKey: tls.crt
+        keyKey: tls.key
+
+replicaCount: 3
+
+storage:
+  type: sql
+  sql:
+    databaseType: mariadb
+    host: mariadb.database.svc
+    port: 3306
+    database: bluemap
+    maxConnections: 10
+    connectTimeoutSeconds: 10
+    credentials:
+      existingSecret: bluemap-database
+      usernameKey: username
+      passwordKey: password
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

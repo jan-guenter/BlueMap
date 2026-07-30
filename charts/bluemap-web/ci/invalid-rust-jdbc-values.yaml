@@ -1,0 +1,15 @@
+webserver:
+  implementation: rust
+
+storage:
+  type: sql
+  sql:
+    databaseType: mariadb
+    host: mariadb.database.svc
+    credentials:
+      existingSecret: bluemap-database
+    driver:
+      className: org.mariadb.jdbc.Driver
+      download:
+        url: https://example.com/mariadb-java-client.jar
+        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

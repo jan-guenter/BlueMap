@@ -1,0 +1,155 @@
+{{- if eq .Values.webserver.implementation "rust" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bluemap-web.fullname" . }}
+  labels:
+    {{- include "bluemap-web.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- if .Values.strategy }}
+    {{- toYaml .Values.strategy | nindent 4 }}
+    {{- else if and (gt (int .Values.replicaCount) 1) (not (and .Values.persistence.enabled (or (has "ReadWriteOnce" .Values.persistence.accessModes) (has "ReadWriteOncePod" .Values.persistence.accessModes)))) }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- else }}
+    type: Recreate
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "bluemap-web.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/rust-config: {{ include (print $.Template.BasePath "/rust-configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "bluemap-web.webSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "bluemap-web.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ add (int .Values.webserver.rust.config.shutdownGraceSeconds) 5 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bluemap-web
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.webserver.rust.image.repository }}:{{ .Values.webserver.rust.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.webserver.rust.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8100
+              protocol: TCP
+          {{- if or (eq .Values.storage.type "sql") .Values.extraEnv }}
+          env:
+            {{- if eq .Values.storage.type "sql" }}
+            - name: BLUEMAP_DATABASE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.sql.credentials.existingSecret | quote }}
+                  key: {{ .Values.storage.sql.credentials.usernameKey | quote }}
+            - name: BLUEMAP_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.sql.credentials.existingSecret | quote }}
+                  key: {{ .Values.storage.sql.credentials.passwordKey | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: rust-config
+              mountPath: /etc/bluemap-web
+              readOnly: true
+            {{- if eq .Values.storage.type "file" }}
+            - name: data
+              mountPath: /data
+              readOnly: true
+            {{- end }}
+            {{- if .Values.webserver.rust.databaseTls.ca.existingSecret }}
+            - name: database-ca
+              mountPath: /run/secrets/database-ca
+              readOnly: true
+            {{- end }}
+            {{- if .Values.webserver.rust.databaseTls.clientCertificate.existingSecret }}
+            - name: database-client
+              mountPath: /run/secrets/database-client
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: rust-config
+          configMap:
+            name: {{ include "bluemap-web.rustConfigName" . }}
+            items:
+              - key: config.toml
+                path: config.toml
+        {{- if eq .Values.storage.type "file" }}
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "bluemap-web.fullname" .) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- if .Values.webserver.rust.databaseTls.ca.existingSecret }}
+        - name: database-ca
+          secret:
+            secretName: {{ .Values.webserver.rust.databaseTls.ca.existingSecret | quote }}
+            items:
+              - key: {{ .Values.webserver.rust.databaseTls.ca.key | quote }}
+                path: ca.crt
+        {{- end }}
+        {{- if .Values.webserver.rust.databaseTls.clientCertificate.existingSecret }}
+        - name: database-client
+          secret:
+            secretName: {{ .Values.webserver.rust.databaseTls.clientCertificate.existingSecret | quote }}
+            items:
+              - key: {{ .Values.webserver.rust.databaseTls.clientCertificate.certKey | quote }}
+                path: tls.crt
+              - key: {{ .Values.webserver.rust.databaseTls.clientCertificate.keyKey | quote }}
+                path: tls.key
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

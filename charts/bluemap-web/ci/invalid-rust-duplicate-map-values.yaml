@@ -1,0 +1,8 @@
+webserver:
+  implementation: rust
+  rust:
+    maps:
+      - id: world
+        sorting: 0
+      - id: world
+        sorting: 1

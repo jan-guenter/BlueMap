@@ -1,0 +1,8 @@
+webserver:
+  implementation: rust
+
+config:
+  existingConfigMap: java-only-config
+  items:
+    - key: core.conf
+      path: core.conf

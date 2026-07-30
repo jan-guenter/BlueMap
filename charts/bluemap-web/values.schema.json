@@ -17,6 +17,97 @@
     "image": {
       "$ref": "#/definitions/image"
     },
+    "webserver": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "implementation": {
+          "enum": ["java", "rust"]
+        },
+        "rust": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "config": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "shutdownGraceSeconds": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "dependencyCheckSeconds": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "storageTimeoutSeconds": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "maxInFlightRequests": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "tileCacheMaxAgeSeconds": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "webapp": {
+                  "$ref": "#/definitions/rustWebapp"
+                }
+              },
+              "required": [
+                "shutdownGraceSeconds",
+                "dependencyCheckSeconds",
+                "storageTimeoutSeconds",
+                "maxInFlightRequests",
+                "tileCacheMaxAgeSeconds",
+                "webapp"
+              ]
+            },
+            "maps": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_]+$"
+                  },
+                  "sorting": {
+                    "type": "integer"
+                  }
+                },
+                "required": ["id", "sorting"]
+              }
+            },
+            "databaseTls": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "enum": ["disable", "required", "verify-ca", "verify-full"]
+                },
+                "ca": {
+                  "$ref": "#/definitions/rustTlsCa"
+                },
+                "clientCertificate": {
+                  "$ref": "#/definitions/rustTlsClient"
+                }
+              },
+              "required": ["mode", "ca", "clientCertificate"]
+            }
+          },
+          "required": ["image", "config", "maps", "databaseTls"]
+        }
+      },
+      "required": ["implementation", "rust"]
+    },
     "service": {
       "$ref": "#/definitions/service"
     },
@@ -66,7 +157,12 @@
               "type": "string"
             },
             "maxConnections": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 1
+            },
+            "connectTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
             },
             "properties": {
               "type": "object",
@@ -145,6 +241,7 @@
             "database",
             "connectionUrl",
             "maxConnections",
+            "connectTimeoutSeconds",
             "properties",
             "credentials",
             "driver"
@@ -216,6 +313,7 @@
     "terminationGracePeriodSeconds",
     "shutdownGracePeriodSeconds",
     "image",
+    "webserver",
     "service",
     "storage",
     "config",
@@ -253,6 +351,116 @@
         }
       },
       "required": ["port", "type"]
+    },
+    "rustWebapp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "useCookies": {
+          "type": "boolean"
+        },
+        "defaultToFlatView": {
+          "type": "boolean"
+        },
+        "startLocation": {
+          "type": "string"
+        },
+        "resolutionDefault": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minZoomDistance": {
+          "type": "integer"
+        },
+        "maxZoomDistance": {
+          "type": "integer"
+        },
+        "hiresSliderMax": {
+          "type": "integer"
+        },
+        "hiresSliderDefault": {
+          "type": "integer"
+        },
+        "hiresSliderMin": {
+          "type": "integer"
+        },
+        "lowresSliderMax": {
+          "type": "integer"
+        },
+        "lowresSliderDefault": {
+          "type": "integer"
+        },
+        "lowresSliderMin": {
+          "type": "integer"
+        },
+        "mapDataRoot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "liveDataRoot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scripts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "styles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "useCookies",
+        "defaultToFlatView",
+        "startLocation",
+        "resolutionDefault",
+        "minZoomDistance",
+        "maxZoomDistance",
+        "hiresSliderMax",
+        "hiresSliderDefault",
+        "hiresSliderMin",
+        "lowresSliderMax",
+        "lowresSliderDefault",
+        "lowresSliderMin",
+        "mapDataRoot",
+        "liveDataRoot",
+        "scripts",
+        "styles"
+      ]
+    },
+    "rustTlsCa": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/definitions/secretKey"
+        }
+      },
+      "required": ["existingSecret", "key"]
+    },
+    "rustTlsClient": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "certKey": {
+          "$ref": "#/definitions/secretKey"
+        },
+        "keyKey": {
+          "$ref": "#/definitions/secretKey"
+        }
+      },
+      "required": ["existingSecret", "certKey", "keyKey"]
     },
     "secretKey": {
       "type": "string",

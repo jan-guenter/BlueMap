@@ -1,0 +1,13 @@
+webserver:
+  implementation: rust
+
+storage:
+  type: sql
+  sql:
+    databaseType: mariadb
+    host: mariadb.database.svc
+    credentials:
+      existingSecret: bluemap-database
+
+phpFpm:
+  enabled: true

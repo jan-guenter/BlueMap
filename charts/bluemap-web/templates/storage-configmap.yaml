@@ -1,3 +1,4 @@
+{{- if eq .Values.webserver.implementation "java" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -37,3 +38,4 @@ data:
     {{- end }}
     compression: {{ .Values.storage.compression }}
     {{- end }}
+{{- end }}

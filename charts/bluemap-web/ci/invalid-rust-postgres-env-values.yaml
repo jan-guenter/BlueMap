@@ -1,0 +1,15 @@
+webserver:
+  implementation: rust
+
+storage:
+  type: sql
+  sql:
+    databaseType: postgresql
+    host: postgresql.database.svc
+    port: 5432
+    credentials:
+      existingSecret: bluemap-database
+
+extraEnv:
+  - name: PGOPTIONS
+    value: "-c search_path=other"

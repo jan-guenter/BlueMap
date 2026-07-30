@@ -1,0 +1,31 @@
+webserver:
+  implementation: rust
+  rust:
+    config:
+      tileCacheMaxAgeSeconds: 60
+    maps:
+      - id: world
+        sorting: 0
+      - id: nether
+        sorting: 100
+
+replicaCount: 2
+
+storage:
+  type: file
+  compression: gzip
+  file:
+    root: /data/maps
+
+persistence:
+  enabled: true
+  existingClaim: bluemap-maps-rwx
+  accessModes:
+    - ReadWriteMany
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

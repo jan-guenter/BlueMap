@@ -1,0 +1,71 @@
+{{- if eq .Values.webserver.implementation "rust" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bluemap-web.rustConfigName" . }}
+  labels:
+    {{- include "bluemap-web.labels" . | nindent 4 }}
+data:
+  config.toml: |
+    bind = "0.0.0.0:8100"
+    web_root = "/usr/share/bluemap-web"
+    shutdown_grace_seconds = {{ .Values.webserver.rust.config.shutdownGraceSeconds }}
+    dependency_check_seconds = {{ .Values.webserver.rust.config.dependencyCheckSeconds }}
+    storage_timeout_seconds = {{ .Values.webserver.rust.config.storageTimeoutSeconds }}
+    max_in_flight_requests = {{ .Values.webserver.rust.config.maxInFlightRequests }}
+    tile_cache_max_age_seconds = {{ .Values.webserver.rust.config.tileCacheMaxAgeSeconds }}
+
+    [webapp]
+    use_cookies = {{ .Values.webserver.rust.config.webapp.useCookies }}
+    default_to_flat_view = {{ .Values.webserver.rust.config.webapp.defaultToFlatView }}
+{{ if .Values.webserver.rust.config.webapp.startLocation }}
+    start_location = {{ .Values.webserver.rust.config.webapp.startLocation | quote }}
+{{ end }}
+    resolution_default = {{ printf "%.6f" (float64 .Values.webserver.rust.config.webapp.resolutionDefault) }}
+    min_zoom_distance = {{ .Values.webserver.rust.config.webapp.minZoomDistance }}
+    max_zoom_distance = {{ .Values.webserver.rust.config.webapp.maxZoomDistance }}
+    hires_slider_max = {{ .Values.webserver.rust.config.webapp.hiresSliderMax }}
+    hires_slider_default = {{ .Values.webserver.rust.config.webapp.hiresSliderDefault }}
+    hires_slider_min = {{ .Values.webserver.rust.config.webapp.hiresSliderMin }}
+    lowres_slider_max = {{ .Values.webserver.rust.config.webapp.lowresSliderMax }}
+    lowres_slider_default = {{ .Values.webserver.rust.config.webapp.lowresSliderDefault }}
+    lowres_slider_min = {{ .Values.webserver.rust.config.webapp.lowresSliderMin }}
+    map_data_root = {{ .Values.webserver.rust.config.webapp.mapDataRoot | quote }}
+    live_data_root = {{ .Values.webserver.rust.config.webapp.liveDataRoot | quote }}
+    scripts = {{ .Values.webserver.rust.config.webapp.scripts | toJson }}
+    styles = {{ .Values.webserver.rust.config.webapp.styles | toJson }}
+{{ range .Values.webserver.rust.maps }}
+
+    [[maps]]
+    id = {{ .id | quote }}
+    sorting = {{ .sorting }}
+{{ end }}
+{{ if eq .Values.storage.type "file" }}
+
+    [storage]
+    type = "file"
+    root = {{ .Values.storage.file.root | quote }}
+    compression = {{ .Values.storage.compression | quote }}
+{{ else }}
+
+    [storage]
+    type = {{ .Values.storage.sql.databaseType | quote }}
+    host = {{ .Values.storage.sql.host | quote }}
+    port = {{ .Values.storage.sql.port }}
+    database = {{ .Values.storage.sql.database | quote }}
+    username_env = "BLUEMAP_DATABASE_USERNAME"
+    password_env = "BLUEMAP_DATABASE_PASSWORD"
+    max_connections = {{ .Values.storage.sql.maxConnections }}
+    connect_timeout_seconds = {{ .Values.storage.sql.connectTimeoutSeconds }}
+
+    [storage.tls]
+    mode = {{ .Values.webserver.rust.databaseTls.mode | quote }}
+{{ if .Values.webserver.rust.databaseTls.ca.existingSecret }}
+    ca = "/run/secrets/database-ca/ca.crt"
+{{ end }}
+{{ if .Values.webserver.rust.databaseTls.clientCertificate.existingSecret }}
+    client_cert = "/run/secrets/database-client/tls.crt"
+    client_key = "/run/secrets/database-client/tls.key"
+{{ end }}
+{{ end }}
+{{- end }}

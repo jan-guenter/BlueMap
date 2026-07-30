@@ -1,0 +1,10 @@
+webserver:
+  implementation: rust
+
+storage:
+  type: sql
+  sql:
+    databaseType: mysql
+    host: mysql.database.svc
+    credentials:
+      existingSecret: bluemap-database

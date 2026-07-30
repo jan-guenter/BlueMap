@@ -7,6 +7,51 @@ image:
   pullPolicy: IfNotPresent
   tag: ""
 
+webserver:
+  # The existing Java webserver remains the default. Set this to rust to use
+  # the experimental read-only Rust storage server.
+  implementation: java
+  rust:
+    image:
+      repository: ghcr.io/bluemap-minecraft/bluemap-web-rust
+      pullPolicy: IfNotPresent
+      tag: ""
+    config:
+      shutdownGraceSeconds: 30
+      dependencyCheckSeconds: 5
+      storageTimeoutSeconds: 30
+      maxInFlightRequests: 32
+      tileCacheMaxAgeSeconds: 60
+      webapp:
+        useCookies: true
+        defaultToFlatView: false
+        startLocation: ""
+        resolutionDefault: 1.0
+        minZoomDistance: 5
+        maxZoomDistance: 100000
+        hiresSliderMax: 500
+        hiresSliderDefault: 100
+        hiresSliderMin: 0
+        lowresSliderMax: 7000
+        lowresSliderDefault: 2000
+        lowresSliderMin: 500
+        mapDataRoot: maps
+        liveDataRoot: maps
+        scripts: []
+        styles: []
+    maps:
+      - id: world
+        sorting: 0
+    databaseTls:
+      mode: verify-full
+      ca:
+        existingSecret: ""
+        key: ca.crt
+      clientCertificate:
+        existingSecret: ""
+        certKey: tls.crt
+        keyKey: tls.key
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -69,6 +114,7 @@ storage:
     database: bluemap
     connectionUrl: ""
     maxConnections: 10
+    connectTimeoutSeconds: 10
     properties: {}
     credentials:
       existingSecret: ""

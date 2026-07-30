@@ -1,0 +1,16 @@
+webserver:
+  implementation: rust
+  rust:
+    databaseTls:
+      mode: disable
+      ca:
+        existingSecret: bluemap-database-ca
+        key: ca.crt
+
+storage:
+  type: sql
+  sql:
+    databaseType: mariadb
+    host: mariadb.database.svc
+    credentials:
+      existingSecret: bluemap-database

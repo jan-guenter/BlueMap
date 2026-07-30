@@ -1,0 +1,11 @@
+webserver:
+  implementation: rust
+
+storage:
+  type: sql
+  sql:
+    databaseType: mariadb
+    host: mariadb.database.svc
+    connectionUrl: jdbc:mariadb://mariadb.database.svc/bluemap
+    credentials:
+      existingSecret: bluemap-database

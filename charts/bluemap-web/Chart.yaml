@@ -1,6 +1,6 @@
 apiVersion: v2
 name: bluemap-web
-description: Standalone BlueMap web UI with optional scalable SQL data service
+description: Standalone BlueMap web UI with Java or experimental Rust server
 type: application
 version: 0.1.0
 appVersion: "dev"

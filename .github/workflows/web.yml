@@ -54,6 +54,10 @@ jobs:
     name: Build and publish image
     runs-on: ubuntu-latest
     needs: build
+    outputs:
+      tags: ${{ steps.metadata.outputs.tags }}
+    env:
+      DOCKER_METADATA_SHORT_SHA_LENGTH: 7
     permissions:
       contents: read
       packages: write
@@ -63,6 +67,10 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+      - name: Normalize registry owner
+        id: registry
+        shell: bash
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_OUTPUT}"
       - name: Download web server
         uses: actions/download-artifact@v8
         with:
@@ -105,11 +113,11 @@ jobs:
         id: metadata
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository_owner }}/bluemap-web
+          images: ghcr.io/${{ steps.registry.outputs.owner }}/bluemap-web
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=sha
+            type=sha,format=short,prefix=sha-
             type=ref,event=tag,enable=${{ steps.release.outputs.is-stable == 'true' }}
             type=raw,value=latest,enable=${{ steps.release.outputs.is-latest == 'true' }}
           labels: |
@@ -136,6 +144,10 @@ jobs:
   php-image:
     name: Build and publish PHP-FPM image
     runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.metadata.outputs.tags }}
+    env:
+      DOCKER_METADATA_SHORT_SHA_LENGTH: 7
     permissions:
       contents: read
       packages: write
@@ -144,6 +156,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Normalize registry owner
+        id: registry
+        shell: bash
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_OUTPUT}"
       - name: Check whether this is the latest release
         id: release
         shell: bash
@@ -181,11 +197,11 @@ jobs:
         id: metadata
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository_owner }}/bluemap-web-php
+          images: ghcr.io/${{ steps.registry.outputs.owner }}/bluemap-web-php
           tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=sha
+            type=sha,format=short,prefix=sha-
             type=ref,event=tag,enable=${{ steps.release.outputs.is-stable == 'true' }}
             type=raw,value=latest,enable=${{ steps.release.outputs.is-latest == 'true' }}
           labels: |
@@ -209,9 +225,99 @@ jobs:
           provenance: mode=max
           sbom: true
 
+  rust-image:
+    name: Test, build, and publish Rust image
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.metadata.outputs.tags }}
+    env:
+      DOCKER_METADATA_SHORT_SHA_LENGTH: 7
+      DOCKER_BUILDKIT: 1
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Normalize registry owner
+        id: registry
+        shell: bash
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_OUTPUT}"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Run mandatory Rust image smoke test
+        run: docker/rust-web/smoke-test.sh
+      - name: Check whether this is the latest release
+        id: release
+        shell: bash
+        run: |
+          is_stable=false
+          is_latest=false
+          current_tag="${GITHUB_REF#refs/tags/}"
+
+          if [[ "${GITHUB_REF}" == refs/tags/* ]] &&
+             [[ "${current_tag}" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            is_stable=true
+            latest_tag="$(
+              git tag --list |
+                grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' |
+                sort -V |
+                tail -n 1
+            )"
+            [[ "${current_tag}" == "${latest_tag}" ]] && is_latest=true
+          fi
+
+          echo "is-stable=${is_stable}" >> "${GITHUB_OUTPUT}"
+          echo "is-latest=${is_latest}" >> "${GITHUB_OUTPUT}"
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ steps.registry.outputs.owner }}/bluemap-web-rust
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short,prefix=sha-
+            type=ref,event=tag,enable=${{ steps.release.outputs.is-stable == 'true' }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.is-latest == 'true' }}
+          labels: |
+            org.opencontainers.image.title=BlueMap Rust Web
+            org.opencontainers.image.description=Experimental read-only BlueMap web UI and storage server
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/rust-web/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            BLUEMAP_VERSION=${{ steps.metadata.outputs.version }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=bluemap-web-rust
+          cache-to: type=gha,mode=max,scope=bluemap-web-rust
+          provenance: mode=max
+          sbom: true
+
   chart:
     name: Validate and publish Helm chart
     runs-on: ubuntu-latest
+    needs:
+      - image
+      - php-image
+      - rust-image
     permissions:
       contents: read
       packages: write
@@ -228,13 +334,14 @@ jobs:
           MANUAL_PUBLISH: ${{ inputs.publish-chart }}
         run: |
           publish=false
-          app_version="${GITHUB_REF_NAME}"
+          app_version="sha-${GITHUB_SHA:0:7}"
           chart_version="0.1.0-dev.${GITHUB_RUN_NUMBER}"
 
           if [[ "${GITHUB_REF}" == refs/tags/v* ]] &&
              [[ "${GITHUB_REF_NAME}" =~ ^v([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
             patch="${BASH_REMATCH[4]:-0}"
             chart_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${patch}"
+            app_version="${GITHUB_REF_NAME}"
             publish=true
           elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             publish=true
@@ -253,6 +360,29 @@ jobs:
             echo "app-version=${app_version}"
             echo "publish=${publish}"
           } >> "${GITHUB_OUTPUT}"
+      - name: Verify chart appVersion image tags
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app-version }}
+          JAVA_TAGS: ${{ needs.image.outputs.tags }}
+          PHP_TAGS: ${{ needs.php-image.outputs.tags }}
+          RUST_TAGS: ${{ needs.rust-image.outputs.tags }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+
+          verify_tag() {
+            image="$1"
+            tags="$2"
+            expected="ghcr.io/${owner}/${image}:${APP_VERSION}"
+            if ! printf '%s\n' "${tags}" | grep -Fx "${expected}"; then
+              echo "::error::${image} metadata did not publish chart appVersion tag ${expected}"
+              exit 1
+            fi
+          }
+
+          verify_tag bluemap-web "${JAVA_TAGS}"
+          verify_tag bluemap-web-php "${PHP_TAGS}"
+          verify_tag bluemap-web-rust "${RUST_TAGS}"
       - name: Lint chart
         run: helm lint charts/bluemap-web
       - name: Render chart
@@ -278,12 +408,24 @@ jobs:
             echo "::error::reserved multi-replica webroot mount was accepted"
             exit 1
           fi
+      - name: Test Rust chart contract
+        run: charts/bluemap-web/ci/test-rust.sh
       - name: Package chart
         run: |
           helm package charts/bluemap-web \
             --destination build/charts \
             --version "${{ steps.version.outputs.chart-version }}" \
             --app-version "${{ steps.version.outputs.app-version }}"
+      - name: Verify packaged chart appVersion
+        shell: bash
+        run: |
+          package="build/charts/bluemap-web-${{ steps.version.outputs.chart-version }}.tgz"
+          actual="$(helm show chart "${package}" | awk '$1 == "appVersion:" {print $2}')"
+          expected="${{ steps.version.outputs.app-version }}"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "::error::packaged appVersion ${actual} does not match ${expected}"
+            exit 1
+          fi
       - name: Log in to GHCR
         if: steps.version.outputs.publish == 'true'
         shell: bash

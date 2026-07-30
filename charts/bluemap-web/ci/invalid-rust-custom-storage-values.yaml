@@ -1,0 +1,5 @@
+webserver:
+  implementation: rust
+
+storage:
+  type: custom

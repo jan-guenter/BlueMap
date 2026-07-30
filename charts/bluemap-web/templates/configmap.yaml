@@ -1,4 +1,4 @@
-{{- if not .Values.config.existingConfigMap }}
+{{- if and (eq .Values.webserver.implementation "java") (not .Values.config.existingConfigMap) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

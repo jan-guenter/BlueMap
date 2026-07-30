@@ -1,0 +1,8 @@
+webserver:
+  implementation: rust
+
+storage:
+  type: sql
+  sql:
+    databaseType: sqlite
+    database: /data/bluemap.db

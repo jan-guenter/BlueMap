@@ -1,0 +1,36 @@
+webserver:
+  implementation: rust
+  rust:
+    maps:
+      - id: world
+        sorting: 0
+      - id: nether
+        sorting: 100
+    databaseTls:
+      mode: verify-ca
+      ca:
+        existingSecret: bluemap-database-ca
+        key: ca.crt
+
+replicaCount: 3
+
+storage:
+  type: sql
+  sql:
+    databaseType: postgresql
+    host: postgresql.database.svc
+    port: 5432
+    database: bluemap
+    maxConnections: 10
+    connectTimeoutSeconds: 10
+    credentials:
+      existingSecret: bluemap-database
+      usernameKey: username
+      passwordKey: password
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
