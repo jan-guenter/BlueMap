@@ -29,9 +29,15 @@ import lombok.Setter;
 
 import java.io.IOException;
 import java.nio.channels.SocketChannel;
+import java.time.Duration;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class HttpServer extends Server {
 
@@ -41,6 +47,9 @@ public class HttpServer extends Server {
     private final boolean ownsExecutor;
     private final HttpServerSettings settings;
     private final Semaphore activeConnections;
+    private final Set<HttpConnection> httpConnections =
+            ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean stopping = new AtomicBoolean();
 
     public HttpServer(
             String name,
@@ -80,7 +89,20 @@ public class HttpServer extends Server {
 
     @Override
     public void handleConnection(SocketChannel connection) throws IOException {
+        if (stopping.get()) {
+            connection.close();
+            return;
+        }
+
+        trackConnection(connection);
         if (!activeConnections.tryAcquire()) {
+            untrackConnection(connection);
+            connection.close();
+            return;
+        }
+        if (stopping.get()) {
+            untrackConnection(connection);
+            activeConnections.release();
             connection.close();
             return;
         }
@@ -89,14 +111,24 @@ public class HttpServer extends Server {
             connection.socket().setSoTimeout((int) settings.idleTimeout().toMillis());
             HttpConnection httpConnection =
                     new HttpConnection(connection.socket(), requestHandler, settings.requestLimits());
-            executor.execute(() -> {
-                try {
-                    httpConnection.run();
-                } finally {
-                    activeConnections.release();
-                }
-            });
+            httpConnections.add(httpConnection);
+            if (stopping.get()) httpConnection.beginDrain();
+            try {
+                executor.execute(() -> {
+                    try {
+                        httpConnection.run();
+                    } finally {
+                        httpConnections.remove(httpConnection);
+                        untrackConnection(connection);
+                        activeConnections.release();
+                    }
+                });
+            } catch (RuntimeException ex) {
+                httpConnections.remove(httpConnection);
+                throw ex;
+            }
         } catch (IOException | RuntimeException ex) {
+            untrackConnection(connection);
             activeConnections.release();
             try {
                 connection.close();
@@ -116,8 +148,63 @@ public class HttpServer extends Server {
         return executor.isShutdown();
     }
 
+    /**
+     * Stops accepting new connections, lets current responses finish, and
+     * force-closes anything still active after the grace period.
+     *
+     * @return true when every connection drained within the grace period
+     */
+    public boolean closeGracefully(Duration gracePeriod) throws IOException {
+        Objects.requireNonNull(gracePeriod, "gracePeriod");
+        if (gracePeriod.isNegative()) {
+            throw new IllegalArgumentException("gracePeriod must not be negative");
+        }
+        stopping.set(true);
+
+        IOException exception = null;
+        try {
+            stopAccepting();
+        } catch (IOException ex) {
+            exception = ex;
+        }
+
+        httpConnections.forEach(HttpConnection::beginDrain);
+
+        boolean drained = false;
+        try {
+            drained = activeConnections.tryAcquire(
+                    settings.maxActiveConnections(),
+                    gracePeriod.toNanos(),
+                    TimeUnit.NANOSECONDS
+            );
+            if (drained) {
+                activeConnections.release(settings.maxActiveConnections());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        if (!drained) {
+            try {
+                closeActiveConnections();
+            } catch (IOException ex) {
+                if (exception == null) exception = ex;
+                else exception.addSuppressed(ex);
+            }
+        }
+
+        if (ownsExecutor) {
+            if (drained) executor.shutdown();
+            else executor.shutdownNow();
+        }
+
+        if (exception != null) throw exception;
+        return drained;
+    }
+
     @Override
     public void close() throws IOException {
+        stopping.set(true);
         try {
             super.close();
         } finally {

@@ -53,6 +53,17 @@ public interface GridStorage {
     @Nullable CompressedInputStream read(int x, int z) throws IOException;
 
     /**
+     * Returns metadata for the stored representation without reading its
+     * content, or null if the item is missing or this operation is unsupported.
+     *
+     * The default keeps custom storage implementations source-compatible. A
+     * caller must fall back to {@link #read(int, int)} when null is returned.
+     */
+    default @Nullable StoredDataMetadata readMetadata(int x, int z) throws IOException {
+        return null;
+    }
+
+    /**
      * Deletes the item from this storage at the given position
      */
     void delete(int x, int z) throws IOException;
@@ -107,6 +118,11 @@ public interface GridStorage {
         @Override
         public CompressedInputStream read() throws IOException {
             return storage.read(x, z);
+        }
+
+        @Override
+        public @Nullable StoredDataMetadata readMetadata() throws IOException {
+            return storage.readMetadata(x, z);
         }
 
         @Override

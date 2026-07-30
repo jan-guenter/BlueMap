@@ -37,6 +37,7 @@ import java.util.regex.Pattern;
 public class HttpRequestInputStream implements Closeable {
 
     private static final Pattern REQUEST_PATTERN = Pattern.compile("^(\\w+) (\\S+) (.+)$");
+    private static final int MAX_CHUNK_COUNT = 1024;
 
     private final InetAddress source;
     private final DataInputStream in;
@@ -163,9 +164,12 @@ public class HttpRequestInputStream implements Closeable {
 
     private byte[] readChunkedBody(HeaderBudget headerBudget) throws IOException {
         ByteArrayOutputStream body = new ByteArrayOutputStream(1024);
+        int chunkCount = 0;
 
         while (true) {
-            String prefix = readLine(limits.maxHeaderBytes(), "chunk prefix").value();
+            Line prefixLine = readLine(limits.maxHeaderBytes(), "chunk prefix");
+            headerBudget.add(prefixLine.bytes());
+            String prefix = prefixLine.value();
             int extensionSeparator = prefix.indexOf(';');
             String sizeText = (extensionSeparator < 0 ? prefix : prefix.substring(0, extensionSeparator)).trim();
             long parsedSize;
@@ -187,11 +191,15 @@ public class HttpRequestInputStream implements Closeable {
                 readHeaders(null, headerBudget);
                 break;
             }
+            if (++chunkCount > MAX_CHUNK_COUNT) {
+                throw new IOException("Invalid HTTP Request: too many chunks");
+            }
 
             if (size > byteBuffer.length) byteBuffer = new byte[size];
             in.readFully(byteBuffer, 0, size);
             body.write(byteBuffer, 0, size);
             readCrlf("chunk data");
+            headerBudget.add(2);
         }
 
         return body.toByteArray();

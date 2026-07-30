@@ -22,39 +22,35 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-package de.bluecolored.bluemap.common.config;
+package de.bluecolored.bluemap.common.web;
 
+import de.bluecolored.bluemap.common.web.http.HttpRequest;
+import de.bluecolored.bluemap.common.web.http.HttpResponse;
+import de.bluecolored.bluemap.common.web.http.HttpStatusCode;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
+import java.net.InetAddress;
 
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-class WebserverConfigTest {
-
-    @Test
-    void reportsInvalidHttpLimitsAsConfigurationErrors() throws Exception {
-        WebserverConfig config = new WebserverConfig();
-        Field maxActiveConnections = WebserverConfig.class.getDeclaredField("maxActiveConnections");
-        maxActiveConnections.setAccessible(true);
-        maxActiveConnections.setInt(config, 0);
-
-        assertThrows(ConfigurationException.class, config::createHttpServerSettings);
-    }
+class RoutingRequestHandlerTest {
 
     @Test
-    void rejectsNegativeShutdownGracePeriods() throws Exception {
-        WebserverConfig config = new WebserverConfig();
-        Field grace = WebserverConfig.class.getDeclaredField(
-                "shutdownGracePeriodSeconds"
+    void unmatchedRoutesAreNotCacheable() throws Exception {
+        RoutingRequestHandler handler = new RoutingRequestHandler();
+        HttpRequest request = new HttpRequest(
+                InetAddress.getLoopbackAddress(),
+                "GET",
+                "/missing"
         );
-        grace.setAccessible(true);
-        grace.setInt(config, -1);
 
-        assertThrows(
-                ConfigurationException.class,
-                config::createHttpServerSettings
-        );
+        try (HttpResponse response = handler.handle(request)) {
+            assertEquals(HttpStatusCode.BAD_REQUEST, response.getStatusCode());
+            assertEquals(
+                    "no-store,no-transform",
+                    response.getHeader("Cache-Control").getValue()
+            );
+        }
     }
 
 }

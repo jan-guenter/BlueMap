@@ -24,10 +24,21 @@
  */
 package de.bluecolored.bluemap.core.storage;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.io.IOException;
 import java.util.function.DoublePredicate;
 
 public interface MapStorage {
+
+    /**
+     * Tries to reserve capacity for one externally streamed read. A null return
+     * rejects the read without queueing. Storages without admission control use
+     * the default no-op permit.
+     */
+    default @Nullable ReadPermit tryAcquireReadPermit() {
+        return ReadPermit.NOOP;
+    }
 
     /**
      * Returns the {@link GridStorage} holding the maps hires-tiles
@@ -109,6 +120,16 @@ public interface MapStorage {
         return name
                 .replaceAll("[^\\w\\d.\\-_/]", "_")
                 .replace("..", "_.");
+    }
+
+    @FunctionalInterface
+    interface ReadPermit extends AutoCloseable {
+
+        ReadPermit NOOP = () -> {};
+
+        @Override
+        void close();
+
     }
 
 }

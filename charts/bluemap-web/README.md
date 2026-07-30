@@ -217,15 +217,27 @@ The default deployment strategy is `RollingUpdate` for multiple replicas, and
 storage replicas may share the map-data volume with a single BlueMap writer
 when atomic file writes remain enabled. SQLite is restricted to one Java
 replica. Size `storage.sql.maxConnections` as a per-pod limit, accounting for
-all Java replicas and the Minecraft writer. The PHP data tier is independently
-scalable through `phpFpm.replicaCount`.
+all Java replicas and the Minecraft writer. A positive value also caps
+in-flight SQL response bodies per Java replica; excess reads fail fast with
+`503 Service Unavailable` and `Retry-After: 1` instead of accumulating behind
+the connection pool. The PHP data tier is independently scalable through
+`phpFpm.replicaCount`.
 
 The default liveness probe is a TCP check. It verifies that the listener still
 exists without competing for one of the bounded HTTP connection slots.
 Readiness remains an HTTP request to `/health/ready`; a saturated replica can
 therefore be removed from Service traffic without Kubernetes restarting an
-otherwise healthy process. Connections accepted after
-`max-active-connections` is reached are closed immediately.
+otherwise healthy process. SQL readiness uses a cached background dependency
+probe, so the endpoint changes to `503` during a database outage without
+blocking on the JDBC pool and recovers after connectivity returns. The cached
+state also expires after ten seconds without any successful SQL operation, so
+a stalled JDBC call cannot leave readiness healthy indefinitely. Connections
+accepted after `max-active-connections` is reached are closed immediately.
+
+On termination, the Java server stops accepting traffic and marks readiness
+false, then drains active responses for `shutdownGracePeriodSeconds` (20
+seconds by default). The pod's `terminationGracePeriodSeconds` defaults to 30,
+leaving time to force-close a stalled response and finish process cleanup.
 
 ## Live data
 

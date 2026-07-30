@@ -97,6 +97,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- $checksum := .Values.storage.sql.driver.download.sha256 -}}
 {{- $storagePath := printf "storages/%s.conf" .Values.storage.id -}}
 {{- $driverEnabled := include "bluemap-web.sqlDriverEnabled" . -}}
+{{- if lt (int .Values.shutdownGracePeriodSeconds) 0 -}}
+{{- fail "shutdownGracePeriodSeconds must not be negative" -}}
+{{- end -}}
+{{- if le (int .Values.terminationGracePeriodSeconds) (int .Values.shutdownGracePeriodSeconds) -}}
+{{- fail "terminationGracePeriodSeconds must be greater than shutdownGracePeriodSeconds" -}}
+{{- end -}}
 {{- if and $configMapName $downloadUrl -}}
 {{- fail "storage.sql.driver.existingConfigMap and storage.sql.driver.download.url are mutually exclusive" -}}
 {{- end -}}

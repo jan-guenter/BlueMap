@@ -56,6 +56,10 @@ public class BlueMapResponseModifier implements HttpRequestHandler {
                 && !isProblemResponse(response)) {
             response.setBody(status.getCode() + " - " + status.getMessage() + "\n" + this.serverName);
         }
+        if (status.getCode() >= 400
+                && response.getHeader("Cache-Control") == null) {
+            response.addHeader("Cache-Control", "no-store,no-transform");
+        }
         if (request.getMethod().equalsIgnoreCase("HEAD")) response.setBodySuppressed(true);
 
         response.addHeader("Server", this.serverName);

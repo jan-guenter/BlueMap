@@ -47,6 +47,17 @@ public interface ItemStorage {
     @Nullable CompressedInputStream read() throws IOException;
 
     /**
+     * Returns metadata for the stored representation without reading its
+     * content, or null if the item is missing or this operation is unsupported.
+     *
+     * The default keeps custom storage implementations source-compatible. A
+     * caller must fall back to {@link #read()} when null is returned.
+     */
+    default @Nullable StoredDataMetadata readMetadata() throws IOException {
+        return null;
+    }
+
+    /**
      * Deletes the item from this storage
      */
     void delete() throws IOException;

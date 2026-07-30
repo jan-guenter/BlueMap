@@ -38,17 +38,39 @@ import java.util.function.Supplier;
 public class JsonDataRequestHandler implements HttpRequestHandler {
 
     private @NonNull Supplier<String> dataSupplier;
+    private @NonNull String cacheControl;
 
     public JsonDataRequestHandler(Supplier<String> dataSupplier) {
+        this(dataSupplier, "public,no-cache,no-transform");
+    }
+
+    public JsonDataRequestHandler(
+            Supplier<String> dataSupplier,
+            String cacheControl
+    ) {
         this.dataSupplier = dataSupplier;
+        this.cacheControl = cacheControl;
     }
 
     @Override
     public HttpResponse handle(HttpRequest request) {
+        boolean head = request.getMethod().equalsIgnoreCase("HEAD");
+        if (!head && !request.getMethod().equalsIgnoreCase("GET")) {
+            HttpResponse response =
+                    new HttpResponse(HttpStatusCode.METHOD_NOT_ALLOWED);
+            response.addHeader("Allow", "GET, HEAD");
+            response.addHeader("Cache-Control", "no-store,no-transform");
+            return response;
+        }
+
         HttpResponse response = new HttpResponse(HttpStatusCode.OK);
-        response.addHeader("Cache-Control", "no-cache");
+        response.addHeader("Cache-Control", cacheControl);
         response.addHeader("Content-Type", "application/json");
-        response.setBody(dataSupplier.get());
+        if (head) {
+            response.setBodySuppressed(true);
+        } else {
+            response.setBody(dataSupplier.get());
+        }
         return response;
     }
 

@@ -18,7 +18,7 @@ class HttpError extends Error {
             message =
                 `This BlueMap server stores map data with '${requiredEncoding}' encoding, ` +
                 "but this browser did not advertise support for it. " +
-                "Ask the server administrator to choose a browser-supported BlueMap SQL compression.";
+                "Ask the server administrator to choose a browser-supported map-data encoding.";
         }
         super(message);
         this.name = "HttpError";
@@ -32,14 +32,16 @@ class HttpError extends Error {
     }
 }
 
+export function isRequiredEncodingError(error) {
+    return error?.code === "bluemap_required_content_encoding";
+}
+
 export function showRequiredEncodingError(error) {
-    if (error?.code !== "bluemap_required_content_encoding") return false;
+    if (!isRequiredEncodingError(error)) return false;
 
     const key = error.requiredEncoding || error.message;
-    if (!shownRequiredEncodings.has(key)) {
-        shownRequiredEncodings.add(key);
-        globalThis.alert(error.message);
-    }
+    if (shownRequiredEncodings.has(key)) return false;
+    shownRequiredEncodings.add(key);
     return true;
 }
 

@@ -51,6 +51,7 @@ import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -71,6 +72,7 @@ public final class BlueMapWebServer implements Closeable {
     private final Logger webLogger;
     private final Path webRoot;
     private final AtomicBoolean started;
+    private final Duration shutdownGracePeriod;
 
     private BlueMapWebServer(
             BlueMapService blueMap,
@@ -78,7 +80,8 @@ public final class BlueMapWebServer implements Closeable {
             ExecutorService connectionExecutor,
             Logger webLogger,
             Path webRoot,
-            AtomicBoolean started
+            AtomicBoolean started,
+            Duration shutdownGracePeriod
     ) {
         this.blueMap = blueMap;
         this.webServer = webServer;
@@ -86,6 +89,7 @@ public final class BlueMapWebServer implements Closeable {
         this.webLogger = webLogger;
         this.webRoot = webRoot;
         this.started = started;
+        this.shutdownGracePeriod = shutdownGracePeriod;
     }
 
     public static BlueMapWebServer create(Path configFolder, boolean verbose)
@@ -185,7 +189,10 @@ public final class BlueMapWebServer implements Closeable {
                     connectionExecutor,
                     webLogger,
                     webRoot,
-                    started
+                    started,
+                    Duration.ofSeconds(
+                            config.getShutdownGracePeriodSeconds()
+                    )
             );
         } catch (IOException | ConfigurationException | InterruptedException | RuntimeException ex) {
             closeAfterFailedCreate(blueMap, connectionExecutor, webLogger, ex);
@@ -209,7 +216,7 @@ public final class BlueMapWebServer implements Closeable {
                 healthy ? HttpStatusCode.OK : HttpStatusCode.SERVICE_UNAVAILABLE
         );
         response.addHeader("Content-Type", "text/plain; charset=utf-8");
-        response.addHeader("Cache-Control", "no-store");
+        response.addHeader("Cache-Control", "no-store,no-transform");
         response.setBody(healthy ? "ok\n" : "not ready\n");
         return response;
     }
@@ -218,7 +225,8 @@ public final class BlueMapWebServer implements Closeable {
         return started.get()
                 && Files.isRegularFile(webRoot.resolve("index.html"))
                 && Files.isRegularFile(webRoot.resolve("settings.json"))
-                && blueMap.getLoadedStorages().values().stream().noneMatch(storage -> storage.isClosed());
+                && blueMap.getLoadedStorages().values().stream()
+                .allMatch(storage -> storage.isHealthy());
     }
 
     boolean isReady() {
@@ -263,14 +271,16 @@ public final class BlueMapWebServer implements Closeable {
     public void close() throws IOException {
         IOException exception = null;
         started.set(false);
+        boolean drained = false;
 
         try {
-            webServer.close();
+            drained = webServer.closeGracefully(shutdownGracePeriod);
         } catch (IOException ex) {
             exception = ex;
         }
 
-        connectionExecutor.shutdownNow();
+        connectionExecutor.shutdown();
+        if (!drained) connectionExecutor.shutdownNow();
 
         try {
             blueMap.close();

@@ -32,6 +32,7 @@ import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.storage.sql.commandset.CommandSet;
 import de.bluecolored.bluemap.core.util.Caches;
 import de.bluecolored.bluemap.core.util.Key;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.util.function.DoublePredicate;
@@ -49,6 +50,12 @@ public class SQLMapStorage extends KeyedMapStorage {
 
         this.mapId = mapId;
         this.sql = sql;
+    }
+
+    @Override
+    public @Nullable ReadPermit tryAcquireReadPermit() {
+        CommandSet.ReadPermit permit = sql.tryAcquireReadPermit();
+        return permit == null ? null : permit::close;
     }
 
     @Override

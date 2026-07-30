@@ -71,6 +71,38 @@ class BlueMapResponseModifierTest {
         }
     }
 
+    @Test
+    void makesErrorsNonCacheableWithoutOverridingExplicitPolicies()
+            throws Exception {
+        BlueMapResponseModifier defaultPolicy =
+                new BlueMapResponseModifier(
+                        _ -> new HttpResponse(HttpStatusCode.NOT_FOUND)
+                );
+        try (HttpResponse response = defaultPolicy.handle(request("GET"))) {
+            assertEquals(
+                    "no-store,no-transform",
+                    response.getHeader("Cache-Control").getValue()
+            );
+        }
+
+        BlueMapResponseModifier explicitPolicy =
+                new BlueMapResponseModifier(_ -> {
+                    HttpResponse response =
+                            new HttpResponse(HttpStatusCode.NOT_ACCEPTABLE);
+                    response.addHeader(
+                            "Cache-Control",
+                            "private,no-store,no-transform"
+                    );
+                    return response;
+                });
+        try (HttpResponse response = explicitPolicy.handle(request("GET"))) {
+            assertEquals(
+                    "private,no-store,no-transform",
+                    response.getHeader("Cache-Control").getValue()
+            );
+        }
+    }
+
     private static HttpRequest request(String method) throws Exception {
         return new HttpRequest(InetAddress.getLoopbackAddress(), method, "/");
     }

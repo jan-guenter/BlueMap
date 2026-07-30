@@ -51,6 +51,7 @@ public class WebserverConfig {
 
     private int maxActiveConnections = 256;
     private int connectionIdleTimeoutSeconds = 60;
+    private int shutdownGracePeriodSeconds = 20;
     private int maxRequestLineBytes = 8 * 1024;
     private int maxHeaderCount = 100;
     private int maxHeaderBytes = 32 * 1024;
@@ -70,6 +71,11 @@ public class WebserverConfig {
 
     public HttpServerSettings createHttpServerSettings() throws ConfigurationException {
         try {
+            if (shutdownGracePeriodSeconds < 0) {
+                throw new IllegalArgumentException(
+                        "shutdownGracePeriodSeconds must not be negative"
+                );
+            }
             return new HttpServerSettings(
                     maxActiveConnections,
                     Duration.ofSeconds(connectionIdleTimeoutSeconds),

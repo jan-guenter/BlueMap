@@ -75,6 +75,11 @@ public class SQLStorage implements Storage {
     }
 
     @Override
+    public boolean isHealthy() {
+        return sql.isHealthy();
+    }
+
+    @Override
     public void close() throws IOException {
         sql.close();
     }

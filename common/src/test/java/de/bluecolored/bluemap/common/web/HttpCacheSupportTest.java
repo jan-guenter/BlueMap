@@ -94,6 +94,22 @@ class HttpCacheSupportTest {
     }
 
     @Test
+    void parsesWeakEntityTagListsWithoutSplittingQuotedCommas() throws Exception {
+        CacheMetadata metadata = new CacheMetadata(null, 1);
+
+        HttpRequest request = request();
+        request.addHeader("If-None-Match", "\"different\", W/\"tag,with,commas\"");
+        assertTrue(HttpCacheSupport.isNotModified(
+                request, "\"tag,with,commas\"", metadata
+        ));
+
+        request.addHeader("If-None-Match", "\"different\", malformed");
+        assertFalse(HttpCacheSupport.isNotModified(
+                request, "\"tag,with,commas\"", metadata
+        ));
+    }
+
+    @Test
     void fallsBackToSecondPrecisionLastModified() throws Exception {
         CacheMetadata metadata = new CacheMetadata(new byte[] {1}, 1_700_000_000_999L);
         HttpRequest request = request();

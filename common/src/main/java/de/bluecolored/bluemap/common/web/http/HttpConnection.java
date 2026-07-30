@@ -40,6 +40,9 @@ public class HttpConnection implements Runnable {
     private final HttpRequestInputStream requestIn;
     private final HttpResponseOutputStream responseOut;
     private final HttpRequestHandler requestHandler;
+    private final Object stateLock = new Object();
+    private boolean processingRequest;
+    private volatile boolean draining;
 
     public HttpConnection(Socket socket, HttpRequestHandler requestHandler) throws IOException {
         this(socket, requestHandler, HttpRequestLimits.DEFAULT);
@@ -63,12 +66,23 @@ public class HttpConnection implements Runnable {
                 HttpRequest request = requestIn.read();
                 if (request == null) continue;
 
-                try (HttpResponse response = requestHandler.handle(request)) {
-                    if (request.getMethod().equalsIgnoreCase("HEAD")) {
-                        response.setBodySuppressed(true);
-                    }
-                    responseOut.write(response);
+                synchronized (stateLock) {
+                    if (draining) break;
+                    processingRequest = true;
                 }
+                try {
+                    try (HttpResponse response = requestHandler.handle(request)) {
+                        if (request.getMethod().equalsIgnoreCase("HEAD")) {
+                            response.setBodySuppressed(true);
+                        }
+                        responseOut.write(response);
+                    }
+                } finally {
+                    synchronized (stateLock) {
+                        processingRequest = false;
+                    }
+                }
+                if (draining) break;
             }
         } catch (EOFException | SocketTimeoutException ignore) {
             // ignore known exceptions that happen when browsers or us close the connection
@@ -87,6 +101,19 @@ public class HttpConnection implements Runnable {
             } catch (IOException e) {
                 Logger.global.logDebug("Exception closing HttpConnection: " + e);
             }
+        }
+    }
+
+    void beginDrain() {
+        synchronized (stateLock) {
+            draining = true;
+            if (processingRequest) return;
+        }
+
+        try {
+            socket.close();
+        } catch (IOException e) {
+            Logger.global.logDebug("Exception draining idle HttpConnection: " + e);
         }
     }
 

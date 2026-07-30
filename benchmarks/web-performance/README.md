@@ -343,10 +343,13 @@ Performance results are rejected unless the variant passes:
 - no runtime recompression or alternate stored representation;
 - `If-None-Match` precedence over `If-Modified-Since`;
 - bodyless `304` with current validators/cache headers;
+- exact stored-byte `Content-Length` on `HEAD`;
 - `Vary: Accept-Encoding` on encoded data;
+- `no-transform` on every map-data response to preserve its stored encoding;
 - `private, no-store` for player positions;
 - revalidating marker/settings policies;
 - `no-store` for missing tiles;
+- `no-store` for checked `404` and `405` errors;
 - database TLS hostname and CA verification;
 - failure with a wrong hostname, unknown CA, or missing required client cert;
 - health transition during database loss and recovery;

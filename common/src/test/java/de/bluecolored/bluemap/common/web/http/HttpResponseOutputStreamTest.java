@@ -27,10 +27,12 @@ package de.bluecolored.bluemap.common.web.http;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HttpResponseOutputStreamTest {
@@ -70,6 +72,41 @@ class HttpResponseOutputStreamTest {
         HttpResponse response = new HttpResponse(HttpStatusCode.NOT_FOUND);
 
         assertTrue(write(response).contains("Content-Length: 0"));
+    }
+
+    @Test
+    void writesDeclaredFixedLengthBodiesWithoutChunkFraming() throws Exception {
+        HttpResponse response = new HttpResponse(HttpStatusCode.OK);
+        response.addHeader("Content-Length", "7");
+        response.setBody("payload");
+
+        String wire = write(response);
+
+        assertTrue(wire.contains("Content-Length: 7"));
+        assertFalse(wire.contains("Transfer-Encoding"));
+        assertTrue(wire.endsWith("\r\n\r\npayload"));
+    }
+
+    @Test
+    void failsWhenAFixedLengthBodyIsShort() {
+        HttpResponse response = new HttpResponse(HttpStatusCode.OK);
+        response.addHeader("Content-Length", "8");
+        response.setBody("payload");
+
+        assertThrows(IOException.class, () -> write(response));
+    }
+
+    @Test
+    void neverWritesBytesBeyondTheDeclaredFixedLength() {
+        HttpResponse response = new HttpResponse(HttpStatusCode.OK);
+        response.addHeader("Content-Length", "7");
+        response.setBody("payload-extra");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        HttpResponseOutputStream output = new HttpResponseOutputStream(bytes);
+
+        assertThrows(IOException.class, () -> output.write(response));
+        assertTrue(bytes.toString(StandardCharsets.UTF_8).endsWith("\r\n\r\npayload"));
+        assertFalse(bytes.toString(StandardCharsets.UTF_8).contains("payload-extra"));
     }
 
     @Test

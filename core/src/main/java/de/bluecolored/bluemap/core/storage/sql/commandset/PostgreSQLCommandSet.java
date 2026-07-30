@@ -189,6 +189,18 @@ public class PostgreSQLCommandSet extends AbstractCommandSet {
 
     @Override
     @Language("postgresql")
+    public String itemStorageReadMetadataStatement() {
+        return """
+        SELECT OCTET_LENGTH(data), content_hash, updated_at
+        FROM bluemap_item_storage_data
+        WHERE map = ?
+        AND storage = ?
+        AND compression = ?
+        """;
+    }
+
+    @Override
+    @Language("postgresql")
     public String itemStorageDeleteStatement() {
         return """
         DELETE
@@ -231,6 +243,20 @@ public class PostgreSQLCommandSet extends AbstractCommandSet {
     public String gridStorageReadStatement() {
         return """
         SELECT data, content_hash, updated_at
+        FROM bluemap_grid_storage_data
+        WHERE map = ?
+        AND storage = ?
+        AND x = ?
+        AND z = ?
+        AND compression = ?
+        """;
+    }
+
+    @Override
+    @Language("postgresql")
+    public String gridStorageReadMetadataStatement() {
+        return """
+        SELECT OCTET_LENGTH(data), content_hash, updated_at
         FROM bluemap_grid_storage_data
         WHERE map = ?
         AND storage = ?

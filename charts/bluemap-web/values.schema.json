@@ -6,6 +6,14 @@
       "type": "integer",
       "minimum": 1
     },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "shutdownGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
     "image": {
       "$ref": "#/definitions/image"
     },
@@ -205,6 +213,8 @@
   },
   "required": [
     "replicaCount",
+    "terminationGracePeriodSeconds",
+    "shutdownGracePeriodSeconds",
     "image",
     "service",
     "storage",

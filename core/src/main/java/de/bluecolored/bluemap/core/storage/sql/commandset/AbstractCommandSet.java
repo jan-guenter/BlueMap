@@ -54,6 +54,12 @@ public abstract class AbstractCommandSet implements CommandSet {
     protected final LoadingCache<Key, Integer> itemStorageKeys = Caches.build(this::findOrCreateItemStorageKey);
     protected final LoadingCache<Key, Integer> gridStorageKeys = Caches.build(this::findOrCreateGridStorageKey);
 
+    @Override
+    public @Nullable ReadPermit tryAcquireReadPermit() {
+        Database.ReadPermit permit = db.tryAcquireReadPermit();
+        return permit == null ? null : permit::close;
+    }
+
     @Language("sql")
     public abstract String listExistingTablesStatement();
 
@@ -154,9 +160,10 @@ public abstract class AbstractCommandSet implements CommandSet {
 
     @Override
     public @Nullable StoredData readItem(String mapId, Key key, Compression compression) throws IOException {
-        int mapKey = mapKey(mapId);
-        int storageKey = itemStorageKey(key);
-        int compressionKey = compressionKey(compression);
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findItemStorageKey(key);
+        Integer compressionKey = findCompressionKey(compression);
+        if (mapKey == null || storageKey == null || compressionKey == null) return null;
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
                     itemStorageReadStatement(),
@@ -168,12 +175,36 @@ public abstract class AbstractCommandSet implements CommandSet {
     }
 
     @Language("sql")
+    public abstract String itemStorageReadMetadataStatement();
+
+    @Override
+    public @Nullable StoredMetadata readItemMetadata(
+            String mapId, Key key, Compression compression
+    ) throws IOException {
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findItemStorageKey(key);
+        Integer compressionKey = findCompressionKey(compression);
+        if (mapKey == null || storageKey == null || compressionKey == null) return null;
+        return db.run(connection -> {
+            ResultSet result = executeQuery(connection,
+                    itemStorageReadMetadataStatement(),
+                    mapKey, storageKey, compressionKey
+            );
+            if (!result.next()) return null;
+            return new StoredMetadata(
+                    result.getLong(1), result.getBytes(2), result.getLong(3)
+            );
+        });
+    }
+
+    @Language("sql")
     public abstract String itemStorageDeleteStatement();
 
     @Override
     public void deleteItem(String mapId, Key key) throws IOException {
-        int mapKey = mapKey(mapId);
-        int storageKey = itemStorageKey(key);
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findItemStorageKey(key);
+        if (mapKey == null || storageKey == null) return;
         db.run(connection -> executeUpdate(connection,
                 itemStorageDeleteStatement(),
                 mapKey, storageKey
@@ -185,9 +216,10 @@ public abstract class AbstractCommandSet implements CommandSet {
 
     @Override
     public boolean hasItem(String mapId, Key key, Compression compression) throws IOException {
-        int mapKey = mapKey(mapId);
-        int storageKey = itemStorageKey(key);
-        int compressionKey = compressionKey(compression);
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findItemStorageKey(key);
+        Integer compressionKey = findCompressionKey(compression);
+        if (mapKey == null || storageKey == null || compressionKey == null) return false;
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
                     itemStorageHasStatement(),
@@ -225,9 +257,10 @@ public abstract class AbstractCommandSet implements CommandSet {
     public @Nullable StoredData readGridItem(
             String mapId, Key key, int x, int z, Compression compression
     ) throws IOException {
-        int mapKey = mapKey(mapId);
-        int storageKey = gridStorageKey(key);
-        int compressionKey = compressionKey(compression);
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findGridStorageKey(key);
+        Integer compressionKey = findCompressionKey(compression);
+        if (mapKey == null || storageKey == null || compressionKey == null) return null;
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
                     gridStorageReadStatement(),
@@ -239,14 +272,38 @@ public abstract class AbstractCommandSet implements CommandSet {
     }
 
     @Language("sql")
+    public abstract String gridStorageReadMetadataStatement();
+
+    @Override
+    public @Nullable StoredMetadata readGridItemMetadata(
+            String mapId, Key key, int x, int z, Compression compression
+    ) throws IOException {
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findGridStorageKey(key);
+        Integer compressionKey = findCompressionKey(compression);
+        if (mapKey == null || storageKey == null || compressionKey == null) return null;
+        return db.run(connection -> {
+            ResultSet result = executeQuery(connection,
+                    gridStorageReadMetadataStatement(),
+                    mapKey, storageKey, x, z, compressionKey
+            );
+            if (!result.next()) return null;
+            return new StoredMetadata(
+                    result.getLong(1), result.getBytes(2), result.getLong(3)
+            );
+        });
+    }
+
+    @Language("sql")
     public abstract String gridStorageDeleteStatement();
 
     @Override
     public void deleteGridItem(
             String mapId, Key key, int x, int z
     ) throws IOException {
-        int mapKey = mapKey(mapId);
-        int storageKey = gridStorageKey(key);
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findGridStorageKey(key);
+        if (mapKey == null || storageKey == null) return;
         db.run(connection -> executeUpdate(connection,
                 gridStorageDeleteStatement(),
                 mapKey, storageKey, x, z
@@ -260,9 +317,10 @@ public abstract class AbstractCommandSet implements CommandSet {
     public boolean hasGridItem(
             String mapId, Key key, int x, int z, Compression compression
     ) throws IOException {
-        int mapKey = mapKey(mapId);
-        int storageKey = gridStorageKey(key);
-        int compressionKey = compressionKey(compression);
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findGridStorageKey(key);
+        Integer compressionKey = findCompressionKey(compression);
+        if (mapKey == null || storageKey == null || compressionKey == null) return false;
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
                     gridStorageHasStatement(),
@@ -281,9 +339,12 @@ public abstract class AbstractCommandSet implements CommandSet {
             String mapId, Key key, Compression compression,
             int start, int count
     ) throws IOException {
-        int mapKey = mapKey(mapId);
-        int storageKey = gridStorageKey(key);
-        int compressionKey = compressionKey(compression);
+        Integer mapKey = findMapKey(mapId);
+        Integer storageKey = findGridStorageKey(key);
+        Integer compressionKey = findCompressionKey(compression);
+        if (mapKey == null || storageKey == null || compressionKey == null) {
+            return new TilePosition[0];
+        }
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
                     gridStorageListStatement(),
@@ -315,7 +376,8 @@ public abstract class AbstractCommandSet implements CommandSet {
 
     @Override
     public int countMapGridsItems(String mapId) throws IOException {
-        int mapKey = mapKey(mapId);
+        Integer mapKey = findMapKey(mapId);
+        if (mapKey == null) return 0;
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
                     gridStorageCountMapItemsStatement(),
@@ -331,7 +393,8 @@ public abstract class AbstractCommandSet implements CommandSet {
 
     @Override
     public int purgeMapGrids(String mapId, int limit) throws IOException {
-        int mapKey = mapKey(mapId);
+        Integer mapKey = findMapKey(mapId);
+        if (mapKey == null) return 0;
         return db.run(connection -> {
             return executeUpdate(connection,
                     gridStoragePurgeMapStatement(),
@@ -346,7 +409,8 @@ public abstract class AbstractCommandSet implements CommandSet {
     @Override
     public void purgeMap(String mapId) throws IOException {
         synchronized (mapKeys) {
-            int mapKey = mapKey(mapId);
+            Integer mapKey = findMapKey(mapId);
+            if (mapKey == null) return;
             db.run(connection -> executeUpdate(connection,
                     purgeMapStatement(),
                     mapKey
@@ -400,6 +464,23 @@ public abstract class AbstractCommandSet implements CommandSet {
         }
     }
 
+    private @Nullable Integer findMapKey(String mapId) throws IOException {
+        synchronized (mapKeys) {
+            Integer cached = mapKeys.getIfPresent(mapId);
+            if (cached != null) return cached;
+
+            Integer found = db.run(connection -> {
+                ResultSet result = executeQuery(connection,
+                        findMapKeyStatement(),
+                        mapId
+                );
+                return result.next() ? result.getInt(1) : null;
+            });
+            if (found != null) mapKeys.put(mapId, found);
+            return found;
+        }
+    }
+
     public int findOrCreateMapKey(String mapId) throws IOException {
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
@@ -432,6 +513,24 @@ public abstract class AbstractCommandSet implements CommandSet {
     public int compressionKey(Compression compression) {
         synchronized (compressionKeys) {
             return compressionKeys.get(compression);
+        }
+    }
+
+    private @Nullable Integer findCompressionKey(Compression compression)
+            throws IOException {
+        synchronized (compressionKeys) {
+            Integer cached = compressionKeys.getIfPresent(compression);
+            if (cached != null) return cached;
+
+            Integer found = db.run(connection -> {
+                ResultSet result = executeQuery(connection,
+                        findCompressionKeyStatement(),
+                        compression.getKey().getFormatted()
+                );
+                return result.next() ? result.getInt(1) : null;
+            });
+            if (found != null) compressionKeys.put(compression, found);
+            return found;
         }
     }
 
@@ -470,6 +569,23 @@ public abstract class AbstractCommandSet implements CommandSet {
         }
     }
 
+    private @Nullable Integer findItemStorageKey(Key key) throws IOException {
+        synchronized (itemStorageKeys) {
+            Integer cached = itemStorageKeys.getIfPresent(key);
+            if (cached != null) return cached;
+
+            Integer found = db.run(connection -> {
+                ResultSet result = executeQuery(connection,
+                        findItemStorageKeyStatement(),
+                        key.getFormatted()
+                );
+                return result.next() ? result.getInt(1) : null;
+            });
+            if (found != null) itemStorageKeys.put(key, found);
+            return found;
+        }
+    }
+
     public int findOrCreateItemStorageKey(Key key) throws IOException {
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
@@ -505,6 +621,23 @@ public abstract class AbstractCommandSet implements CommandSet {
         }
     }
 
+    private @Nullable Integer findGridStorageKey(Key key) throws IOException {
+        synchronized (gridStorageKeys) {
+            Integer cached = gridStorageKeys.getIfPresent(key);
+            if (cached != null) return cached;
+
+            Integer found = db.run(connection -> {
+                ResultSet result = executeQuery(connection,
+                        findGridStorageKeyStatement(),
+                        key.getFormatted()
+                );
+                return result.next() ? result.getInt(1) : null;
+            });
+            if (found != null) gridStorageKeys.put(key, found);
+            return found;
+        }
+    }
+
     public int findOrCreateGridStorageKey(Key key) throws IOException {
         return db.run(connection -> {
             ResultSet result = executeQuery(connection,
@@ -531,6 +664,11 @@ public abstract class AbstractCommandSet implements CommandSet {
     @Override
     public boolean isClosed() {
         return db.isClosed();
+    }
+
+    @Override
+    public boolean isHealthy() {
+        return db.isHealthy();
     }
 
     @Override

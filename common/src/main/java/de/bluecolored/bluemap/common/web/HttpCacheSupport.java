@@ -131,16 +131,8 @@ final class HttpCacheSupport {
     ) {
         HttpHeader ifNoneMatch = request.getHeader("If-None-Match");
         if (ifNoneMatch != null) {
-            for (String candidate : ifNoneMatch.getValues()) {
-                if (candidate.equals("*")) return true;
-            }
-            if (eTag == null) return false;
-
-            String normalizedCurrent = weakOpaqueTag(eTag);
-            for (String candidate : ifNoneMatch.getValues()) {
-                if (weakOpaqueTag(candidate).equals(normalizedCurrent)) return true;
-            }
-            return false;
+            String normalizedCurrent = eTag == null ? null : weakOpaqueTag(eTag);
+            return weakListContains(ifNoneMatch.getValue(), normalizedCurrent);
         }
 
         if (metadata == null || metadata.updatedAt() <= 0) return false;
@@ -168,9 +160,84 @@ final class HttpCacheSupport {
         }
     }
 
-    private static String weakOpaqueTag(String value) {
+    private static boolean weakListContains(
+            String value, @Nullable String currentOpaqueTag
+    ) {
+        int index = 0;
+        while (index < value.length()) {
+            while (index < value.length()
+                    && (value.charAt(index) == ' '
+                    || value.charAt(index) == '\t'
+                    || value.charAt(index) == ',')) {
+                index++;
+            }
+            if (index >= value.length()) return false;
+
+            if (value.charAt(index) == '*') {
+                index++;
+                while (index < value.length()
+                        && (value.charAt(index) == ' ' || value.charAt(index) == '\t')) {
+                    index++;
+                }
+                if (index == value.length() || value.charAt(index) == ',') return true;
+                index = nextListEntry(value, index);
+                continue;
+            }
+            if (value.regionMatches(true, index, "W/", 0, 2)) index += 2;
+            if (index >= value.length() || value.charAt(index) != '"') {
+                index = nextListEntry(value, index);
+                continue;
+            }
+
+            int tagStart = index++;
+            boolean valid = true;
+            while (index < value.length() && value.charAt(index) != '"') {
+                if (!isEntityTagCharacter(value.charAt(index))) valid = false;
+                index++;
+            }
+            if (index >= value.length()) return false;
+
+            String candidate = value.substring(tagStart, ++index);
+            while (index < value.length()
+                    && (value.charAt(index) == ' ' || value.charAt(index) == '\t')) {
+                index++;
+            }
+            if (index < value.length() && value.charAt(index) != ',') {
+                valid = false;
+                index = nextListEntry(value, index);
+            }
+
+            if (valid && currentOpaqueTag != null
+                    && candidate.equals(currentOpaqueTag)) return true;
+        }
+        return false;
+    }
+
+    private static int nextListEntry(String value, int start) {
+        int comma = value.indexOf(',', start);
+        return comma < 0 ? value.length() : comma + 1;
+    }
+
+    private static @Nullable String weakOpaqueTag(String value) {
         String trimmed = value.trim();
-        return trimmed.regionMatches(true, 0, "W/", 0, 2) ? trimmed.substring(2) : trimmed;
+        if (trimmed.regionMatches(true, 0, "W/", 0, 2)) {
+            trimmed = trimmed.substring(2);
+        }
+        if (trimmed.length() < 2
+                || trimmed.charAt(0) != '"'
+                || trimmed.charAt(trimmed.length() - 1) != '"') {
+            return null;
+        }
+        for (int i = 1; i < trimmed.length() - 1; i++) {
+            if (!isEntityTagCharacter(trimmed.charAt(i))) return null;
+        }
+        return trimmed;
+    }
+
+    private static boolean isEntityTagCharacter(char character) {
+        return character == 0x21
+                || character >= 0x23 && character <= 0x7e
+                || character >= 0x80;
     }
 
 }

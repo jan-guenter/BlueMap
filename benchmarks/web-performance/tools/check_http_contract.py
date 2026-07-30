@@ -195,6 +195,10 @@ def check_enhanced_contract(
         "must-revalidate" in cache_control,
         f"{tile}: tile response does not require stale revalidation",
     )
+    require(
+        "no-transform" in cache_control,
+        f"{tile}: tile response permits intermediary transformation",
+    )
 
     etag = response.headers.get("ETag")
     last_modified = response.headers.get("Last-Modified")
@@ -221,6 +225,10 @@ def check_enhanced_contract(
         head.headers.get("Content-Length") == content_length,
         f"{tile}: HEAD Content-Length differs from GET",
     )
+    require(
+        "no-transform" in header_tokens(head, "Cache-Control"),
+        f"{tile}: HEAD permits intermediary transformation",
+    )
 
     not_modified = fetch(
         base_url,
@@ -246,7 +254,7 @@ def check_enhanced_contract(
     )
     require(
         "no-transform" in header_tokens(not_modified, "Cache-Control"),
-        f"{tile}: 304 permits transformations",
+        f"{tile}: 304 permits intermediary transformation",
     )
 
     weak_not_modified = fetch(
@@ -319,7 +327,7 @@ def check_enhanced_contract(
     )
     require(
         "no-transform" in header_tokens(unsupported, "Cache-Control"),
-        f"{tile}: 406 permits transformations",
+        f"{tile}: 406 permits intermediary transformation",
     )
     require(
         "accept-encoding" in header_tokens(unsupported, "Vary"),
@@ -348,8 +356,8 @@ def check_enhanced_contract(
         check_body(player_response, manifest["expected"][player], player)
         player_cache = header_tokens(player_response, "Cache-Control")
         require(
-            {"private", "no-store"}.issubset(player_cache),
-            f"{player}: player positions are not private, no-store",
+            {"private", "no-store", "no-transform"}.issubset(player_cache),
+            f"{player}: player positions are not private, no-store, no-transform",
         )
         require(
             "no-transform" in player_cache,
@@ -370,7 +378,7 @@ def check_enhanced_contract(
         check_body(marker_response, manifest["expected"][marker], marker)
         marker_cache = header_tokens(marker_response, "Cache-Control")
         require(
-            "no-cache" in marker_cache,
+            {"no-cache", "no-transform"}.issubset(marker_cache),
             f"{marker}: marker data is not revalidated",
         )
         require(
@@ -418,7 +426,7 @@ def check_enhanced_contract(
     )
     require(
         "no-transform" in header_tokens(missing_response, "Cache-Control"),
-        f"{missing}: missing tile permits transformations",
+        f"{missing}: missing tile result permits intermediary transformation",
     )
 
     post = fetch(
@@ -431,6 +439,30 @@ def check_enhanced_contract(
     require(
         {"get", "head"}.issubset(header_tokens(post, "Allow")),
         f"{tile}: 405 Allow header is incomplete",
+    )
+    require(
+        {"no-store", "no-transform"}.issubset(
+            header_tokens(post, "Cache-Control")
+        ),
+        f"{tile}: 405 is cacheable or permits transformation",
+    )
+
+    map_root = tile.split("/tiles/", 1)[0]
+    unknown = f"{map_root}/not-a-real-map-data-route"
+    not_found = fetch(
+        base_url,
+        unknown,
+        {**base_headers, "Accept-Encoding": stored_encoding},
+    )
+    require(
+        not_found.status == 404,
+        f"{unknown}: expected 404, got {not_found.status}",
+    )
+    require(
+        {"no-store", "no-transform"}.issubset(
+            header_tokens(not_found, "Cache-Control")
+        ),
+        f"{unknown}: 404 is cacheable or permits transformation",
     )
 
 

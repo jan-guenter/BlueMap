@@ -26,6 +26,7 @@ package de.bluecolored.bluemap.core.storage.sql;
 
 import de.bluecolored.bluemap.core.storage.CacheMetadata;
 import de.bluecolored.bluemap.core.storage.ItemStorage;
+import de.bluecolored.bluemap.core.storage.StoredDataMetadata;
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.storage.GridStorage;
@@ -57,12 +58,25 @@ public class SQLGridStorage implements GridStorage {
 
     @Override
     public @Nullable CompressedInputStream read(int x, int z) throws IOException {
-        CommandSet.StoredData stored = sql.readGridItem(map, storage, x, z, compression);
+        CommandSet.StoredData stored =
+                sql.readGridItem(map, storage, x, z, compression);
         if (stored == null) return null;
         return new CompressedInputStream(
                 new ByteArrayInputStream(stored.data()),
                 compression,
                 new CacheMetadata(stored.contentHash(), stored.updatedAt())
+        );
+    }
+
+    @Override
+    public @Nullable StoredDataMetadata readMetadata(int x, int z) throws IOException {
+        CommandSet.StoredMetadata stored =
+                sql.readGridItemMetadata(map, storage, x, z, compression);
+        if (stored == null) return null;
+        return new StoredDataMetadata(
+                compression,
+                new CacheMetadata(stored.contentHash(), stored.updatedAt()),
+                stored.contentLength()
         );
     }
 

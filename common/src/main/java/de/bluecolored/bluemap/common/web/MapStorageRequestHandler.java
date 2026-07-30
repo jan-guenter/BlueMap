@@ -31,14 +31,18 @@ import de.bluecolored.bluemap.common.web.http.HttpResponse;
 import de.bluecolored.bluemap.common.web.http.HttpStatusCode;
 import de.bluecolored.bluemap.core.logger.Logger;
 import de.bluecolored.bluemap.core.storage.GridStorage;
+import de.bluecolored.bluemap.core.storage.ItemStorage;
 import de.bluecolored.bluemap.core.storage.MapStorage;
 import de.bluecolored.bluemap.core.storage.CacheMetadata;
+import de.bluecolored.bluemap.core.storage.StoredDataMetadata;
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
+import de.bluecolored.bluemap.core.util.stream.OnCloseInputStream;
 import lombok.Getter;
 import lombok.NonNull;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.util.NoSuchElementException;
@@ -63,12 +67,13 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
     public HttpResponse handle(HttpRequest request) {
         boolean head = request.getMethod().equalsIgnoreCase("HEAD");
         if (!head && !request.getMethod().equalsIgnoreCase("GET")) {
-            HttpResponse response = new HttpResponse(HttpStatusCode.METHOD_NOT_ALLOWED);
+            HttpResponse response = errorResponse(HttpStatusCode.METHOD_NOT_ALLOWED);
             response.addHeader("Allow", "GET, HEAD");
             return response;
         }
 
         String path = request.getPath();
+        if (path == null) return errorResponse(HttpStatusCode.BAD_REQUEST);
 
         //normalize path
         if (path.startsWith("/")) path = path.substring(1);
@@ -84,45 +89,165 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
                 int z = Integer.parseInt(tileMatcher.group(3).replace("/", ""));
 
                 GridStorage gridStorage = lod == 0 ? mapStorage.hiresTiles() : mapStorage.lowresTiles(lod);
-                CompressedInputStream in = gridStorage.read(x, z);
-                if (in == null) {
-                    HttpResponse response = new HttpResponse(HttpStatusCode.NO_CONTENT);
-                    response.addHeader("Cache-Control", "no-store");
-                    return response;
-                }
-
-                String cacheControl = "public,max-age=" + Math.max(0, tileMaxAgeSeconds) + ",must-revalidate";
+                String cacheControl = "public,max-age=" + Math.max(0, tileMaxAgeSeconds)
+                        + ",must-revalidate,no-transform";
                 String contentType = lod == 0 ? "application/octet-stream" : "image/png";
-                return storedResponse(in, contentType, cacheControl, request, head);
+                return withReadPermit(() -> tileResponse(
+                        gridStorage, x, z, contentType, cacheControl,
+                        request, head
+                ));
             }
 
             // provide meta-data
-            CompressedInputStream in = switch (path) {
-                case "settings.json" -> mapStorage.settings().read();
-                case "textures.json" -> mapStorage.textures().read();
-                case "live/markers.json" -> mapStorage.markers().read();
-                case "live/players.json" -> mapStorage.players().read();
-                default -> path.startsWith("assets/") ? mapStorage.asset(path.substring(7)).read() : null;
+            ItemStorage itemStorage = switch (path) {
+                case "settings.json" -> mapStorage.settings();
+                case "textures.json" -> mapStorage.textures();
+                case "live/markers.json" -> mapStorage.markers();
+                case "live/players.json" -> mapStorage.players();
+                default -> path.startsWith("assets/") ? mapStorage.asset(path.substring(7)) : null;
             };
-            if (in != null){
-                String cacheControl = switch (path) {
-                    case "live/players.json" -> "private,no-store";
-                    case "live/markers.json" -> "public,no-cache";
-                    default -> "public,no-cache";
-                };
-                return storedResponse(
-                        in, ContentTypeRegistry.fromFileName(path), cacheControl,
-                        request, head
-                );
-            }
+            if (itemStorage == null) return errorResponse(HttpStatusCode.NOT_FOUND);
+
+            String cacheControl = switch (path) {
+                case "live/players.json" -> "private,no-store,no-transform";
+                default -> "public,no-cache,no-transform";
+            };
+            String contentType = ContentTypeRegistry.fromFileName(path);
+            return withReadPermit(() -> itemResponse(
+                    itemStorage, contentType, cacheControl, request, head
+            ));
 
         } catch (NumberFormatException | NoSuchElementException ignore){
         } catch (IOException ex) {
             Logger.global.logError("Failed to read map-tile for web-request.", ex);
-            return new HttpResponse(HttpStatusCode.INTERNAL_SERVER_ERROR);
+            return errorResponse(HttpStatusCode.INTERNAL_SERVER_ERROR);
         }
 
-        return new HttpResponse(HttpStatusCode.NOT_FOUND);
+        return errorResponse(HttpStatusCode.NOT_FOUND);
+    }
+
+    private HttpResponse tileResponse(
+            GridStorage gridStorage,
+            int x,
+            int z,
+            String contentType,
+            String cacheControl,
+            HttpRequest request,
+            boolean head
+    ) throws IOException {
+        if (needsMetadata(request)) {
+            HttpResponse metadataResponse = metadataResponse(
+                    gridStorage.readMetadata(x, z),
+                    contentType,
+                    cacheControl,
+                    request,
+                    head
+            );
+            if (metadataResponse != null) return metadataResponse;
+        }
+
+        CompressedInputStream in = gridStorage.read(x, z);
+        if (in == null) {
+            HttpResponse response = new HttpResponse(HttpStatusCode.NO_CONTENT);
+            response.addHeader("Cache-Control", "no-store,no-transform");
+            return response;
+        }
+
+        return storedResponse(in, contentType, cacheControl, request, head);
+    }
+
+    private HttpResponse itemResponse(
+            ItemStorage itemStorage,
+            String contentType,
+            String cacheControl,
+            HttpRequest request,
+            boolean head
+    ) throws IOException {
+        if (needsMetadata(request)) {
+            HttpResponse metadataResponse = metadataResponse(
+                    itemStorage.readMetadata(),
+                    contentType,
+                    cacheControl,
+                    request,
+                    head
+            );
+            if (metadataResponse != null) return metadataResponse;
+        }
+
+        CompressedInputStream in = itemStorage.read();
+        if (in == null) return errorResponse(HttpStatusCode.NOT_FOUND);
+        return storedResponse(in, contentType, cacheControl, request, head);
+    }
+
+    private HttpResponse withReadPermit(ReadOperation operation)
+            throws IOException {
+        MapStorage.ReadPermit permit = mapStorage.tryAcquireReadPermit();
+        if (permit == null) {
+            HttpResponse response =
+                    errorResponse(HttpStatusCode.SERVICE_UNAVAILABLE);
+            response.addHeader("Retry-After", "1");
+            return response;
+        }
+
+        boolean responseOwnsPermit = false;
+        try {
+            HttpResponse response = operation.read();
+            if (response.getBody() != null && !response.isBodySuppressed()) {
+                response.setBody(new OnCloseInputStream(
+                        response.getBody(),
+                        permit
+                ));
+                responseOwnsPermit = true;
+            }
+            return response;
+        } finally {
+            if (!responseOwnsPermit) permit.close();
+        }
+    }
+
+    private static boolean needsMetadata(HttpRequest request) {
+        return request.getMethod().equalsIgnoreCase("HEAD")
+                || request.getHeader("If-None-Match") != null
+                || request.getHeader("If-Modified-Since") != null;
+    }
+
+    private @Nullable HttpResponse metadataResponse(
+            @Nullable StoredDataMetadata data,
+            String contentType,
+            String cacheControl,
+            HttpRequest request,
+            boolean head
+    ) {
+        if (data == null) return null;
+
+        Compression compression = data.compression();
+        if (!HttpCacheSupport.acceptsEncoding(
+                request,
+                compression == Compression.NONE ? "identity" : compression.getId()
+        )) {
+            return notAcceptableResponse(compression, head);
+        }
+
+        CacheMetadata cacheMetadata = data.cacheMetadata();
+        String eTag = HttpCacheSupport.eTag(cacheMetadata);
+        String lastModified = HttpCacheSupport.lastModified(cacheMetadata);
+        if (HttpCacheSupport.isNotModified(request, eTag, cacheMetadata)) {
+            HttpResponse response = new HttpResponse(HttpStatusCode.NOT_MODIFIED);
+            addStoredHeaders(
+                    response, compression, contentType, cacheControl,
+                    eTag, lastModified, -1
+            );
+            return response;
+        }
+
+        if (!head) return null;
+        HttpResponse response = new HttpResponse(HttpStatusCode.OK);
+        response.setBodySuppressed(true);
+        addStoredHeaders(
+                response, compression, contentType, cacheControl,
+                eTag, lastModified, data.contentLength()
+        );
+        return response;
     }
 
     private HttpResponse storedResponse(
@@ -137,18 +262,7 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
 
         if (!HttpCacheSupport.acceptsEncoding(request, requiredEncoding)) {
             data.close();
-            HttpResponse response = new HttpResponse(HttpStatusCode.NOT_ACCEPTABLE);
-            response.addHeader("Cache-Control", "no-store");
-            response.addHeader("Vary", "Accept-Encoding");
-            response.addHeader("Content-Type", "application/problem+json");
-            response.addHeader("X-BlueMap-Required-Content-Encoding", requiredEncoding);
-            if (!head) {
-                response.setBody(
-                        "{\"code\":\"bluemap_required_content_encoding\","
-                                + "\"requiredEncoding\":\"" + requiredEncoding + "\"}"
-                );
-            }
-            return response;
+            return notAcceptableResponse(compression, head);
         }
 
         CacheMetadata metadata = data.getCacheMetadata();
@@ -158,14 +272,50 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
         if (HttpCacheSupport.isNotModified(request, eTag, metadata)) {
             data.close();
             HttpResponse response = new HttpResponse(HttpStatusCode.NOT_MODIFIED);
-            addStoredHeaders(response, compression, contentType, cacheControl, eTag, lastModified);
+            addStoredHeaders(
+                    response, compression, contentType, cacheControl,
+                    eTag, lastModified, -1
+            );
             return response;
         }
 
         HttpResponse response = new HttpResponse(HttpStatusCode.OK);
-        addStoredHeaders(response, compression, contentType, cacheControl, eTag, lastModified);
-        if (head) data.close();
+        addStoredHeaders(
+                response, compression, contentType, cacheControl,
+                eTag, lastModified, -1
+        );
+        if (head) {
+            data.close();
+            response.setBodySuppressed(true);
+        }
         else response.setBody(data);
+        return response;
+    }
+
+    private static HttpResponse notAcceptableResponse(
+            Compression compression, boolean head
+    ) {
+        String requiredEncoding =
+                compression == Compression.NONE ? "identity" : compression.getId();
+        HttpResponse response = new HttpResponse(HttpStatusCode.NOT_ACCEPTABLE);
+        response.addHeader("Cache-Control", "no-store,no-transform");
+        response.addHeader("Vary", "Accept-Encoding");
+        response.addHeader("Content-Type", "application/problem+json");
+        response.addHeader("X-BlueMap-Required-Content-Encoding", requiredEncoding);
+        if (!head) {
+            response.setBody(
+                    "{\"code\":\"bluemap_required_content_encoding\","
+                            + "\"requiredEncoding\":\"" + requiredEncoding + "\"}"
+            );
+        } else {
+            response.setBodySuppressed(true);
+        }
+        return response;
+    }
+
+    private static HttpResponse errorResponse(HttpStatusCode statusCode) {
+        HttpResponse response = new HttpResponse(statusCode);
+        response.addHeader("Cache-Control", "no-store,no-transform");
         return response;
     }
 
@@ -175,7 +325,8 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
             String contentType,
             String cacheControl,
             String eTag,
-            String lastModified
+            String lastModified,
+            long contentLength
     ) {
         response.addHeader("Cache-Control", cacheControl);
         response.addHeader("Vary", "Accept-Encoding");
@@ -183,6 +334,16 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
         if (compression != Compression.NONE) response.addHeader("Content-Encoding", compression.getId());
         if (eTag != null) response.addHeader("ETag", eTag);
         if (lastModified != null) response.addHeader("Last-Modified", lastModified);
+        if (contentLength >= 0) {
+            response.addHeader("Content-Length", Long.toString(contentLength));
+        }
+    }
+
+    @FunctionalInterface
+    private interface ReadOperation {
+
+        HttpResponse read() throws IOException;
+
     }
 
 }

@@ -154,6 +154,50 @@ class HttpRequestInputStreamTest {
         );
     }
 
+    @Test
+    void rejectsCumulativeChunkExtensionFramingOverTheHeaderBudget() {
+        String input = """
+                POST / HTTP/1.1\r
+                Transfer-Encoding: chunked\r
+                \r
+                1;extension=0123456789\r
+                a\r
+                1;extension=0123456789\r
+                b\r
+                0\r
+                \r
+                """;
+
+        assertThrows(
+                IOException.class,
+                () -> parse(
+                        input,
+                        new HttpRequestLimits(128, 8, 64, 16)
+                )
+        );
+    }
+
+    @Test
+    void rejectsExcessiveTinyChunkCounts() {
+        StringBuilder input = new StringBuilder("""
+                POST / HTTP/1.1\r
+                Transfer-Encoding: chunked\r
+                \r
+                """);
+        for (int i = 0; i < 1025; i++) {
+            input.append("1\r\na\r\n");
+        }
+        input.append("0\r\n\r\n");
+
+        assertThrows(
+                IOException.class,
+                () -> parse(
+                        input.toString(),
+                        new HttpRequestLimits(128, 8, 16 * 1024, 2048)
+                )
+        );
+    }
+
     private static HttpRequest parse(String request, HttpRequestLimits limits) throws Exception {
         try (HttpRequestInputStream input = stream(request, limits)) {
             return input.read();

@@ -1,4 +1,6 @@
 replicaCount: 1
+terminationGracePeriodSeconds: 30
+shutdownGracePeriodSeconds: 20
 
 image:
   repository: ghcr.io/bluemap-minecraft/bluemap-web
@@ -109,6 +111,7 @@ config:
       sse-enabled: false
       max-active-connections: 256
       connection-idle-timeout-seconds: 60
+      shutdown-grace-period-seconds: {{ .Values.shutdownGracePeriodSeconds }}
       max-request-line-bytes: 8192
       max-header-count: 100
       max-header-bytes: 32768

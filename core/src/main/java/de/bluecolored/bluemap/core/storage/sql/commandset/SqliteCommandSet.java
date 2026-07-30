@@ -195,6 +195,18 @@ public class SqliteCommandSet extends AbstractCommandSet {
 
     @Override
     @Language("sqlite")
+    public String itemStorageReadMetadataStatement() {
+        return """
+        SELECT LENGTH(`data`), `content_hash`, `updated_at`
+        FROM `bluemap_item_storage_data`
+        WHERE `map` = ?
+        AND `storage` = ?
+        AND `compression` = ?
+        """;
+    }
+
+    @Override
+    @Language("sqlite")
     public String itemStorageDeleteStatement() {
         return """
         DELETE
@@ -232,6 +244,20 @@ public class SqliteCommandSet extends AbstractCommandSet {
     public String gridStorageReadStatement() {
         return """
         SELECT `data`, `content_hash`, `updated_at`
+        FROM `bluemap_grid_storage_data`
+        WHERE `map` = ?
+        AND `storage` = ?
+        AND `x` = ?
+        AND `z` = ?
+        AND `compression` = ?
+        """;
+    }
+
+    @Override
+    @Language("sqlite")
+    public String gridStorageReadMetadataStatement() {
+        return """
+        SELECT LENGTH(`data`), `content_hash`, `updated_at`
         FROM `bluemap_grid_storage_data`
         WHERE `map` = ?
         AND `storage` = ?

@@ -98,7 +98,10 @@ public class MapRequestHandler extends RoutingRequestHandler {
             register("live/sse", "", _ -> {
                 HttpResponse response = new HttpResponse(HttpStatusCode.OK);
                 response.addHeader("Content-Type", "text/event-stream");
-                response.addHeader("Cache-Control", "no-cache");
+                response.addHeader(
+                        "Cache-Control",
+                        "private,no-store,no-transform"
+                );
 
                 // attempt to turn off buffering in upstream proxy
                 response.addHeader("X-Accel-Buffering", "no");
@@ -116,7 +119,14 @@ public class MapRequestHandler extends RoutingRequestHandler {
         if (livePlayersDataSupplier != null) {
             LiveDataSupplierBroadcaster<String> playerDataBroadcaster = new LiveDataSupplierBroadcaster<>(livePlayersDataSupplier, 1000);
             if (useSSE) registerSseCallback(playerDataBroadcaster, this::onPlayerUpdate);
-            register("live/players\\.json", "", new JsonDataRequestHandler(playerDataBroadcaster));
+            register(
+                    "live/players\\.json",
+                    "",
+                    new JsonDataRequestHandler(
+                            playerDataBroadcaster,
+                            "private,no-store,no-transform"
+                    )
+            );
         }
 
         if (liveMarkerDataSupplier != null) {

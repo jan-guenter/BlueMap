@@ -22,39 +22,28 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-package de.bluecolored.bluemap.common.config;
+package de.bluecolored.bluemap.core.storage;
 
-import org.junit.jupiter.api.Test;
+import de.bluecolored.bluemap.core.storage.compression.Compression;
 
-import java.lang.reflect.Field;
+import java.util.Objects;
 
-import static org.junit.jupiter.api.Assertions.assertThrows;
+/**
+ * Metadata for one exact stored representation, available without reading its
+ * content when supported by the storage implementation.
+ */
+public record StoredDataMetadata(
+        Compression compression,
+        CacheMetadata cacheMetadata,
+        long contentLength
+) {
 
-class WebserverConfigTest {
-
-    @Test
-    void reportsInvalidHttpLimitsAsConfigurationErrors() throws Exception {
-        WebserverConfig config = new WebserverConfig();
-        Field maxActiveConnections = WebserverConfig.class.getDeclaredField("maxActiveConnections");
-        maxActiveConnections.setAccessible(true);
-        maxActiveConnections.setInt(config, 0);
-
-        assertThrows(ConfigurationException.class, config::createHttpServerSettings);
-    }
-
-    @Test
-    void rejectsNegativeShutdownGracePeriods() throws Exception {
-        WebserverConfig config = new WebserverConfig();
-        Field grace = WebserverConfig.class.getDeclaredField(
-                "shutdownGracePeriodSeconds"
-        );
-        grace.setAccessible(true);
-        grace.setInt(config, -1);
-
-        assertThrows(
-                ConfigurationException.class,
-                config::createHttpServerSettings
-        );
+    public StoredDataMetadata {
+        Objects.requireNonNull(compression, "compression");
+        Objects.requireNonNull(cacheMetadata, "cacheMetadata");
+        if (contentLength < 0) {
+            throw new IllegalArgumentException("contentLength must not be negative");
+        }
     }
 
 }

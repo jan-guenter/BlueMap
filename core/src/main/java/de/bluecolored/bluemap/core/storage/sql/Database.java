@@ -25,8 +25,9 @@
 package de.bluecolored.bluemap.core.storage.sql;
 
 import de.bluecolored.bluemap.core.logger.Logger;
+import lombok.AccessLevel;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
+import org.jetbrains.annotations.Nullable;
 import org.apache.commons.dbcp2.*;
 import org.apache.commons.pool2.ObjectPool;
 import org.apache.commons.pool2.impl.GenericObjectPool;
@@ -37,37 +38,113 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.Driver;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLRecoverableException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 
 @Getter
-@RequiredArgsConstructor
 public class Database implements Closeable {
 
+    private static final Duration HEALTH_STALE_AFTER = Duration.ofSeconds(10);
+
     private final DataSource dataSource;
-    private boolean isClosed = false;
+    private final int maxPoolSize;
+    private final int maxConcurrentReads;
+    private final @Nullable Semaphore readPermits;
+    @Getter(AccessLevel.NONE)
+    private final ScheduledExecutorService healthExecutor;
+    @Getter(AccessLevel.NONE)
+    private final LongSupplier nanoTime;
+    @Getter(AccessLevel.NONE)
+    private final long healthStaleAfterNanos;
+    @Getter(AccessLevel.NONE)
+    private volatile long lastSuccessfulOperationNanos;
+    private volatile boolean healthy = true;
+    private volatile boolean isClosed = false;
+
+    public Database(DataSource dataSource) {
+        this(dataSource, -1);
+    }
+
+    public Database(DataSource dataSource, int maxPoolSize) {
+        this(
+                dataSource,
+                maxPoolSize,
+                System::nanoTime,
+                HEALTH_STALE_AFTER
+        );
+    }
+
+    Database(
+            DataSource dataSource,
+            int maxPoolSize,
+            LongSupplier nanoTime,
+            Duration healthStaleAfter
+    ) {
+        this.dataSource = dataSource;
+        this.maxPoolSize = maxPoolSize;
+        this.maxConcurrentReads = maxPoolSize;
+        this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
+        Objects.requireNonNull(healthStaleAfter, "healthStaleAfter");
+        if (healthStaleAfter.isNegative() || healthStaleAfter.isZero()) {
+            throw new IllegalArgumentException(
+                    "healthStaleAfter must be positive"
+            );
+        }
+        this.healthStaleAfterNanos = healthStaleAfter.toNanos();
+        this.lastSuccessfulOperationNanos = nanoTime.getAsLong();
+        this.readPermits =
+                maxPoolSize > 0 ? new Semaphore(maxPoolSize, true) : null;
+        this.healthExecutor = Executors.newSingleThreadScheduledExecutor(
+                runnable -> {
+                    Thread thread =
+                            new Thread(runnable, "BlueMap-SQL-Health");
+                    thread.setDaemon(true);
+                    return thread;
+                }
+        );
+        this.healthExecutor.scheduleWithFixedDelay(
+                this::refreshHealth,
+                1,
+                2,
+                TimeUnit.SECONDS
+        );
+    }
 
     public Database(String url, Map<String, String> properties, int maxPoolSize) {
-        Properties props = new Properties();
-        props.putAll(properties);
-
-        this.dataSource = createDataSource(new DriverManagerConnectionFactory(url, props), maxPoolSize);
+        this(createDataSource(
+                new DriverManagerConnectionFactory(url, properties(properties)),
+                maxPoolSize
+        ), maxPoolSize);
     }
 
     public Database(String url, Map<String, String> properties, int maxPoolSize, Driver driver) {
-        Properties props = new Properties();
-        props.putAll(properties);
+        this(createDataSource(
+                new DriverConnectionFactory(driver, url, properties(properties)),
+                maxPoolSize
+        ), maxPoolSize);
+    }
 
-        ConnectionFactory connectionFactory = new DriverConnectionFactory(
-                driver,
-                url,
-                props
-        );
+    private static Properties properties(Map<String, String> values) {
+        Properties properties = new Properties();
+        properties.putAll(values);
+        return properties;
+    }
 
-        this.dataSource = createDataSource(connectionFactory, maxPoolSize);
+    public @Nullable ReadPermit tryAcquireReadPermit() {
+        if (readPermits == null) return new ReadPermit(false);
+        return readPermits.tryAcquire() ? new ReadPermit(true) : null;
     }
 
     public void run(ConnectionConsumer action) throws IOException {
@@ -84,6 +161,10 @@ public class Database implements Closeable {
                     try {
                         R result = action.apply(connection);
                         connection.commit();
+                        if (!isClosed) {
+                            lastSuccessfulOperationNanos = nanoTime.getAsLong();
+                            healthy = true;
+                        }
                         return result;
                     } catch (SQLRecoverableException ex) {
                         if (sqlException == null) {
@@ -95,6 +176,7 @@ public class Database implements Closeable {
                 }
             }
         } catch (SQLException ex) {
+            healthy = false;
             if (sqlException != null)
                 ex.addSuppressed(sqlException);
             throw new IOException(ex);
@@ -104,12 +186,43 @@ public class Database implements Closeable {
             throw ex;
         }
 
+        healthy = false;
         throw new IOException(sqlException);
+    }
+
+    public boolean isHealthy() {
+        if (isClosed || !healthy) return false;
+        long elapsed = nanoTime.getAsLong() - lastSuccessfulOperationNanos;
+        return elapsed >= 0 && elapsed <= healthStaleAfterNanos;
+    }
+
+    void refreshHealth() {
+        if (isClosed) {
+            healthy = false;
+            return;
+        }
+
+        try {
+            run(connection -> {
+                try (Statement statement = connection.createStatement();
+                     ResultSet result = statement.executeQuery("SELECT 1")) {
+                    if (!result.next() || result.getInt(1) != 1) {
+                        throw new SQLException(
+                                "SQL health check returned an unexpected result"
+                        );
+                    }
+                }
+            });
+        } catch (IOException | RuntimeException e) {
+            healthy = false;
+        }
     }
 
     @Override
     public void close() throws IOException {
         isClosed = true;
+        healthy = false;
+        healthExecutor.shutdownNow();
         if (dataSource instanceof AutoCloseable closeable) {
             try {
                 closeable.close();
@@ -121,7 +234,10 @@ public class Database implements Closeable {
         }
     }
 
-    private DataSource createDataSource(ConnectionFactory connectionFactory, int maxPoolSize) {
+    private static DataSource createDataSource(
+            ConnectionFactory connectionFactory,
+            int maxPoolSize
+    ) {
         PoolableConnectionFactory poolableConnectionFactory =
                 new PoolableConnectionFactory(() -> {
                     Logger.global.logDebug("Creating new SQL-Connection...");
@@ -149,6 +265,24 @@ public class Database implements Closeable {
         poolableConnectionFactory.setPool(connectionPool);
 
         return new PoolingDataSource<>(connectionPool);
+    }
+
+    public final class ReadPermit implements AutoCloseable {
+
+        private final boolean limited;
+        private final AtomicBoolean released = new AtomicBoolean();
+
+        private ReadPermit(boolean limited) {
+            this.limited = limited;
+        }
+
+        @Override
+        public void close() {
+            if (limited && released.compareAndSet(false, true)) {
+                Objects.requireNonNull(readPermits).release();
+            }
+        }
+
     }
 
     @FunctionalInterface

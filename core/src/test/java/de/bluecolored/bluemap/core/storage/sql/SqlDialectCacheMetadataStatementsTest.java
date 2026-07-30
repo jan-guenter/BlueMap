@@ -54,6 +54,13 @@ class SqlDialectCacheMetadataStatementsTest {
         assertTrue(commands.itemStorageReadStatement().contains("updated_at"));
         assertTrue(commands.gridStorageReadStatement().contains("content_hash"));
         assertTrue(commands.gridStorageReadStatement().contains("updated_at"));
+
+        assertEquals(3, placeholders(commands.itemStorageReadMetadataStatement()));
+        assertEquals(5, placeholders(commands.gridStorageReadMetadataStatement()));
+        assertTrue(commands.itemStorageReadMetadataStatement().toUpperCase().contains("LENGTH("));
+        assertTrue(commands.gridStorageReadMetadataStatement().toUpperCase().contains("LENGTH("));
+        assertTrue(commands.itemStorageReadMetadataStatement().contains("content_hash"));
+        assertTrue(commands.gridStorageReadMetadataStatement().contains("content_hash"));
     }
 
     private static long placeholders(String statement) {
