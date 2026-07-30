@@ -747,6 +747,17 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn('if [[ "$phase" == */measurement ]]', runner)
         self.assertIn('$phase-end"', runner)
 
+    def test_runner_closes_every_prometheus_jq_conditional(self) -> None:
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+        observability = runner.split("observability: {", maxsplit=1)[1].split(
+            "formalSchedule:", maxsplit=1
+        )[0]
+
+        self.assertEqual(
+            observability.count("if $prometheusEnabled"),
+            observability.count("end"),
+        )
+
     def test_imports_use_disposable_snapshot_and_live_fixtures(self) -> None:
         imports = (
             BENCHMARK_ROOT / "kubernetes" / "import-jobs.yaml"

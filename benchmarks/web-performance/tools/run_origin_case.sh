@@ -1751,16 +1751,19 @@ write_workload_metadata() {
                         if $prometheusEnabled
                         then $maximumNonTargetNodeCpuRangeCores
                         else null
+                        end
                     ),
                     maximumNonTargetNodeCpuMeanCores: (
                         if $prometheusEnabled
                         then $maximumNonTargetNodeCpuMeanCores
                         else null
+                        end
                     ),
                     maximumNonTargetNodeCpuLevelCores: (
                         if $prometheusEnabled
                         then $maximumNonTargetNodeCpuLevelCores
                         else null
+                        end
                     )
                 }
             },
