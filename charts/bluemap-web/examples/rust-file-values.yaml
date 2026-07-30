@@ -2,6 +2,7 @@ webserver:
   implementation: rust
   rust:
     config:
+      maxInFlightRequests: 8
       tileCacheMaxAgeSeconds: 60
     maps:
       - id: world
@@ -26,6 +27,6 @@ persistence:
 resources:
   requests:
     cpu: 50m
-    memory: 64Mi
+    memory: 128Mi
   limits:
-    memory: 256Mi
+    memory: 512Mi

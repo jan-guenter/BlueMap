@@ -36,9 +36,11 @@ spec:
     spec:
       serviceAccountName: {{ include "bluemap-web.serviceAccountName" . }}
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: {{ add (int .Values.webserver.rust.config.shutdownGraceSeconds) 5 }}
+      terminationGracePeriodSeconds: {{ add (add (int .Values.webserver.rust.config.shutdownGraceSeconds) (int .Values.webserver.rust.config.runtimeShutdownSeconds)) 5 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- $rustNodeSelector := deepCopy .Values.nodeSelector }}
+      {{- $_ := set $rustNodeSelector "kubernetes.io/arch" "amd64" }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -136,10 +138,8 @@ spec:
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.nodeSelector }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml $rustNodeSelector | nindent 8 }}
       {{- with .Values.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}

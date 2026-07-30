@@ -2,9 +2,10 @@
 bind = "0.0.0.0:8100"
 web_root = "/usr/share/bluemap-web"
 shutdown_grace_seconds = 30
+runtime_shutdown_seconds = 5
 dependency_check_seconds = 5
 storage_timeout_seconds = 30
-max_in_flight_requests = 32
+max_in_flight_requests = 8
 tile_cache_max_age_seconds = 60
 
 [webapp]

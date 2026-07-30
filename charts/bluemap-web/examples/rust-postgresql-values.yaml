@@ -1,6 +1,8 @@
 webserver:
   implementation: rust
   rust:
+    config:
+      maxInFlightRequests: 8
     maps:
       - id: world
         sorting: 0
@@ -31,6 +33,6 @@ storage:
 resources:
   requests:
     cpu: 50m
-    memory: 64Mi
+    memory: 128Mi
   limits:
-    memory: 256Mi
+    memory: 512Mi

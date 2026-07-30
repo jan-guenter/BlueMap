@@ -64,7 +64,9 @@ assert_contains "$temporary/rust-file.yaml" "claimName: bluemap-maps-rwx"
 assert_contains "$temporary/rust-file.yaml" "tcpSocket:"
 assert_contains "$temporary/rust-file.yaml" "path: /health/ready"
 assert_contains "$temporary/rust-file.yaml" "cpu: 50m"
-assert_contains "$temporary/rust-file.yaml" "memory: 256Mi"
+assert_contains "$temporary/rust-file.yaml" "memory: 512Mi"
+assert_contains "$temporary/rust-file.yaml" "terminationGracePeriodSeconds: 40"
+assert_contains "$temporary/rust-file.yaml" "kubernetes.io/arch: amd64"
 assert_absent "$temporary/rust-file.yaml" "download-jdbc-driver"
 assert_absent "$temporary/rust-file.yaml" "jdbc-driver"
 assert_absent "$temporary/rust-file.yaml" "BLUEMAP_SQL_"
@@ -83,6 +85,8 @@ import tomllib
 with pathlib.Path(sys.argv[1]).open("rb") as source:
     config = tomllib.load(source)
 assert config["tile_cache_max_age_seconds"] == 60
+assert config["runtime_shutdown_seconds"] == 5
+assert config["max_in_flight_requests"] == 8
 assert isinstance(config["webapp"]["resolution_default"], float)
 assert [entry["id"] for entry in config["maps"]] == ["world", "nether"]
 assert config["storage"] == {
@@ -91,6 +95,13 @@ assert config["storage"] == {
     "compression": "gzip",
 }
 PY
+
+helm template test "$chart_directory" --namespace bluemap \
+    --values "$chart_directory/examples/rust-file-values.yaml" \
+    --set nodeSelector.storage=fast \
+    >"$temporary/rust-node-selector.yaml"
+assert_contains "$temporary/rust-node-selector.yaml" "kubernetes.io/arch: amd64"
+assert_contains "$temporary/rust-node-selector.yaml" "storage: fast"
 
 helm template test "$chart_directory" --namespace bluemap \
     --values "$chart_directory/examples/rust-file-values.yaml" \
@@ -147,3 +158,5 @@ for values in "$script_directory"/invalid-rust-*-values.yaml; do
         exit 1
     fi
 done
+
+"$script_directory/test-workflow.sh"

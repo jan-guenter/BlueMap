@@ -18,9 +18,10 @@ webserver:
       tag: ""
     config:
       shutdownGraceSeconds: 30
+      runtimeShutdownSeconds: 5
       dependencyCheckSeconds: 5
       storageTimeoutSeconds: 30
-      maxInFlightRequests: 32
+      maxInFlightRequests: 8
       tileCacheMaxAgeSeconds: 60
       webapp:
         useCookies: true

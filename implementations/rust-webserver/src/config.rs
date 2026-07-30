@@ -21,6 +21,10 @@ fn default_shutdown_grace_seconds() -> u64 {
     30
 }
 
+fn default_runtime_shutdown_seconds() -> u64 {
+    5
+}
+
 fn default_dependency_check_seconds() -> u64 {
     5
 }
@@ -30,7 +34,7 @@ fn default_storage_timeout_seconds() -> u64 {
 }
 
 fn default_max_in_flight_requests() -> usize {
-    32
+    8
 }
 
 fn default_tile_cache_max_age_seconds() -> u64 {
@@ -102,6 +106,8 @@ pub struct Config {
     pub web_root: PathBuf,
     #[serde(default = "default_shutdown_grace_seconds")]
     pub shutdown_grace_seconds: u64,
+    #[serde(default = "default_runtime_shutdown_seconds")]
+    pub runtime_shutdown_seconds: u64,
     #[serde(default = "default_dependency_check_seconds")]
     pub dependency_check_seconds: u64,
     #[serde(default = "default_storage_timeout_seconds")]
@@ -136,6 +142,17 @@ impl Config {
         if self.max_in_flight_requests == 0 {
             return Err(AppError::InvalidConfig(
                 "max_in_flight_requests must be greater than zero".to_owned(),
+            ));
+        }
+        if self.runtime_shutdown_seconds == 0 {
+            return Err(AppError::InvalidConfig(
+                "runtime_shutdown_seconds must be greater than zero".to_owned(),
+            ));
+        }
+        if self.webapp.map_data_root != "maps" || self.webapp.live_data_root != "maps" {
+            return Err(AppError::InvalidConfig(
+                "webapp map_data_root and live_data_root must both be \"maps\" because the server exposes map and live data below /maps"
+                    .to_owned(),
             ));
         }
 
@@ -200,6 +217,10 @@ impl Config {
 
     pub fn shutdown_grace(&self) -> Duration {
         Duration::from_secs(self.shutdown_grace_seconds)
+    }
+
+    pub fn runtime_shutdown_timeout(&self) -> Duration {
+        Duration::from_secs(self.runtime_shutdown_seconds)
     }
 
     pub fn dependency_check_interval(&self) -> Duration {
@@ -402,7 +423,8 @@ mod tests {
     fn in_flight_limit_defaults_conservatively_and_rejects_zero() {
         let raw = minimal_config("type = \"file\"\nroot = \"/maps\"\ncompression = \"gzip\"");
         let config: Config = toml::from_str(&raw).unwrap();
-        assert_eq!(config.max_in_flight_requests, 32);
+        assert_eq!(config.max_in_flight_requests, 8);
+        assert_eq!(config.runtime_shutdown_seconds, 5);
         assert_eq!(config.tile_cache_max_age_seconds, 60);
 
         let mut config = config;
@@ -414,6 +436,34 @@ mod tests {
                 .to_string()
                 .contains("greater than zero")
         );
+
+        config.max_in_flight_requests = 8;
+        config.runtime_shutdown_seconds = 0;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("runtime_shutdown_seconds")
+        );
+    }
+
+    #[test]
+    fn rejects_webapp_data_roots_that_do_not_match_the_http_routes() {
+        for key in ["map_data_root", "live_data_root"] {
+            let raw = format!(
+                "{}\n[webapp]\n{key} = \"custom\"",
+                minimal_config("type = \"file\"\nroot = \"/maps\"\ncompression = \"gzip\"")
+            );
+            let config: Config = toml::from_str(&raw).unwrap();
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must both be")
+            );
+        }
     }
 }
 

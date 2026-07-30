@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::File,
-    io,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -13,7 +13,7 @@ use sqlx::{
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode},
     postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode},
 };
-use tokio::io::AsyncReadExt;
+use tokio::sync::Semaphore;
 
 use crate::{
     AppError, Result,
@@ -28,6 +28,8 @@ const REQUIRED_TABLES: [&str; 6] = [
     "bluemap_grid_storage",
     "bluemap_grid_storage_data",
 ];
+
+const MAX_BLOCKING_FILE_OPERATIONS: usize = 8;
 
 const POSTGRES_SCHEMA_METADATA_QUERY: &str = "\
 SELECT c.relname AS table_name, a.attname AS column_name
@@ -55,10 +57,16 @@ pub struct FileBackend {
     pub(crate) root: PathBuf,
     root_directory: Arc<File>,
     pub(crate) compression: StoredEncoding,
+    workers: BlockingFileWorkers,
     #[cfg(test)]
     body_reads: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     metadata_reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct BlockingFileWorkers {
+    permits: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -114,9 +122,10 @@ pub enum ObjectRequest {
 impl Backend {
     pub async fn connect(config: &Config) -> Result<Self> {
         match &config.storage {
-            StorageConfig::File { root, compression } => {
-                Ok(Self::File(FileBackend::open(root.clone(), *compression)?))
-            }
+            StorageConfig::File { root, compression } => Ok(Self::File(
+                FileBackend::open(root.clone(), *compression, config.max_in_flight_requests)
+                    .await?,
+            )),
             StorageConfig::Mariadb {
                 host,
                 port,
@@ -264,22 +273,34 @@ impl Backend {
 }
 
 impl FileBackend {
-    pub(crate) fn open(root: PathBuf, compression: StoredEncoding) -> Result<Self> {
-        let root_directory =
-            File::open(&root).map_err(|source| AppError::StorageIo(root.clone(), source))?;
-        let metadata = root_directory
-            .metadata()
-            .map_err(|source| AppError::StorageIo(root.clone(), source))?;
-        if !metadata.is_dir() {
-            return Err(AppError::InvalidConfig(format!(
-                "file storage root {} is not a directory",
-                root.display()
-            )));
-        }
+    pub(crate) async fn open(
+        root: PathBuf,
+        compression: StoredEncoding,
+        worker_limit: usize,
+    ) -> Result<Self> {
+        let workers = BlockingFileWorkers::new(worker_limit);
+        let open_path = root.clone();
+        let root_directory = workers
+            .run("file-storage startup", move || {
+                let root_directory = File::open(&open_path)
+                    .map_err(|source| AppError::StorageIo(open_path.clone(), source))?;
+                let metadata = root_directory
+                    .metadata()
+                    .map_err(|source| AppError::StorageIo(open_path.clone(), source))?;
+                if !metadata.is_dir() {
+                    return Err(AppError::InvalidConfig(format!(
+                        "file storage root {} is not a directory",
+                        open_path.display()
+                    )));
+                }
+                Ok(Arc::new(root_directory))
+            })
+            .await?;
         Ok(Self {
             root,
-            root_directory: Arc::new(root_directory),
+            root_directory,
             compression,
+            workers,
             #[cfg(test)]
             body_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -290,10 +311,12 @@ impl FileBackend {
     async fn probe(&self) -> Result<()> {
         let root = self.root_directory.clone();
         let display_path = self.root.clone();
-        tokio::task::spawn_blocking(move || probe_root_directory(&root))
+        self.workers
+            .run("file-storage probe", move || {
+                probe_root_directory(&root)
+                    .map_err(|source| AppError::StorageIo(display_path, source))
+            })
             .await
-            .map_err(|error| AppError::InvalidConfig(format!("file-probe worker failed: {error}")))?
-            .map_err(|source| AppError::StorageIo(display_path, source))
     }
 
     async fn metadata(
@@ -305,17 +328,25 @@ impl FileBackend {
         self.metadata_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (relative_path, encoding, class) = self.object_path(map_id, request)?;
-        let Some(file) = self.open_object(relative_path.clone()).await? else {
-            return Ok(None);
-        };
-        let metadata = file
-            .metadata()
+        let root = self.root_directory.clone();
+        let display_path = self.root.join(&relative_path);
+        let root_path = self.root.clone();
+        self.workers
+            .run("file-storage metadata", move || {
+                let file = match open_beneath(&root, &root_path, &relative_path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                    Err(source) => return Err(AppError::StorageIo(display_path.clone(), source)),
+                };
+                let metadata = file
+                    .metadata()
+                    .map_err(|source| AppError::StorageIo(display_path, source))?;
+                if !metadata.is_file() {
+                    return Ok(None);
+                }
+                Ok(Some(file_metadata(&metadata, encoding, class)))
+            })
             .await
-            .map_err(|source| AppError::StorageIo(self.root.join(&relative_path), source))?;
-        if !metadata.is_file() {
-            return Ok(None);
-        }
-        Ok(Some(file_metadata(&metadata, encoding, class)))
     }
 
     async fn read(&self, map_id: &str, request: ObjectRequest) -> Result<Option<StoredObject>> {
@@ -323,37 +354,45 @@ impl FileBackend {
         self.body_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (relative_path, encoding, class) = self.object_path(map_id, request)?;
-        let Some(mut file) = self.open_object(relative_path.clone()).await? else {
-            return Ok(None);
-        };
-        let stat = file
-            .metadata()
+        let root = self.root_directory.clone();
+        let display_path = self.root.join(&relative_path);
+        let root_path = self.root.clone();
+        self.workers
+            .run("file-storage read", move || {
+                let mut file = match open_beneath(&root, &root_path, &relative_path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                    Err(source) => return Err(AppError::StorageIo(display_path.clone(), source)),
+                };
+                let stat = file
+                    .metadata()
+                    .map_err(|source| AppError::StorageIo(display_path.clone(), source))?;
+                if !stat.is_file() {
+                    return Ok(None);
+                }
+                let capacity = usize::try_from(stat.len()).unwrap_or(0);
+                let mut data = Vec::with_capacity(capacity);
+                file.read_to_end(&mut data)
+                    .map_err(|source| AppError::StorageIo(display_path.clone(), source))?;
+                let final_stat = file
+                    .metadata()
+                    .map_err(|source| AppError::StorageIo(display_path.clone(), source))?;
+                if !file_metadata_matches(&stat, &final_stat)
+                    || final_stat.len() != data.len() as u64
+                {
+                    return Err(AppError::StorageIo(
+                        display_path,
+                        io::Error::other("file changed while it was being read"),
+                    ));
+                }
+                let mut metadata = file_metadata(&final_stat, encoding, class);
+                metadata.content_length = Some(data.len() as u64);
+                Ok(Some(StoredObject {
+                    data: Bytes::from(data),
+                    metadata,
+                }))
+            })
             .await
-            .map_err(|source| AppError::StorageIo(self.root.join(&relative_path), source))?;
-        if !stat.is_file() {
-            return Ok(None);
-        }
-        let capacity = usize::try_from(stat.len()).unwrap_or(0);
-        let mut data = Vec::with_capacity(capacity);
-        file.read_to_end(&mut data)
-            .await
-            .map_err(|source| AppError::StorageIo(self.root.join(&relative_path), source))?;
-        let final_stat = file
-            .metadata()
-            .await
-            .map_err(|source| AppError::StorageIo(self.root.join(&relative_path), source))?;
-        if !file_metadata_matches(&stat, &final_stat) || final_stat.len() != data.len() as u64 {
-            return Err(AppError::StorageIo(
-                self.root.join(&relative_path),
-                io::Error::other("file changed while it was being read"),
-            ));
-        }
-        let mut metadata = file_metadata(&final_stat, encoding, class);
-        metadata.content_length = Some(data.len() as u64);
-        Ok(Some(StoredObject {
-            data: Bytes::from(data),
-            metadata,
-        }))
     }
 
     #[cfg(test)]
@@ -431,22 +470,43 @@ impl FileBackend {
         }
         Ok(object)
     }
+}
 
-    async fn open_object(&self, relative_path: PathBuf) -> Result<Option<tokio::fs::File>> {
-        let root = self.root_directory.clone();
-        let display_path = self.root.join(&relative_path);
-        let root_path = self.root.clone();
-        let opened =
-            tokio::task::spawn_blocking(move || open_beneath(&root, &root_path, &relative_path))
-                .await
-                .map_err(|error| {
-                    AppError::InvalidConfig(format!("file-open worker failed: {error}"))
-                })?;
-        match opened {
-            Ok(file) => Ok(Some(tokio::fs::File::from_std(file))),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(AppError::StorageIo(display_path, source)),
+impl BlockingFileWorkers {
+    fn new(configured_limit: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(
+                configured_limit.clamp(1, MAX_BLOCKING_FILE_OPERATIONS),
+            )),
         }
+    }
+
+    async fn run<T>(
+        &self,
+        operation_name: &'static str,
+        operation: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+    {
+        let permit = self.permits.clone().acquire_owned().await.map_err(|_| {
+            AppError::InvalidConfig("file-storage worker limiter is closed".to_owned())
+        })?;
+        tokio::task::spawn_blocking(move || {
+            // The worker owns the permit. Cancelling or timing out its async
+            // caller cannot admit another blocking syscall until this one ends.
+            let _permit = permit;
+            operation()
+        })
+        .await
+        .map_err(|error| {
+            AppError::InvalidConfig(format!("{operation_name} worker failed: {error}"))
+        })?
+    }
+
+    #[cfg(test)]
+    fn available_permits(&self) -> usize {
+        self.permits.available_permits()
     }
 }
 
@@ -1111,7 +1171,9 @@ mod tests {
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, b"{}").unwrap();
 
-        let file = FileBackend::open(maps, StoredEncoding::None).unwrap();
+        let file = FileBackend::open(maps, StoredEncoding::None, 8)
+            .await
+            .unwrap();
         let backend = Backend::File(file.clone());
         backend.validate(&["world"]).await.unwrap();
         assert_eq!(file.metadata_read_count(), 1);
@@ -1134,7 +1196,9 @@ mod tests {
         std::fs::write(outside.join("settings.json"), b"container secret").unwrap();
         symlink(&outside, maps.join("world")).unwrap();
 
-        let backend = FileBackend::open(maps, StoredEncoding::None).unwrap();
+        let backend = FileBackend::open(maps, StoredEncoding::None, 8)
+            .await
+            .unwrap();
         let error = backend
             .read("world", ObjectRequest::Settings)
             .await
@@ -1181,5 +1245,54 @@ mod tests {
         file.sync_all().unwrap();
         let after = file.metadata().unwrap();
         assert!(!file_metadata_matches(&before, &after));
+    }
+
+    #[tokio::test]
+    async fn blocking_worker_keeps_its_permit_after_async_cancellation() {
+        let workers = BlockingFileWorkers::new(1);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let worker_release = release.clone();
+        let task_workers = workers.clone();
+        let task = tokio::spawn(async move {
+            task_workers
+                .run("cancellation test", move || {
+                    let _ = entered_tx.send(());
+                    let (lock, condition) = &*worker_release;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = condition.wait(released).unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+        });
+
+        entered_rx.await.unwrap();
+        assert_eq!(workers.available_permits(), 0);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(workers.available_permits(), 0);
+
+        let (lock, condition) = &*release;
+        *lock.lock().unwrap() = true;
+        condition.notify_all();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while workers.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(workers.available_permits(), 1);
+    }
+
+    #[test]
+    fn blocking_worker_limit_is_small_and_config_bounded() {
+        assert_eq!(BlockingFileWorkers::new(3).available_permits(), 3);
+        assert_eq!(
+            BlockingFileWorkers::new(usize::MAX).available_permits(),
+            MAX_BLOCKING_FILE_OPERATIONS
+        );
     }
 }

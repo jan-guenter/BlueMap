@@ -42,6 +42,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub backend: Backend,
     pub ready: Arc<AtomicBool>,
+    pub stopping: Arc<AtomicBool>,
     pub map_ids: Arc<HashSet<String>>,
     in_flight: Arc<Semaphore>,
     settings: Arc<serde_json::Value>,
@@ -57,6 +58,7 @@ impl AppState {
             config: Arc::new(config),
             backend,
             ready: Arc::new(AtomicBool::new(true)),
+            stopping: Arc::new(AtomicBool::new(false)),
             map_ids: Arc::new(map_ids),
             in_flight: Arc::new(Semaphore::new(max_in_flight_requests)),
             settings: Arc::new(settings),
@@ -94,7 +96,7 @@ async fn live() -> impl IntoResponse {
 }
 
 async fn ready(State(state): State<AppState>) -> Response {
-    if state.ready.load(Ordering::Acquire) {
+    if !state.stopping.load(Ordering::Acquire) && state.ready.load(Ordering::Acquire) {
         (
             StatusCode::OK,
             [(CACHE_CONTROL, HeaderValue::from_static("no-store"))],
@@ -131,31 +133,26 @@ async fn map_data(
         Err(_) => return overload_response(),
     };
 
-    let has_condition =
-        headers.contains_key(IF_NONE_MATCH) || headers.contains_key(IF_MODIFIED_SINCE);
-    if method == Method::HEAD || has_condition {
-        match storage_operation(
-            state.config.storage_timeout(),
-            "map metadata query",
-            state.backend.metadata(&map_id, request.clone()),
-        )
-        .await
-        {
-            Ok(Some(metadata)) => {
-                if let Some(response) = metadata_only_response(
-                    &metadata,
-                    &path,
-                    &headers,
-                    &method,
-                    state.config.tile_cache_max_age_seconds,
-                ) {
-                    return response;
-                }
-            }
-            Ok(None) if path.starts_with("tiles/") => return missing_tile_response(),
-            Ok(None) => return error_response(StatusCode::NOT_FOUND, "map object not found"),
-            Err(error) => return storage_error_response(error, &map_id, &path),
-        }
+    let metadata = match storage_operation(
+        state.config.storage_timeout(),
+        "map metadata query",
+        state.backend.metadata(&map_id, request.clone()),
+    )
+    .await
+    {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) if path.starts_with("tiles/") => return missing_tile_response(),
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "map object not found"),
+        Err(error) => return storage_error_response(error, &map_id, &path),
+    };
+    if let Some(response) = metadata_only_response(
+        &metadata,
+        &path,
+        &headers,
+        &method,
+        state.config.tile_cache_max_age_seconds,
+    ) {
+        return response;
     }
 
     match storage_operation(
@@ -772,6 +769,35 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers().get(CONTENT_LENGTH).unwrap(), "10");
         assert_eq!(response.body().size_hint().exact(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn materialized_body_encoding_is_rechecked_after_the_metadata_query() {
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let mut object_metadata = metadata();
+        object_metadata.encoding = crate::config::StoredEncoding::Lz4;
+        let response = object_response(
+            StoredObject {
+                data: Bytes::from_static(b"lz4"),
+                metadata: object_metadata,
+            },
+            "tiles/0/x0z0.prbm.lz4",
+            &headers,
+            &Method::GET,
+            permit,
+            60,
+        );
+
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-bluemap-required-content-encoding")
+                .unwrap(),
+            "lz4"
+        );
     }
 
     #[test]

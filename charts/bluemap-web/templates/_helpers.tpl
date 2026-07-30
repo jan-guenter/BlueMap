@@ -163,6 +163,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 {{- end -}}
 {{- if $isRust -}}
+{{- if and (hasKey .Values.nodeSelector "kubernetes.io/arch") (ne (index .Values.nodeSelector "kubernetes.io/arch") "amd64") -}}
+{{- fail "the Rust image supports only linux/amd64; nodeSelector kubernetes.io/arch must be amd64" -}}
+{{- end -}}
+{{- if or (ne .Values.webserver.rust.config.webapp.mapDataRoot "maps") (ne .Values.webserver.rust.config.webapp.liveDataRoot "maps") -}}
+{{- fail "the Rust webserver currently serves map and live data only below /maps; mapDataRoot and liveDataRoot must both be maps" -}}
+{{- end -}}
 {{- if .Values.phpFpm.enabled -}}
 {{- fail "phpFpm.enabled is Java-only and cannot be used with webserver.implementation=rust" -}}
 {{- end -}}

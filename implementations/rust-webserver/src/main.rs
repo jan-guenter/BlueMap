@@ -8,6 +8,7 @@ use clap::Parser;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
+    runtime::Builder,
     task::JoinHandle,
     time::{self, Instant},
 };
@@ -52,6 +53,8 @@ pub enum AppError {
     Bind(#[source] std::io::Error),
     #[error("HTTP server failed: {0}")]
     Serve(#[source] std::io::Error),
+    #[error("failed to create async runtime: {0}")]
+    Runtime(#[source] std::io::Error),
 }
 
 #[derive(Debug, Parser)]
@@ -61,8 +64,7 @@ struct Cli {
     config: PathBuf,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -71,17 +73,32 @@ async fn main() -> ExitCode {
         .compact()
         .init();
 
-    match run(Cli::parse()).await {
+    let config = match Config::load(&Cli::parse().config) {
+        Ok(config) => config,
+        Err(error) => return report_exit(error),
+    };
+    let runtime_shutdown_timeout = config.runtime_shutdown_timeout();
+    let runtime = match Builder::new_multi_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => return report_exit(AppError::Runtime(error)),
+    };
+    let result = runtime.block_on(run(config));
+    // Blocking filesystem workers cannot be force-cancelled. This explicit
+    // timeout lets the process return even when a remote filesystem syscall
+    // remains stuck after the graceful HTTP and storage shutdown budget.
+    runtime.shutdown_timeout(runtime_shutdown_timeout);
+    match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            tracing::error!(error = %error, "BlueMap Rust webserver stopped");
-            ExitCode::FAILURE
-        }
+        Err(error) => report_exit(error),
     }
 }
 
-async fn run(cli: Cli) -> Result<()> {
-    let config = Config::load(&cli.config)?;
+fn report_exit(error: AppError) -> ExitCode {
+    tracing::error!(error = %error, "BlueMap Rust webserver stopped");
+    ExitCode::FAILURE
+}
+
+async fn run(config: Config) -> Result<()> {
     tracing::info!(
         version = VERSION,
         bind = %config.bind,
@@ -106,7 +123,7 @@ async fn run(cli: Cli) -> Result<()> {
         .await
         .map_err(AppError::Bind)?;
 
-    let health_task = spawn_dependency_monitor(state.clone());
+    let mut health_task = spawn_dependency_monitor(state.clone());
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let shutdown_token = tokio::sync::watch::channel(false);
@@ -123,23 +140,18 @@ async fn run(cli: Cli) -> Result<()> {
     tokio::select! {
         _ = &mut shutdown => {}
         result = &mut server_task => {
-            health_task.abort();
-            state.ready.store(false, Ordering::Release);
-            close_backend_before(
-                &state.backend,
-                Instant::now() + state.config.shutdown_grace(),
-            )
-            .await;
+            let shutdown_deadline = Instant::now() + state.config.shutdown_grace();
+            stop_dependency_monitor(&state, &mut health_task, shutdown_deadline).await;
+            close_backend_before(&state.backend, shutdown_deadline).await;
             return result
                 .map_err(|error| AppError::InvalidConfig(format!("server task failed: {error}")))?
                 .map_err(AppError::Serve);
         }
     }
-    tracing::info!("shutdown requested; marking server unready");
-    state.ready.store(false, Ordering::Release);
-    health_task.abort();
-    let _ = shutdown_token.0.send(true);
     let shutdown_deadline = Instant::now() + state.config.shutdown_grace();
+    tracing::info!("shutdown requested; stopping storage health checks");
+    stop_dependency_monitor(&state, &mut health_task, shutdown_deadline).await;
+    let _ = shutdown_token.0.send(true);
 
     match time::timeout_at(shutdown_deadline, &mut server_task).await {
         Ok(joined) => {
@@ -163,12 +175,18 @@ fn spawn_dependency_monitor(state: AppState) -> JoinHandle<()> {
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
+            if state.stopping.load(Ordering::Acquire) {
+                break;
+            }
             let result = storage_operation(
                 state.config.storage_timeout(),
                 "storage dependency check",
                 state.backend.probe(),
             )
             .await;
+            if state.stopping.load(Ordering::Acquire) {
+                break;
+            }
             let ready = result.is_ok();
             let previous = state.ready.swap(ready, Ordering::AcqRel);
             if previous != ready {
@@ -183,6 +201,24 @@ fn spawn_dependency_monitor(state: AppState) -> JoinHandle<()> {
             }
         }
     })
+}
+
+async fn stop_dependency_monitor(
+    state: &AppState,
+    health_task: &mut JoinHandle<()>,
+    deadline: Instant,
+) {
+    state.stopping.store(true, Ordering::Release);
+    health_task.abort();
+    match time::timeout_at(deadline, health_task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {}
+        Ok(Err(error)) => tracing::warn!(error = %error, "storage health task failed"),
+        Err(_) => tracing::warn!("storage health task did not stop within the shutdown budget"),
+    }
+    // This store happens only after the monitor has been aborted and awaited.
+    // The stopping flag also prevents a late probe from publishing ready=true.
+    state.ready.store(false, Ordering::Release);
 }
 
 async fn storage_operation<T>(
@@ -236,11 +272,18 @@ mod tests {
 
     use super::*;
 
-    fn fixture() -> (TempDir, AppState) {
-        fixture_with_limit(32)
+    async fn fixture() -> (TempDir, AppState) {
+        fixture_with_limit(8).await
     }
 
-    fn fixture_with_limit(max_in_flight_requests: usize) -> (TempDir, AppState) {
+    async fn fixture_with_limit(max_in_flight_requests: usize) -> (TempDir, AppState) {
+        fixture_with_encoding(max_in_flight_requests, crate::config::StoredEncoding::Gzip).await
+    }
+
+    async fn fixture_with_encoding(
+        max_in_flight_requests: usize,
+        compression: crate::config::StoredEncoding,
+    ) -> (TempDir, AppState) {
         let temp = TempDir::new().unwrap();
         let web = temp.path().join("web");
         let maps = temp.path().join("maps");
@@ -248,9 +291,10 @@ mod tests {
         fs::create_dir_all(maps.join("world")).unwrap();
         fs::write(web.join("index.html"), "<html>BlueMap</html>").unwrap();
         fs::write(maps.join("world/settings.json"), b"{\"name\":\"World\"}").unwrap();
-        let tile = crate::storage::grid_item_path(&maps.join("world/tiles/0"), 3, 4, ".prbm.gz");
+        let tile_suffix = format!(".prbm{}", compression.file_suffix().unwrap());
+        let tile = crate::storage::grid_item_path(&maps.join("world/tiles/0"), 3, 4, &tile_suffix);
         fs::create_dir_all(tile.parent().unwrap()).unwrap();
-        fs::write(tile, b"stored-gzip").unwrap();
+        fs::write(tile, b"stored-compressed").unwrap();
         let lowres = crate::storage::grid_item_path(&maps.join("world/tiles/10"), 0, 0, ".png");
         fs::create_dir_all(lowres.parent().unwrap()).unwrap();
         fs::write(lowres, b"png").unwrap();
@@ -258,6 +302,7 @@ mod tests {
             bind: "127.0.0.1:0".parse().unwrap(),
             web_root: web,
             shutdown_grace_seconds: 1,
+            runtime_shutdown_seconds: 1,
             dependency_check_seconds: 1,
             storage_timeout_seconds: 1,
             max_in_flight_requests,
@@ -269,11 +314,13 @@ mod tests {
             }],
             storage: crate::config::StorageConfig::File {
                 root: maps.clone(),
-                compression: crate::config::StoredEncoding::Gzip,
+                compression,
             },
         };
         let backend = Backend::File(
-            crate::storage::FileBackend::open(maps, crate::config::StoredEncoding::Gzip).unwrap(),
+            crate::storage::FileBackend::open(maps, compression, max_in_flight_requests)
+                .await
+                .unwrap(),
         );
         let state = AppState::new(config, backend).unwrap();
         (temp, state)
@@ -281,7 +328,11 @@ mod tests {
 
     #[tokio::test]
     async fn golden_file_routes_and_required_encoding() {
-        let (_temp, state) = fixture();
+        let (_temp, state) = fixture().await;
+        let backend = match &state.backend {
+            Backend::File(backend) => backend.clone(),
+            _ => unreachable!(),
+        };
         let app = router(state);
 
         let response = app
@@ -332,6 +383,7 @@ mod tests {
                 .unwrap(),
             "gzip"
         );
+        assert_eq!(backend.body_read_count(), 1);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
@@ -360,7 +412,7 @@ mod tests {
 
         let etag = response.headers().get(header::ETAG).unwrap().clone();
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body, "stored-gzip");
+        assert_eq!(body, "stored-compressed");
         let response = app
             .clone()
             .oneshot(
@@ -484,7 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_settings_preserve_map_order_and_health_state() {
-        let (_temp, mut state) = fixture();
+        let (_temp, mut state) = fixture().await;
         Arc::get_mut(&mut state.config).unwrap().maps.insert(
             0,
             crate::config::MapConfig {
@@ -517,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn head_and_not_modified_do_not_read_object_bodies() {
-        let (_temp, state) = fixture();
+        let (_temp, state) = fixture().await;
         let backend = match &state.backend {
             Backend::File(backend) => backend.clone(),
             _ => unreachable!(),
@@ -585,8 +637,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lz4_rejection_uses_metadata_without_reading_the_object_body() {
+        let (_temp, state) = fixture_with_encoding(8, crate::config::StoredEncoding::Lz4).await;
+        let backend = match &state.backend {
+            Backend::File(backend) => backend.clone(),
+            _ => unreachable!(),
+        };
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/maps/world/tiles/0/x3z4.prbm.lz4")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-bluemap-required-content-encoding")
+                .unwrap(),
+            "lz4"
+        );
+        assert_eq!(backend.body_read_count(), 0);
+
+        let response = app
+            .oneshot(
+                Request::get("/maps/world/tiles/0/x3z4.prbm.lz4")
+                    .header(header::ACCEPT_ENCODING, "lz4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.body_read_count(), 1);
+    }
+
+    #[tokio::test]
     async fn in_flight_limit_rejects_overload_until_response_body_is_dropped() {
-        let (_temp, state) = fixture_with_limit(1);
+        let (_temp, state) = fixture_with_limit(1).await;
         let app = router(state);
 
         let held_response = app
@@ -650,5 +744,23 @@ mod tests {
         )
         .await;
         assert!(!completed);
+    }
+
+    #[tokio::test]
+    async fn stopping_health_monitor_is_final_before_backend_shutdown() {
+        let (_temp, state) = fixture().await;
+        let mut monitor = spawn_dependency_monitor(state.clone());
+        stop_dependency_monitor(
+            &state,
+            &mut monitor,
+            Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(state.stopping.load(Ordering::Acquire));
+        assert!(!state.ready.load(Ordering::Acquire));
+        assert!(monitor.is_finished());
+        tokio::task::yield_now().await;
+        assert!(!state.ready.load(Ordering::Acquire));
     }
 }

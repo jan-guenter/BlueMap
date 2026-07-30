@@ -17,6 +17,11 @@ The web pod runs without root, Linux capabilities, or a service-account token
 and supports a read-only root filesystem. It exposes a ClusterIP Service on
 port `8100`; ingress is opt-in.
 
+For non-release workflow runs, all three images receive the immutable
+`sha-<full-40-character-commit>` tag and the OCI chart version is
+`0.1.0-dev.sha.<full-40-character-commit>`. Branch tags remain convenience
+aliases; pin GitOps deployments to the full-SHA image and chart versions.
+
 ## Experimental Rust webserver
 
 Select the Rust implementation explicitly:
@@ -101,7 +106,17 @@ deployments with multiple replicas require a shared ReadWriteMany (RWX) volume
 with reliable read-after-rename behavior, as shown by the file example. The
 Rust mount is read-only. Custom `extraVolumeMounts` must live outside `/data`,
 `/etc/bluemap-web`, and the database TLS mount roots so they cannot shadow
-chart-managed content.
+chart-managed content. The Rust image is linux/amd64 only. The chart merges
+`kubernetes.io/arch: amd64` into `nodeSelector` and rejects a conflicting
+selector while preserving other user selectors.
+
+The default in-flight limit is eight. The largest object in the reference test
+data was a 20.2 MiB texture, so eight materialized responses alone can retain
+at least 161.6 MiB. The examples request 128 MiB and cap each pod at 512 MiB to
+leave room for database, TLS, allocator, and runtime overhead. Recalculate both
+the in-flight limit and memory limit for the largest object in your own map.
+File-backed syscalls use at most the smaller of the in-flight limit and eight
+blocking workers.
 
 Tiles default to
 `public,max-age=60,must-revalidate,no-transform`; tune the age with
@@ -110,6 +125,15 @@ markers revalidate, while player data is private and never stored. Stored
 compression is passed through without transcoding. BlueMap block-stream LZ4 is
 therefore allowed, but normal browsers do not advertise `lz4` and receive the
 structured HTTP 406 response that identifies the required coding.
+`mapDataRoot` and `liveDataRoot` must both remain `maps`, matching the route
+served by this implementation.
+
+Rust shutdown has two bounded phases:
+`webserver.rust.config.shutdownGraceSeconds` for health-monitor shutdown, HTTP
+draining, and storage cleanup, followed by
+`webserver.rust.config.runtimeShutdownSeconds` for any uncancellable blocking
+filesystem workers. The generated `terminationGracePeriodSeconds` includes
+both values plus five seconds of Kubernetes margin.
 
 ## Structured storage configuration
 

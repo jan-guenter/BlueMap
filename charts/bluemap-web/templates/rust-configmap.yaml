@@ -10,6 +10,7 @@ data:
     bind = "0.0.0.0:8100"
     web_root = "/usr/share/bluemap-web"
     shutdown_grace_seconds = {{ .Values.webserver.rust.config.shutdownGraceSeconds }}
+    runtime_shutdown_seconds = {{ .Values.webserver.rust.config.runtimeShutdownSeconds }}
     dependency_check_seconds = {{ .Values.webserver.rust.config.dependencyCheckSeconds }}
     storage_timeout_seconds = {{ .Values.webserver.rust.config.storageTimeoutSeconds }}
     max_in_flight_requests = {{ .Values.webserver.rust.config.maxInFlightRequests }}

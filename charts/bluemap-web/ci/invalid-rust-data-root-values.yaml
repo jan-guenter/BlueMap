@@ -1,0 +1,6 @@
+webserver:
+  implementation: rust
+  rust:
+    config:
+      webapp:
+        mapDataRoot: custom

@@ -39,6 +39,10 @@
                   "type": "integer",
                   "minimum": 1
                 },
+                "runtimeShutdownSeconds": {
+                  "type": "integer",
+                  "minimum": 1
+                },
                 "dependencyCheckSeconds": {
                   "type": "integer",
                   "minimum": 1
@@ -61,6 +65,7 @@
               },
               "required": [
                 "shutdownGraceSeconds",
+                "runtimeShutdownSeconds",
                 "dependencyCheckSeconds",
                 "storageTimeoutSeconds",
                 "maxInFlightRequests",
