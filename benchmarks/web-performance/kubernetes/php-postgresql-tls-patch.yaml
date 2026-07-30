@@ -1,0 +1,26 @@
+# Benchmark-only strategic merge patch. libpq reads these variables directly,
+# so the stock sql.php code and its PDO configuration stay unchanged.
+spec:
+  template:
+    metadata:
+      annotations:
+        bluemap.guenter.cloud/postgresql-tls: verify-full
+    spec:
+      containers:
+        - name: php-fpm
+          env:
+            - name: PGSSLMODE
+              value: verify-full
+            - name: PGSSLROOTCERT
+              value: /etc/bluemap-database/ca.crt
+          volumeMounts:
+            - name: database-ca
+              mountPath: /etc/bluemap-database
+              readOnly: true
+      volumes:
+        - name: database-ca
+          secret:
+            secretName: bluemap-perf-postgres-ca
+            items:
+              - key: ca.crt
+                path: ca.crt

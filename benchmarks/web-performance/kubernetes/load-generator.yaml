@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bluemap-perf-loadgen
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/name: bluemap-perf-loadgen
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: origin-loadgen
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  nodeSelector:
+    kubernetes.io/hostname: contabo1
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 12345
+    runAsGroup: 12345
+    fsGroup: 12345
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: k6
+      image: grafana/k6:2.1.0
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          trap 'exit 0' TERM INT
+          while true; do sleep 3600 & wait $!; done
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: "1"
+          memory: 512Mi
+        limits:
+          cpu: "4"
+          memory: 2Gi
+      volumeMounts:
+        - name: benchmark
+          mountPath: /benchmark
+          readOnly: true
+        - name: artifacts
+          mountPath: /artifacts
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: benchmark
+      configMap:
+        name: bluemap-perf-loadgen
+    - name: artifacts
+      emptyDir: {}
+    - name: tmp
+      emptyDir: {}

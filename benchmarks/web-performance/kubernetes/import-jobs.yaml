@@ -1,0 +1,180 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bluemap-perf-import-mariadb
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/name: bluemap-perf-importer
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: snapshot-import
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bluemap-perf-importer
+        app.kubernetes.io/part-of: bluemap-web-performance
+        bluemap.guenter.cloud/experiment-id: snapshot-import
+        bluemap.guenter.cloud/database: mariadb
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: contabo1
+      containers:
+        - name: importer
+          image: python:3.14-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              python -m pip install --disable-pip-version-check --no-cache-dir \
+                -r /opt/bluemap-importer/requirements.txt
+              exec python /opt/bluemap-importer/import_snapshot.py \
+                /snapshot/bluemap/web --target-compression zstd
+          env:
+            - name: DB_BACKEND
+              value: mariadb
+            - name: DB_HOST
+              value: bluemap-perf-mariadb.minecraft.svc.cluster.local
+            - name: DB_DATABASE
+              value: bluemap
+            - name: DB_USERNAME
+              value: root
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: bluemap-perf-mariadb-root
+                  key: password
+            - name: DB_TLS_MODE
+              value: verify-full
+            - name: DB_TLS_CA
+              value: /etc/bluemap-database/ca/ca.crt
+            - name: DB_TLS_CLIENT_CERT
+              value: /etc/bluemap-database/client/tls.crt
+            - name: DB_TLS_CLIENT_KEY
+              value: /etc/bluemap-database/client/tls.key
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: snapshot
+              mountPath: /snapshot
+              readOnly: true
+            - name: importer
+              mountPath: /opt/bluemap-importer
+              readOnly: true
+            - name: database-ca
+              mountPath: /etc/bluemap-database/ca
+              readOnly: true
+            - name: database-client
+              mountPath: /etc/bluemap-database/client
+              readOnly: true
+      volumes:
+        - name: snapshot
+          persistentVolumeClaim:
+            claimName: minecraft-data
+            readOnly: true
+        - name: importer
+          configMap:
+            name: bluemap-perf-importer
+        - name: database-ca
+          secret:
+            secretName: bluemap-perf-mariadb-ca
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: database-client
+          secret:
+            secretName: bluemap-perf-mariadb-client-cert
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bluemap-perf-import-postgresql
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/name: bluemap-perf-importer
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: snapshot-import
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bluemap-perf-importer
+        app.kubernetes.io/part-of: bluemap-web-performance
+        bluemap.guenter.cloud/experiment-id: snapshot-import
+        bluemap.guenter.cloud/database: postgresql
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: contabo1
+      containers:
+        - name: importer
+          image: python:3.14-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              python -m pip install --disable-pip-version-check --no-cache-dir \
+                -r /opt/bluemap-importer/requirements.txt
+              exec python /opt/bluemap-importer/import_snapshot.py \
+                /snapshot/bluemap/web --target-compression zstd
+          env:
+            - name: DB_BACKEND
+              value: postgresql
+            - name: DB_HOST
+              value: bluemap-perf-postgres.minecraft.svc.cluster.local
+            - name: DB_DATABASE
+              value: bluemap
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: bluemap-perf-postgres
+                  key: superuser-username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: bluemap-perf-postgres
+                  key: superuser-password
+            - name: DB_TLS_MODE
+              value: verify-full
+            - name: DB_TLS_CA
+              value: /etc/bluemap-database/ca/ca.crt
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: snapshot
+              mountPath: /snapshot
+              readOnly: true
+            - name: importer
+              mountPath: /opt/bluemap-importer
+              readOnly: true
+            - name: database-ca
+              mountPath: /etc/bluemap-database/ca
+              readOnly: true
+      volumes:
+        - name: snapshot
+          persistentVolumeClaim:
+            claimName: minecraft-data
+            readOnly: true
+        - name: importer
+          configMap:
+            name: bluemap-perf-importer
+        - name: database-ca
+          secret:
+            secretName: bluemap-perf-postgres-ca
+            items:
+              - key: ca.crt
+                path: ca.crt

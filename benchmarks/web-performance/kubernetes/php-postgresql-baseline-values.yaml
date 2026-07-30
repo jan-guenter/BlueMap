@@ -1,0 +1,31 @@
+# Overlay for the unchanged BlueMap sql.php baseline. Apply this after
+# java-postgresql-values.yaml, then explicitly scale the disposable Java
+# Deployment to zero so the PHP/NGINX pair receives the whole web-tier budget.
+
+phpFpm:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/jan-guenter/bluemap-web-php
+    tag: sha-2e4af8f
+    pullPolicy: IfNotPresent
+  podLabels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: php-postgresql-baseline
+  resources:
+    requests:
+      cpu: 800m
+      memory: 768Mi
+    limits:
+      cpu: 800m
+      memory: 768Mi
+  nginx:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+  nodeSelector:
+    kubernetes.io/hostname: contabo2

@@ -1,0 +1,64 @@
+fullnameOverride: bluemap-perf-java
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/jan-guenter/bluemap-web
+  tag: sha-2e4af8f
+  pullPolicy: IfNotPresent
+
+podLabels:
+  app.kubernetes.io/part-of: bluemap-web-performance
+  bluemap.guenter.cloud/experiment-id: java-postgresql
+
+storage:
+  id: performance
+  type: sql
+  compression: zstd
+  sql:
+    databaseType: postgresql
+    host: bluemap-perf-postgres.minecraft.svc.cluster.local
+    port: 5432
+    database: bluemap
+    connectionUrl: >-
+      jdbc:postgresql://bluemap-perf-postgres.minecraft.svc.cluster.local:5432/bluemap?sslmode=verify-full&sslrootcert=/etc/bluemap-database/ca.crt
+    maxConnections: 10
+    credentials:
+      existingSecret: bluemap-perf-postgres
+      usernameKey: superuser-username
+      passwordKey: superuser-password
+    driver:
+      className: org.postgresql.Driver
+      download:
+        url: https://jdbc.postgresql.org/download/postgresql-42.7.13.jar
+        sha256: 6e0e4cc2d8cae902084f8a2b18728b073a6fd9d1f87c9d8bff8f298c18185b93
+
+config:
+  files:
+    maps/world.conf: |
+      name: "World"
+      storage: {{ .Values.storage.id | quote }}
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector:
+  kubernetes.io/hostname: contabo2
+
+extraVolumes:
+  - name: database-ca
+    secret:
+      secretName: bluemap-perf-postgres-ca
+      items:
+        - key: ca.crt
+          path: ca.crt
+
+extraVolumeMounts:
+  - name: database-ca
+    mountPath: /etc/bluemap-database
+    readOnly: true

@@ -1,0 +1,143 @@
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: bluemap-perf-mariadb
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/name: bluemap-perf-mariadb
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: bootstrap
+spec:
+  image: mariadb:11.8.8
+  replicas: 1
+  rootPasswordSecretKeyRef:
+    name: bluemap-perf-mariadb-root
+    key: password
+    generate: true
+  storage:
+    size: 5Gi
+    storageClassName: longhorn-strict-local
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  affinity:
+    antiAffinityEnabled: false
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - contabo3
+  service:
+    type: ClusterIP
+  myCnf: |
+    [mariadb]
+    max_allowed_packet=128M
+  tls:
+    enabled: true
+    required: true
+  metrics:
+    enabled: false
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: Database
+metadata:
+  name: bluemap-perf-mariadb-database
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: bootstrap
+spec:
+  mariaDbRef:
+    name: bluemap-perf-mariadb
+    waitForIt: true
+  name: bluemap
+  characterSet: utf8mb4
+  collate: utf8mb4_bin
+  cleanupPolicy: Delete
+---
+apiVersion: stackgres.io/v1
+kind: SGInstanceProfile
+metadata:
+  name: bluemap-perf-postgres
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: bootstrap
+spec:
+  cpu: "2"
+  memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 2Gi
+---
+apiVersion: stackgres.io/v1
+kind: SGScript
+metadata:
+  name: bluemap-perf-postgres-init
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: bootstrap
+spec:
+  scripts:
+    - id: 1
+      name: create-bluemap-database
+      retryOnError: false
+      script: CREATE DATABASE bluemap;
+---
+apiVersion: stackgres.io/v1
+kind: SGCluster
+metadata:
+  name: bluemap-perf-postgres
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/name: bluemap-perf-postgres
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: bootstrap
+spec:
+  profile: testing
+  instances: 1
+  sgInstanceProfile: bluemap-perf-postgres
+  postgres:
+    version: "17"
+    ssl:
+      enabled: true
+      certificateSecretKeySelector:
+        name: bluemap-perf-postgres-tls
+        key: tls.crt
+      privateKeySecretKeySelector:
+        name: bluemap-perf-postgres-tls
+        key: tls.key
+  pods:
+    disableConnectionPooling: true
+    disableEnvoy: true
+    disableMetricsExporter: false
+    disablePostgresUtil: false
+    persistentVolume:
+      size: 5Gi
+      storageClass: longhorn-strict-local
+    scheduling:
+      nodeSelector:
+        kubernetes.io/hostname: contabo3
+  configurations:
+    observability:
+      disableMetrics: false
+      prometheusAutobind: true
+  managedSql:
+    continueOnSGScriptError: false
+    scripts:
+      - id: 1
+        sgScript: bluemap-perf-postgres-init
+  postgresServices:
+    primary:
+      enabled: true
+      type: ClusterIP
+    replicas:
+      enabled: false
