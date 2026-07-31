@@ -21,6 +21,9 @@ from typing import Any
 MAX_RANGE_SECONDS = 24 * 60 * 60
 KUBERNETES_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
+TIMESTAMP_TOLERANCE_SECONDS = 1e-6
+CPU_RATE_WINDOW_SECONDS = 60
+MINIMUM_STATISTICS_SAMPLES = 4
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -74,12 +77,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     capture_parser.add_argument(
         "--max-non-target-node-cpu-mean-cores",
-        default=2.0,
+        default=3.0,
         type=float,
     )
     capture_parser.add_argument(
         "--max-non-target-node-cpu-maximum-cores",
-        default=3.0,
+        default=4.0,
         type=float,
     )
     capture_parser.add_argument("--output", required=True, type=Path)
@@ -532,7 +535,9 @@ def measurement_windows(path: Path) -> list[dict[str, Any]]:
                 or event_name not in {"start", "end"}
                 or not isinstance(event.get("timestamp"), str)
             ):
-                raise ValueError(f"Invalid measurement phase event on line {line_number}")
+                raise ValueError(
+                    f"Invalid measurement phase event on line {line_number}"
+                )
             repetition_events = events.setdefault(repetition, {})
             if event_name in repetition_events:
                 raise ValueError(
@@ -569,36 +574,195 @@ def assess_node_noise(
     maximum_range_cores: float,
     maximum_mean_cores: float,
     maximum_level_cores: float,
+    *,
+    query_start: float,
+    query_end: float,
+    step_seconds: int,
 ) -> dict[str, Any]:
-    if min(maximum_range_cores, maximum_mean_cores, maximum_level_cores) <= 0:
-        raise ValueError("Non-target node CPU thresholds must be positive")
-    query = next(
-        (
-            result
-            for result in results
-            if result["name"] == "node_non_target_container_cpu_cores"
-        ),
-        None,
+    thresholds = (
+        maximum_range_cores,
+        maximum_mean_cores,
+        maximum_level_cores,
     )
-    if query is None:
-        raise ValueError("Non-target node CPU query is missing")
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+        for value in thresholds
+    ):
+        raise ValueError("Non-target node CPU thresholds must be finite and positive")
+    if isinstance(query_start, bool) or not isinstance(query_start, (int, float)):
+        raise ValueError("Prometheus query start must be numeric")
+    query_start = float(query_start)
+    if not math.isfinite(query_start) or query_start < 0:
+        raise ValueError("Prometheus query start must be finite and non-negative")
+    if isinstance(query_end, bool) or not isinstance(query_end, (int, float)):
+        raise ValueError("Prometheus query end must be numeric")
+    query_end = float(query_end)
+    if not math.isfinite(query_end) or query_end < query_start:
+        raise ValueError("Prometheus query end must be finite and not precede start")
+    if isinstance(step_seconds, bool) or not isinstance(step_seconds, int):
+        raise ValueError("Prometheus query step must be an integer")
+    if step_seconds < 1:
+        raise ValueError("Prometheus query step must be positive")
+    if not nodes or not all(isinstance(node, str) and node for node in nodes):
+        raise ValueError(
+            "Expected node identities must be non-empty, sorted, unique strings"
+        )
+    if list(nodes) != sorted(set(nodes)):
+        raise ValueError(
+            "Expected node identities must be non-empty, sorted, unique strings"
+        )
+    if not windows:
+        raise ValueError("At least one node-noise measurement window is required")
+    repetitions = []
+    for window in windows:
+        if not isinstance(window, dict) or set(window) != {
+            "repetition",
+            "start",
+            "end",
+        }:
+            raise ValueError("Node-noise measurement window identity is malformed")
+        repetition = window["repetition"]
+        window_start = window["start"]
+        window_end = window["end"]
+        if (
+            isinstance(repetition, bool)
+            or not isinstance(repetition, int)
+            or repetition < 1
+            or isinstance(window_start, bool)
+            or not isinstance(window_start, (int, float))
+            or isinstance(window_end, bool)
+            or not isinstance(window_end, (int, float))
+        ):
+            raise ValueError("Node-noise measurement window identity is malformed")
+        window_start = float(window_start)
+        window_end = float(window_end)
+        if (
+            not math.isfinite(window_start)
+            or not math.isfinite(window_end)
+            or window_end <= window_start
+            or window_start < query_start - TIMESTAMP_TOLERANCE_SECONDS
+            or window_end > query_end + TIMESTAMP_TOLERANCE_SECONDS
+        ):
+            raise ValueError(
+                "Node-noise measurement window is invalid or outside the query range"
+            )
+        repetitions.append(repetition)
+    if repetitions != sorted(set(repetitions)):
+        raise ValueError(
+            "Node-noise measurement repetitions must be sorted and unique"
+        )
+    if not all(isinstance(result, dict) for result in results):
+        raise ValueError("Prometheus query results must be objects")
+    matching_queries = [
+        result
+        for result in results
+        if result.get("name") == "node_non_target_container_cpu_cores"
+    ]
+    if len(matching_queries) != 1:
+        raise ValueError("Exactly one non-target node CPU query is required")
+    query = matching_queries[0]
+    if not isinstance(query, dict):
+        raise ValueError("Non-target node CPU query must be an object")
+    response = query.get("response")
+    data = response.get("data") if isinstance(response, dict) else None
+    if (
+        not isinstance(response, dict)
+        or response.get("status") != "success"
+        or not isinstance(data, dict)
+        or data.get("resultType") != "matrix"
+        or not isinstance(data.get("result"), list)
+    ):
+        raise ValueError("Non-target node CPU query has no successful matrix response")
 
-    series_by_node: dict[str, list[tuple[float, float]]] = {
-        node: [] for node in nodes
-    }
-    response_series = query["response"].get("data", {}).get("result", [])
-    for series in response_series:
-        node = series.get("metric", {}).get("node")
-        if node not in series_by_node:
-            continue
-        for raw_timestamp, raw_value in series.get("values", []):
+    expected_nodes = set(nodes)
+    series_by_node: dict[str, list[tuple[float, float]]] = {}
+    response_series = data["result"]
+    for series_index, series in enumerate(response_series):
+        if not isinstance(series, dict):
+            raise ValueError(
+                f"Non-target node CPU series {series_index} must be an object"
+            )
+        metric = series.get("metric")
+        node = metric.get("node") if isinstance(metric, dict) else None
+        if (
+            not isinstance(metric, dict)
+            or set(metric) != {"node"}
+            or not isinstance(node, str)
+            or node not in expected_nodes
+        ):
+            raise ValueError(
+                f"Non-target node CPU returned unexpected node identity {node!r}"
+            )
+        if node in series_by_node:
+            raise ValueError(
+                f"Non-target node CPU returned duplicate series for node {node!r}"
+            )
+        raw_values = series.get("values")
+        if not isinstance(raw_values, list):
+            raise ValueError(
+                f"Non-target node CPU series for {node!r} has no values array"
+            )
+        parsed_values = []
+        for sample_index, sample in enumerate(raw_values):
+            if not isinstance(sample, list) or len(sample) != 2:
+                raise ValueError(
+                    "Non-target node CPU sample "
+                    f"{sample_index} for {node!r} is malformed"
+                )
+            raw_timestamp, raw_value = sample
             try:
+                if isinstance(raw_timestamp, bool) or isinstance(raw_value, bool):
+                    raise ValueError
+                timestamp = float(raw_timestamp)
                 value = float(raw_value)
             except (TypeError, ValueError):
-                continue
-            if not math.isfinite(value):
-                continue
-            series_by_node[node].append((float(raw_timestamp), value))
+                raise ValueError(
+                    "Non-target node CPU sample "
+                    f"{sample_index} for {node!r} is not numeric"
+                ) from None
+            if not math.isfinite(timestamp) or not math.isfinite(value):
+                raise ValueError(
+                    "Non-target node CPU sample "
+                    f"{sample_index} for {node!r} is not finite"
+                )
+            if value < 0:
+                raise ValueError(
+                    "Non-target node CPU sample "
+                    f"{sample_index} for {node!r} is negative"
+                )
+            if (
+                timestamp < query_start - TIMESTAMP_TOLERANCE_SECONDS
+                or timestamp > query_end + TIMESTAMP_TOLERANCE_SECONDS
+            ):
+                raise ValueError(
+                    "Non-target node CPU sample "
+                    f"{sample_index} for {node!r} is outside the query range"
+                )
+            grid_index = round((timestamp - query_start) / step_seconds)
+            grid_timestamp = query_start + grid_index * step_seconds
+            if abs(timestamp - grid_timestamp) > TIMESTAMP_TOLERANCE_SECONDS:
+                raise ValueError(
+                    "Non-target node CPU sample "
+                    f"{sample_index} for {node!r} is off the query grid"
+                )
+            if parsed_values and (
+                timestamp - parsed_values[-1][0] <= TIMESTAMP_TOLERANCE_SECONDS
+            ):
+                raise ValueError(
+                    "Non-target node CPU timestamps for "
+                    f"{node!r} are duplicate or out of order"
+                )
+            parsed_values.append((timestamp, value))
+        series_by_node[node] = parsed_values
+
+    if set(series_by_node) != expected_nodes:
+        missing = sorted(expected_nodes - set(series_by_node))
+        raise ValueError(
+            f"Non-target node CPU is missing exact node series: {missing}"
+        )
 
     repetitions = []
     noisy_repetitions = []
@@ -606,32 +770,170 @@ def assess_node_noise(
         node_results = []
         repetition_noisy = False
         for node in nodes:
-            values = [
-                value
-                for timestamp, value in series_by_node[node]
-                if window["start"] <= timestamp <= window["end"]
+            window_start = float(window["start"])
+            window_end = float(window["end"])
+            first_index = max(
+                0,
+                math.ceil(
+                    (window_start - query_start - TIMESTAMP_TOLERANCE_SECONDS)
+                    / step_seconds
+                ),
+            )
+            last_index = math.floor(
+                (window_end - query_start + TIMESTAMP_TOLERANCE_SECONDS)
+                / step_seconds
+            )
+            expected_timestamps = [
+                query_start + index * step_seconds
+                for index in range(first_index, last_index + 1)
             ]
-            complete = len(values) >= 2
-            observed_range = max(values) - min(values) if values else None
-            observed_mean = sum(values) / len(values) if values else None
-            observed_maximum = max(values) if values else None
-            noisy = not complete or (
-                observed_range is not None
-                and (
-                    observed_range > maximum_range_cores
-                    or observed_mean > maximum_mean_cores
-                    or observed_maximum > maximum_level_cores
+            samples = [
+                (timestamp, value)
+                for timestamp, value in series_by_node[node]
+                if (
+                    window_start - TIMESTAMP_TOLERANCE_SECONDS
+                    <= timestamp
+                    <= window_end + TIMESTAMP_TOLERANCE_SECONDS
                 )
+            ]
+            matched: dict[float, list[float]] = {
+                timestamp: [] for timestamp in expected_timestamps
+            }
+            unexpected_timestamps = []
+            for timestamp, value in samples:
+                nearest_index = round((timestamp - query_start) / step_seconds)
+                nearest_timestamp = query_start + nearest_index * step_seconds
+                if (
+                    nearest_timestamp in matched
+                    and abs(timestamp - nearest_timestamp)
+                    <= TIMESTAMP_TOLERANCE_SECONDS
+                ):
+                    matched[nearest_timestamp].append(value)
+                else:
+                    unexpected_timestamps.append(timestamp)
+            missing_timestamps = [
+                timestamp for timestamp, values in matched.items() if not values
+            ]
+            duplicate_timestamps = [
+                timestamp for timestamp, values in matched.items() if len(values) > 1
+            ]
+            observed_timestamps = sorted(timestamp for timestamp, _ in samples)
+            values = [value for _, value in samples]
+            initial_gap = (
+                observed_timestamps[0] - window_start
+                if observed_timestamps
+                else None
+            )
+            final_gap = (
+                window_end - observed_timestamps[-1]
+                if observed_timestamps
+                else None
+            )
+            grid_complete = (
+                len(expected_timestamps) >= 2
+                and not missing_timestamps
+                and not duplicate_timestamps
+                and not unexpected_timestamps
+                and len(samples) == len(expected_timestamps)
+            )
+            edge_coverage_complete = (
+                initial_gap is not None
+                and final_gap is not None
+                and -TIMESTAMP_TOLERANCE_SECONDS <= initial_gap
+                and -TIMESTAMP_TOLERANCE_SECONDS <= final_gap
+                and initial_gap <= step_seconds + TIMESTAMP_TOLERANCE_SECONDS
+                and final_gap <= step_seconds + TIMESTAMP_TOLERANCE_SECONDS
+            )
+            statistics_start = window_start + CPU_RATE_WINDOW_SECONDS
+            statistics_timestamps = [
+                timestamp
+                for timestamp in expected_timestamps
+                if timestamp >= statistics_start - TIMESTAMP_TOLERANCE_SECONDS
+            ]
+            statistics_values = [
+                matched[timestamp][0]
+                for timestamp in statistics_timestamps
+                if len(matched[timestamp]) == 1
+            ]
+            statistics_complete = (
+                len(statistics_timestamps) >= MINIMUM_STATISTICS_SAMPLES
+                and all(
+                    len(matched[timestamp]) == 1
+                    for timestamp in statistics_timestamps
+                )
+            )
+            complete = (
+                grid_complete
+                and edge_coverage_complete
+                and statistics_complete
+            )
+            observed_range = (
+                max(statistics_values) - min(statistics_values)
+                if statistics_values
+                else None
+            )
+            observed_mean = (
+                sum(statistics_values) / len(statistics_values)
+                if statistics_values
+                else None
+            )
+            observed_maximum = max(statistics_values) if statistics_values else None
+            full_window_range = max(values) - min(values) if values else None
+            full_window_mean = sum(values) / len(values) if values else None
+            range_within_diagnostic_limit = (
+                observed_range is not None
+                and observed_range <= maximum_range_cores
+            )
+            mean_within_limit = (
+                observed_mean is not None
+                and observed_mean <= maximum_mean_cores
+            )
+            maximum_within_limit = (
+                observed_maximum is not None
+                and observed_maximum <= maximum_level_cores
+            )
+            noisy = not complete or (
+                not mean_within_limit or not maximum_within_limit
             )
             repetition_noisy = repetition_noisy or noisy
             node_results.append(
                 {
                     "node": node,
-                    "samples": len(values),
-                    "minimumCores": min(values) if values else None,
-                    "maximumCores": max(values) if values else None,
+                    "samples": len(samples),
+                    "expectedSamples": len(expected_timestamps),
+                    "firstTimestamp": (
+                        observed_timestamps[0] if observed_timestamps else None
+                    ),
+                    "lastTimestamp": (
+                        observed_timestamps[-1] if observed_timestamps else None
+                    ),
+                    "initialCoverageGapSeconds": initial_gap,
+                    "finalCoverageGapSeconds": final_gap,
+                    "missingTimestamps": missing_timestamps,
+                    "duplicateTimestamps": duplicate_timestamps,
+                    "unexpectedTimestamps": unexpected_timestamps,
+                    "edgeCoverageComplete": edge_coverage_complete,
+                    "statisticsStartTimestamp": statistics_start,
+                    "statisticsSamples": len(statistics_values),
+                    "expectedStatisticsSamples": len(statistics_timestamps),
+                    "minimumStatisticsSamples": MINIMUM_STATISTICS_SAMPLES,
+                    "statisticsComplete": statistics_complete,
+                    "minimumCores": min(statistics_values)
+                    if statistics_values
+                    else None,
+                    "maximumCores": max(statistics_values)
+                    if statistics_values
+                    else None,
                     "meanCores": observed_mean,
                     "rangeCores": observed_range,
+                    "fullWindowMinimumCores": min(values) if values else None,
+                    "fullWindowMaximumCores": max(values) if values else None,
+                    "fullWindowMeanCores": full_window_mean,
+                    "fullWindowRangeCores": full_window_range,
+                    "rangeWithinDiagnosticLimit": range_within_diagnostic_limit,
+                    "meanWithinLimit": mean_within_limit,
+                    "maximumWithinLimit": maximum_within_limit,
+                    "gridComplete": grid_complete,
                     "complete": complete,
                     "noisy": noisy,
                 }
@@ -649,8 +951,17 @@ def assess_node_noise(
     return {
         "metric": "node_non_target_container_cpu_cores",
         "maximumRangeCores": maximum_range_cores,
+        "rangeGateEnforced": False,
         "maximumMeanCores": maximum_mean_cores,
         "maximumLevelCores": maximum_level_cores,
+        "sampleGrid": {
+            "queryStart": query_start,
+            "queryEnd": query_end,
+            "stepSeconds": step_seconds,
+            "timestampToleranceSeconds": TIMESTAMP_TOLERANCE_SECONDS,
+            "cpuRateWindowSeconds": CPU_RATE_WINDOW_SECONDS,
+            "minimumStatisticsSamples": MINIMUM_STATISTICS_SAMPLES,
+        },
         "repetitions": repetitions,
         "noisyRepetitions": noisy_repetitions,
         "passed": not noisy_repetitions,
@@ -700,6 +1011,39 @@ def capture(args: argparse.Namespace) -> None:
             }
         )
 
+    try:
+        node_noise = assess_node_noise(
+            results,
+            nodes,
+            windows,
+            args.max_non_target_node_cpu_range_cores,
+            args.max_non_target_node_cpu_mean_cores,
+            args.max_non_target_node_cpu_maximum_cores,
+            query_start=args.start,
+            query_end=args.end,
+            step_seconds=args.step,
+        )
+    except ValueError as error:
+        node_noise = {
+            "metric": "node_non_target_container_cpu_cores",
+            "maximumRangeCores": args.max_non_target_node_cpu_range_cores,
+            "rangeGateEnforced": False,
+            "maximumMeanCores": args.max_non_target_node_cpu_mean_cores,
+            "maximumLevelCores": args.max_non_target_node_cpu_maximum_cores,
+            "sampleGrid": {
+                "queryStart": float(args.start),
+                "queryEnd": float(args.end),
+                "stepSeconds": args.step,
+                "timestampToleranceSeconds": TIMESTAMP_TOLERANCE_SECONDS,
+                "cpuRateWindowSeconds": CPU_RATE_WINDOW_SECONDS,
+                "minimumStatisticsSamples": MINIMUM_STATISTICS_SAMPLES,
+            },
+            "repetitions": [],
+            "noisyRepetitions": [window["repetition"] for window in windows],
+            "validationErrors": [str(error)],
+            "passed": False,
+        }
+
     bundle = {
         "capturedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "prometheus": {"baseUrl": source["baseUrl"]},
@@ -711,14 +1055,7 @@ def capture(args: argparse.Namespace) -> None:
         "namespace": args.namespace,
         "targets": targets,
         "nodes": nodes,
-        "nodeNoise": assess_node_noise(
-            results,
-            nodes,
-            windows,
-            args.max_non_target_node_cpu_range_cores,
-            args.max_non_target_node_cpu_mean_cores,
-            args.max_non_target_node_cpu_maximum_cores,
-        ),
+        "nodeNoise": node_noise,
         "queries": results,
     }
     atomic_write_json(args.output, bundle)

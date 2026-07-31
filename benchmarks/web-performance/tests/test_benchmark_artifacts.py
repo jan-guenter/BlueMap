@@ -702,6 +702,10 @@ class PrometheusCaptureTests(unittest.TestCase):
     def test_captures_every_query_for_the_exact_requested_range(self) -> None:
         requests: list[dict[str, list[str]]] = []
         paths: list[str] = []
+        noise_values = [
+            [1_785_369_600 + offset, "0.25"]
+            for offset in range(15, 286, 15)
+        ]
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
@@ -711,7 +715,15 @@ class PrometheusCaptureTests(unittest.TestCase):
                 body = json.dumps(
                     {
                         "status": "success",
-                        "data": {"resultType": "matrix", "result": []},
+                        "data": {
+                            "resultType": "matrix",
+                            "result": [
+                                {
+                                    "metric": {"node": "contabo1"},
+                                    "values": noise_values,
+                                }
+                            ],
+                        },
                     }
                 ).encode()
                 self.send_response(200)
@@ -778,25 +790,28 @@ class PrometheusCaptureTests(unittest.TestCase):
             "http://prometheus.monitoring.svc:9090",
         )
         self.assertEqual(bundle["nodes"], ["contabo1"])
-        self.assertFalse(bundle["nodeNoise"]["passed"])
+        self.assertTrue(bundle["nodeNoise"]["passed"])
 
     def test_node_noise_is_assessed_per_measurement_repetition(self) -> None:
+        values = []
+        for timestamp in range(0, 391, 15):
+            value = 0.2
+            if 195 <= timestamp <= 255:
+                value = 2.1
+            if timestamp == 330:
+                value = 3.1
+            values.append([timestamp, str(value)])
         query_results = [
             {
                 "name": "node_non_target_container_cpu_cores",
                 "response": {
+                    "status": "success",
                     "data": {
+                        "resultType": "matrix",
                         "result": [
                             {
                                 "metric": {"node": "contabo1"},
-                                "values": [
-                                    [10, "0.20"],
-                                    [20, "0.25"],
-                                    [110, "0.20"],
-                                    [120, "1.10"],
-                                    [210, "2.50"],
-                                    [220, "2.60"],
-                                ],
+                                "values": values,
                             }
                         ]
                     }
@@ -807,17 +822,453 @@ class PrometheusCaptureTests(unittest.TestCase):
             query_results,
             ["contabo1"],
             [
-                {"repetition": 1, "start": 1, "end": 30},
-                {"repetition": 2, "start": 100, "end": 130},
-                {"repetition": 3, "start": 200, "end": 230},
+                {"repetition": 1, "start": 0, "end": 120},
+                {"repetition": 2, "start": 135, "end": 255},
+                {"repetition": 3, "start": 270, "end": 390},
             ],
             0.5,
             2.0,
             3.0,
+            query_start=0,
+            query_end=390,
+            step_seconds=15,
         )
 
         self.assertEqual(assessment["noisyRepetitions"], [2, 3])
         self.assertFalse(assessment["passed"])
+        first, second, third = assessment["repetitions"]
+        self.assertTrue(first["nodes"][0]["meanWithinLimit"])
+        self.assertTrue(first["nodes"][0]["maximumWithinLimit"])
+        self.assertFalse(second["nodes"][0]["meanWithinLimit"])
+        self.assertTrue(second["nodes"][0]["maximumWithinLimit"])
+        self.assertTrue(third["nodes"][0]["meanWithinLimit"])
+        self.assertFalse(third["nodes"][0]["maximumWithinLimit"])
+
+    def test_node_noise_requires_the_exact_expected_node_series(self) -> None:
+        def assess(series: list[dict[str, object]]) -> dict[str, object]:
+            return capture_prometheus.assess_node_noise(
+                [
+                    {
+                        "name": "node_non_target_container_cpu_cores",
+                        "response": {
+                            "status": "success",
+                            "data": {"resultType": "matrix", "result": series}
+                        },
+                    }
+                ],
+                ["node-a", "node-b"],
+                [{"repetition": 1, "start": 0, "end": 120}],
+                0.5,
+                3.0,
+                4.0,
+                query_start=0,
+                query_end=120,
+                step_seconds=15,
+            )
+
+        valid_values_a = [
+            [timestamp, "0.1"] for timestamp in range(0, 121, 15)
+        ]
+        valid_values_b = [
+            [timestamp, "0.2"] for timestamp in range(0, 121, 15)
+        ]
+        valid_a = {
+            "metric": {"node": "node-a"},
+            "values": valid_values_a,
+        }
+        valid_b = {
+            "metric": {"node": "node-b"},
+            "values": valid_values_b,
+        }
+
+        self.assertTrue(assess([valid_a, valid_b])["passed"])
+        for invalid_series in (
+            [valid_a],
+            [
+                valid_a,
+                valid_b,
+                {
+                    "metric": {"node": "node-c"},
+                    "values": valid_values_b,
+                },
+            ],
+            [valid_a, valid_a, valid_b],
+        ):
+            with self.subTest(series=invalid_series):
+                with self.assertRaises(ValueError):
+                    assess(invalid_series)
+
+    def test_node_noise_rejects_non_finite_timestamps_and_values(self) -> None:
+        def assess(values: list[list[object]]) -> None:
+            capture_prometheus.assess_node_noise(
+                [
+                    {
+                        "name": "node_non_target_container_cpu_cores",
+                        "response": {
+                            "status": "success",
+                            "data": {
+                                "resultType": "matrix",
+                                "result": [
+                                    {
+                                        "metric": {"node": "node-a"},
+                                        "values": values,
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ],
+                ["node-a"],
+                [{"repetition": 1, "start": 0, "end": 120}],
+                0.5,
+                3.0,
+                4.0,
+                query_start=0,
+                query_end=120,
+                step_seconds=15,
+            )
+
+        for invalid_values in (
+            [[0, "0.1"], [float("inf"), "0.1"], [30, "0.1"]],
+            [[0, "0.1"], [15, "NaN"], [30, "0.1"]],
+            [[0, "0.1"], [15, "Infinity"], [30, "0.1"]],
+        ):
+            with self.subTest(values=invalid_values):
+                with self.assertRaises(ValueError):
+                    assess(invalid_values)
+
+    def test_node_noise_requires_a_complete_query_anchored_grid(self) -> None:
+        def assess(timestamps: list[float]) -> dict[str, object]:
+            return capture_prometheus.assess_node_noise(
+                [
+                    {
+                        "name": "node_non_target_container_cpu_cores",
+                        "response": {
+                            "status": "success",
+                            "data": {
+                                "resultType": "matrix",
+                                "result": [
+                                    {
+                                        "metric": {"node": "node-a"},
+                                        "values": [
+                                            [timestamp, "0.25"]
+                                            for timestamp in timestamps
+                                        ],
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ],
+                ["node-a"],
+                [{"repetition": 1, "start": 20, "end": 140}],
+                0.5,
+                3.0,
+                4.0,
+                query_start=5,
+                query_end=155,
+                step_seconds=15,
+            )
+
+        valid_timestamps = [float(timestamp) for timestamp in range(20, 141, 15)]
+        valid = assess(valid_timestamps)
+        self.assertTrue(valid["passed"])
+        self.assertEqual(
+            valid["sampleGrid"],
+            {
+                "queryStart": 5.0,
+                "queryEnd": 155.0,
+                "stepSeconds": 15,
+                "timestampToleranceSeconds": 1e-6,
+                "cpuRateWindowSeconds": 60,
+                "minimumStatisticsSamples": 4,
+            },
+        )
+        valid_node = valid["repetitions"][0]["nodes"][0]
+        self.assertEqual(valid_node["expectedSamples"], 9)
+        self.assertTrue(valid_node["gridComplete"])
+        self.assertTrue(valid_node["edgeCoverageComplete"])
+        self.assertEqual(valid_node["statisticsSamples"], 5)
+        self.assertTrue(valid_node["complete"])
+        within_tolerance = assess(
+            [
+                timestamp + (0.0000005 if index % 2 == 0 else -0.0000005)
+                for index, timestamp in enumerate(valid_timestamps)
+            ]
+        )
+        self.assertTrue(within_tolerance["passed"])
+
+        for timestamps in (
+            valid_timestamps[:3] + valid_timestamps[4:],
+            valid_timestamps[1:],
+            valid_timestamps[:-1],
+        ):
+            with self.subTest(timestamps=timestamps):
+                result = assess(timestamps)
+                node = result["repetitions"][0]["nodes"][0]
+                self.assertFalse(node["complete"])
+                self.assertTrue(node["noisy"])
+                self.assertFalse(result["passed"])
+
+        for timestamps in (
+            valid_timestamps[:3] + [valid_timestamps[2]] + valid_timestamps[3:],
+            valid_timestamps[:3] + [64.0] + valid_timestamps[4:],
+            list(reversed(valid_timestamps)),
+        ):
+            with self.subTest(malformed_timestamps=timestamps):
+                with self.assertRaises(ValueError):
+                    assess(timestamps)
+
+    def test_node_noise_raw_range_is_diagnostic_not_an_absolute_gate(self) -> None:
+        values = [
+            [timestamp, "1.10" if timestamp in {75, 105} else "0.10"]
+            for timestamp in range(0, 121, 15)
+        ]
+        assessment = capture_prometheus.assess_node_noise(
+            [
+                {
+                    "name": "node_non_target_container_cpu_cores",
+                    "response": {
+                        "status": "success",
+                        "data": {
+                            "resultType": "matrix",
+                            "result": [
+                                {
+                                    "metric": {"node": "node-a"},
+                                    "values": values,
+                                }
+                            ],
+                        }
+                    },
+                }
+            ],
+            ["node-a"],
+            [{"repetition": 1, "start": 0, "end": 120}],
+            0.5,
+            3.0,
+            4.0,
+            query_start=0,
+            query_end=120,
+            step_seconds=15,
+        )
+
+        node = assessment["repetitions"][0]["nodes"][0]
+        self.assertGreater(node["rangeCores"], assessment["maximumRangeCores"])
+        self.assertFalse(node["rangeWithinDiagnosticLimit"])
+        self.assertIs(assessment["rangeGateEnforced"], False)
+        self.assertFalse(node["noisy"])
+        self.assertTrue(assessment["passed"])
+
+    def test_node_noise_excludes_rate_lookback_from_gated_statistics(self) -> None:
+        assessment = capture_prometheus.assess_node_noise(
+            [
+                {
+                    "name": "node_non_target_container_cpu_cores",
+                    "response": {
+                        "status": "success",
+                        "data": {
+                            "resultType": "matrix",
+                            "result": [
+                                {
+                                    "metric": {"node": "node-a"},
+                                    "values": [
+                                        [timestamp, "8.0" if timestamp == 15 else "0.2"]
+                                        for timestamp in range(0, 121, 15)
+                                    ],
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+            ["node-a"],
+            [{"repetition": 1, "start": 0, "end": 120}],
+            0.5,
+            3.0,
+            4.0,
+            query_start=0,
+            query_end=120,
+            step_seconds=15,
+        )
+
+        node = assessment["repetitions"][0]["nodes"][0]
+        self.assertEqual(node["fullWindowMaximumCores"], 8.0)
+        self.assertEqual(node["maximumCores"], 0.2)
+        self.assertEqual(node["statisticsStartTimestamp"], 60.0)
+        self.assertEqual(node["statisticsSamples"], 5)
+        self.assertTrue(assessment["passed"])
+
+    def test_node_noise_requires_four_post_lookback_grid_points(self) -> None:
+        assessment = capture_prometheus.assess_node_noise(
+            [
+                {
+                    "name": "node_non_target_container_cpu_cores",
+                    "response": {
+                        "status": "success",
+                        "data": {
+                            "resultType": "matrix",
+                            "result": [
+                                {
+                                    "metric": {"node": "node-a"},
+                                    "values": [
+                                        [timestamp, "0.2"]
+                                        for timestamp in range(0, 91, 15)
+                                    ],
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+            ["node-a"],
+            [{"repetition": 1, "start": 0, "end": 90}],
+            0.5,
+            3.0,
+            4.0,
+            query_start=0,
+            query_end=90,
+            step_seconds=15,
+        )
+
+        node = assessment["repetitions"][0]["nodes"][0]
+        self.assertEqual(node["statisticsSamples"], 3)
+        self.assertFalse(node["statisticsComplete"])
+        self.assertFalse(node["complete"])
+        self.assertFalse(assessment["passed"])
+
+    def test_node_noise_rejects_malformed_response_identity_and_bounds(self) -> None:
+        def assess(
+            *,
+            response: dict[str, object] | None = None,
+            window: dict[str, object] | None = None,
+            maximum_range: object = 0.5,
+        ) -> dict[str, object]:
+            valid_response: dict[str, object] = {
+                "status": "success",
+                "data": {
+                    "resultType": "matrix",
+                    "result": [
+                        {
+                            "metric": {"node": "node-a"},
+                            "values": [
+                                [timestamp, "0.2"]
+                                for timestamp in range(0, 121, 15)
+                            ],
+                        }
+                    ],
+                },
+            }
+            return capture_prometheus.assess_node_noise(
+                [
+                    {
+                        "name": "node_non_target_container_cpu_cores",
+                        "response": response or valid_response,
+                    }
+                ],
+                ["node-a"],
+                [window or {"repetition": 1, "start": 0, "end": 120}],
+                maximum_range,
+                3.0,
+                4.0,
+                query_start=0,
+                query_end=120,
+                step_seconds=15,
+            )
+
+        malformed_responses = [
+            {
+                "status": "error",
+                "data": {"resultType": "matrix", "result": []},
+            },
+            {
+                "status": "success",
+                "data": {"resultType": "vector", "result": []},
+            },
+            {
+                "status": "success",
+                "data": {
+                    "resultType": "matrix",
+                    "result": [
+                        {
+                            "metric": {"node": "node-a", "job": "unexpected"},
+                            "values": [
+                                [timestamp, "0.2"]
+                                for timestamp in range(0, 121, 15)
+                            ],
+                        }
+                    ],
+                },
+            },
+            {
+                "status": "success",
+                "data": {
+                    "resultType": "matrix",
+                    "result": [
+                        {
+                            "metric": {"node": "node-a"},
+                            "values": [
+                                [timestamp, "-0.1" if timestamp == 60 else "0.2"]
+                                for timestamp in range(0, 121, 15)
+                            ],
+                        }
+                    ],
+                },
+            },
+        ]
+        for response in malformed_responses:
+            with self.subTest(response=response):
+                with self.assertRaises(ValueError):
+                    assess(response=response)
+
+        for window in (
+            {"repetition": 1, "start": -15, "end": 105},
+            {"repetition": 1, "start": 15, "end": 135},
+        ):
+            with self.subTest(window=window):
+                with self.assertRaises(ValueError):
+                    assess(window=window)
+
+        for threshold in (True, float("nan"), float("inf"), 0.0, -0.1):
+            with self.subTest(threshold=threshold):
+                with self.assertRaises(ValueError):
+                    assess(maximum_range=threshold)
+
+        with self.assertRaises(ValueError):
+            capture_prometheus.assess_node_noise(
+                [],
+                [],
+                [{"repetition": 1, "start": 0, "end": 120}],
+                0.5,
+                3.0,
+                4.0,
+                query_start=0,
+                query_end=120,
+                step_seconds=15,
+            )
+        with self.assertRaises(ValueError):
+            capture_prometheus.assess_node_noise(
+                [],
+                [{"not": "a-node"}],
+                [{"repetition": 1, "start": 0, "end": 120}],
+                0.5,
+                3.0,
+                4.0,
+                query_start=0,
+                query_end=120,
+                step_seconds=15,
+            )
+        with self.assertRaises(ValueError):
+            capture_prometheus.assess_node_noise(
+                [],
+                ["node-a"],
+                [],
+                0.5,
+                3.0,
+                4.0,
+                query_start=0,
+                query_end=120,
+                step_seconds=15,
+            )
 
 
 class ProtectedPvcManifestTests(unittest.TestCase):
@@ -968,6 +1419,7 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("--trace-seed", result.stdout)
         self.assertIn("--latency-p95-ms", result.stdout)
         self.assertIn("--max-non-target-node-cpu-range-cores", result.stdout)
+        self.assertIn("raw run range is diagnostic", result.stdout)
         self.assertIn("--schedule-entry", result.stdout)
         self.assertIn("--variant-id", result.stdout)
         self.assertIn("--implementation", result.stdout)

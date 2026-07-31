@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -383,6 +384,223 @@ class RunPodOrchestratorTests(unittest.TestCase):
         assessment = orchestrate.assess_preflight_state(state, schedule)
         self.assertFalse(assessment["passed"])
         self.assertTrue(any("entry 4" in item for item in assessment["failures"]))
+
+    def test_preflight_node_noise_rejects_the_whole_incomparable_pair(self) -> None:
+        schedule_entries = []
+        for case_index in range(1, 4):
+            for variant_index, variant in enumerate(("java", "rust"), start=1):
+                schedule_entries.append(
+                    {
+                        "sequence": len(schedule_entries) + 1,
+                        "entryId": f"case-{case_index}/{variant}/block-1",
+                        "runnerCaseId": f"case-{case_index}-{variant}-b1",
+                        "matrixCaseId": f"case-{case_index}",
+                        "variantId": variant,
+                        "block": 1,
+                    }
+                )
+        schedule = {"entries": schedule_entries}
+        helper = orchestrate.load_prometheus_capture_helper()
+        query_start = 1_785_456_000
+        query_end = query_start + 180
+        window_start = query_start + 15
+        window_end = query_start + 150
+        with tempfile.TemporaryDirectory() as directory:
+            preflight_root = Path(directory)
+            for entry in schedule_entries:
+                mean = 1.0
+                if entry["matrixCaseId"] == "case-2" and entry["variantId"] == "rust":
+                    mean = 1.6
+                query_results = [
+                    {
+                        "name": "node_non_target_container_cpu_cores",
+                        "response": {
+                            "status": "success",
+                            "data": {
+                                "resultType": "matrix",
+                                "result": [
+                                    {
+                                        "metric": {"node": "node-a"},
+                                        "values": [
+                                            [timestamp, str(mean)]
+                                            for timestamp in range(
+                                                query_start,
+                                                query_end + 1,
+                                                orchestrate.PROMETHEUS_STEP_SECONDS,
+                                            )
+                                        ],
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                ]
+                windows = [
+                    {
+                        "repetition": 1,
+                        "start": float(window_start),
+                        "end": float(window_end),
+                    }
+                ]
+                node_noise = helper.assess_node_noise(
+                    query_results,
+                    ["node-a"],
+                    windows,
+                    orchestrate.MAXIMUM_NON_TARGET_NODE_CPU_SPREAD_CORES,
+                    orchestrate.MAXIMUM_NON_TARGET_NODE_CPU_MEAN_CORES,
+                    orchestrate.MAXIMUM_NON_TARGET_NODE_CPU_LEVEL_CORES,
+                    query_start=query_start,
+                    query_end=query_end,
+                    step_seconds=orchestrate.PROMETHEUS_STEP_SECONDS,
+                )
+                case_root = (
+                    preflight_root / "results" / entry["runnerCaseId"]
+                )
+                write_json(
+                    case_root / "samples" / "prometheus-query-range.json",
+                    {
+                        "nodes": ["node-a"],
+                        "range": {
+                            "start": query_start,
+                            "end": query_end,
+                            "stepSeconds": orchestrate.PROMETHEUS_STEP_SECONDS,
+                        },
+                        "queries": query_results,
+                        "nodeNoise": node_noise,
+                    },
+                )
+                write_json(
+                    case_root / "inputs" / "workload.json",
+                    {
+                        "targets": {"nodes": ["node-a"]},
+                        "observability": {
+                            "prometheus": {
+                                "enabled": True,
+                                "stepSeconds": orchestrate.PROMETHEUS_STEP_SECONDS,
+                                "maximumNonTargetNodeCpuRangeCores": (
+                                    orchestrate.MAXIMUM_NON_TARGET_NODE_CPU_SPREAD_CORES
+                                ),
+                                "maximumNonTargetNodeCpuMeanCores": (
+                                    orchestrate.MAXIMUM_NON_TARGET_NODE_CPU_MEAN_CORES
+                                ),
+                                "maximumNonTargetNodeCpuLevelCores": (
+                                    orchestrate.MAXIMUM_NON_TARGET_NODE_CPU_LEVEL_CORES
+                                ),
+                            }
+                        },
+                    },
+                )
+                archived_helper = case_root / "inputs" / "capture_prometheus.py"
+                archived_helper.write_bytes(
+                    (orchestrate.TOOLS_DIR / "capture_prometheus.py").read_bytes()
+                )
+                (case_root / "phases.ndjson").write_text(
+                    json.dumps(
+                        {
+                            "timestamp": datetime.fromtimestamp(
+                                window_start, UTC
+                            ).isoformat().replace("+00:00", "Z"),
+                            "repetition": 1,
+                            "phase": "measurement",
+                            "event": "start",
+                        }
+                    )
+                    + "\n"
+                    + json.dumps(
+                        {
+                            "timestamp": datetime.fromtimestamp(
+                                window_end, UTC
+                            ).isoformat().replace("+00:00", "Z"),
+                            "repetition": 1,
+                            "phase": "measurement",
+                            "event": "end",
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+            report = orchestrate.assess_preflight_node_noise_comparability(
+                preflight_root,
+                schedule,
+            )
+            drifted_workload_path = (
+                preflight_root
+                / "results"
+                / schedule_entries[0]["runnerCaseId"]
+                / "inputs"
+                / "workload.json"
+            )
+            drifted_workload = json.loads(
+                drifted_workload_path.read_text(encoding="utf-8")
+            )
+            drifted_workload["observability"]["prometheus"][
+                "maximumNonTargetNodeCpuRangeCores"
+            ] = 0.75
+            write_json(drifted_workload_path, drifted_workload)
+            drifted_report = orchestrate.assess_preflight_node_noise_comparability(
+                preflight_root,
+                schedule,
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(
+            report["excludedCaseBlocks"],
+            [{"caseId": "case-2", "block": 1}],
+        )
+        failed = next(
+            item for item in report["caseBlocks"] if item["caseId"] == "case-2"
+        )
+        self.assertEqual(
+            failed["reasons"],
+            ["node-a: cross-run-background-spread"],
+        )
+        self.assertEqual(failed["nodes"][0]["samples"], 2)
+        for item in report["caseBlocks"]:
+            self.assertIs(item["comparable"], item["caseId"] != "case-2")
+        self.assertFalse(drifted_report["passed"])
+        drifted_case = next(
+            item
+            for item in drifted_report["caseBlocks"]
+            if item["caseId"] == "case-1"
+        )
+        self.assertIn(
+            "case-1/java/block-1: unavailable-invalid-or-over-limit",
+            drifted_case["reasons"],
+        )
+
+    def test_preflight_node_noise_fails_closed_on_missing_raw_evidence(self) -> None:
+        schedule = {
+            "entries": [
+                {
+                    "sequence": sequence,
+                    "entryId": f"case-{(sequence + 1) // 2}/variant-{sequence}/block-1",
+                    "runnerCaseId": f"runner-{sequence}",
+                    "matrixCaseId": f"case-{(sequence + 1) // 2}",
+                    "variantId": f"variant-{sequence}",
+                    "block": 1,
+                }
+                for sequence in range(1, 7)
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            report = orchestrate.assess_preflight_node_noise_comparability(
+                Path(directory),
+                schedule,
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(len(report["excludedCaseBlocks"]), 3)
+        self.assertTrue(
+            all(
+                item["reasons"]
+                and all(
+                    reason.endswith("unavailable-invalid-or-over-limit")
+                    for reason in item["reasons"]
+                )
+                for item in report["caseBlocks"]
+            )
+        )
 
     @staticmethod
     def relay_headroom_report() -> dict[str, object]:

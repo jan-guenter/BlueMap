@@ -1912,6 +1912,26 @@ def validate_preflight_attestation(
         }
         if report_entry != expected_entry:
             raise AnalysisFailure("preflight report entry identity differs")
+    first_preflight_control = preflight_rows[0]["controlIdentity"]
+    preflight_nodes = first_preflight_control.get("nodes")
+    preflight_prometheus = first_preflight_control.get("observability", {}).get(
+        "prometheus"
+    )
+    if any(
+        row["controlIdentity"].get("nodes") != preflight_nodes
+        or row["controlIdentity"].get("observability", {}).get("prometheus")
+        != preflight_prometheus
+        for row in preflight_rows
+    ):
+        raise AnalysisFailure("preflight node-noise controls changed between pairs")
+    expected_preflight_noise_comparability = apply_block_noise_comparability(
+        preflight_rows,
+        {
+            "nodes": preflight_nodes,
+            "observability": {"prometheus": preflight_prometheus},
+        },
+        expected_blocks=(1,),
+    )
     expected_traffic = {
         "mode": "ssh-l4-traefik",
         "baseUrl": TRAFFIC_BASE_URLS["ssh-l4-traefik"],
@@ -1926,6 +1946,8 @@ def validate_preflight_attestation(
         or report.get("kind") != "ssh-l4-traefik-preflight"
         or report.get("passed") is not True
         or report.get("failures") != []
+        or report.get("nodeNoiseComparability")
+        != expected_preflight_noise_comparability
         or report.get("formalRunId") != execution_identity["formalRunId"]
         or report.get("benchmarkGitRevision") != matrix["benchmarkGitRevision"]
         or report.get("sourceFormalInputs") != expected_source
@@ -3410,11 +3432,15 @@ def workload_control_identity(
             prometheus.get("baseUrl"),
             f"{entry_id}: Prometheus baseUrl",
         )
-        finite_number(
-            prometheus.get("stepSeconds"),
-            f"{entry_id}: Prometheus stepSeconds",
-            minimum=1,
-        )
+        step_seconds = prometheus.get("stepSeconds")
+        if (
+            isinstance(step_seconds, bool)
+            or not isinstance(step_seconds, int)
+            or step_seconds < 1
+        ):
+            raise AnalysisFailure(
+                f"{entry_id}: Prometheus stepSeconds must be a positive integer"
+            )
         for key in (
             "maximumNonTargetNodeCpuRangeCores",
             "maximumNonTargetNodeCpuMeanCores",
@@ -4929,11 +4955,13 @@ def summarize_prometheus(
     if bundle.get("nodes") != workload["targets"].get("nodes"):
         raise AnalysisFailure(f"{path}: Prometheus node identities mismatch")
     capture_range = bundle.get("range")
-    expected_step = finite_number(
-        observability.get("stepSeconds"),
-        "Prometheus stepSeconds",
-        minimum=1,
-    )
+    expected_step = observability.get("stepSeconds")
+    if (
+        isinstance(expected_step, bool)
+        or not isinstance(expected_step, int)
+        or expected_step < 1
+    ):
+        raise AnalysisFailure("Prometheus stepSeconds must be a positive integer")
     if (
         not isinstance(capture_range, dict)
         or capture_range.get("start") != result_range.get("startEpoch")
@@ -5138,6 +5166,9 @@ def summarize_prometheus(
                 }
             ],
             **thresholds,
+            query_start=capture_range["start"],
+            query_end=capture_range["end"],
+            step_seconds=expected_step,
         )
     except (TypeError, ValueError) as error:
         raise AnalysisFailure(f"{path}: cannot recompute node noise") from error
@@ -6230,7 +6261,10 @@ def validate_run_control_continuity(
 
 
 def apply_block_noise_comparability(
-    rows: list[dict[str, Any]], control_identity: dict[str, Any]
+    rows: list[dict[str, Any]],
+    control_identity: dict[str, Any],
+    *,
+    expected_blocks: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     for row in rows:
         row["preBlockMetricEligibility"] = dict(row["metricEligibility"])
@@ -6238,6 +6272,7 @@ def apply_block_noise_comparability(
     if not prometheus["enabled"]:
         return {
             "enabled": False,
+            "passed": True,
             "excludedCaseBlocks": [],
             "caseBlocks": [],
         }
@@ -6248,10 +6283,22 @@ def apply_block_noise_comparability(
     for row in rows:
         expected_variants[row["caseId"]].add(row["variantId"])
         grouped[(row["caseId"], row["block"])].append(row)
+    blocks = (
+        tuple(range(1, EXPECTED_BLOCKS + 1))
+        if expected_blocks is None
+        else tuple(expected_blocks)
+    )
+    if (
+        not blocks
+        or len(set(blocks)) != len(blocks)
+        or any(
+            isinstance(block, bool) or not isinstance(block, int) or block < 1
+            for block in blocks
+        )
+    ):
+        raise AnalysisFailure("node-noise expected block identity is invalid")
     expected_groups = {
-        (case_id, block)
-        for case_id in expected_variants
-        for block in range(1, EXPECTED_BLOCKS + 1)
+        (case_id, block) for case_id in expected_variants for block in blocks
     }
     if set(grouped) != expected_groups:
         raise AnalysisFailure("node-noise case/block groups are incomplete")
@@ -6280,7 +6327,7 @@ def apply_block_noise_comparability(
                 or not isinstance(repetitions[0], dict)
                 or not isinstance(repetitions[0].get("nodes"), list)
             ):
-                reasons.append(f"{row['entryId']}: unavailable-or-noisy")
+                reasons.append(f"{row['entryId']}: unavailable-invalid-or-over-limit")
                 continue
             nodes = repetitions[0]["nodes"]
             by_node = {
@@ -6348,6 +6395,7 @@ def apply_block_noise_comparability(
         )
     return {
         "enabled": True,
+        "passed": not excluded_case_blocks,
         "maximumAllowedSpreadCores": spread_limit,
         "excludedCaseBlocks": excluded_case_blocks,
         "caseBlocks": case_block_reports,

@@ -813,6 +813,36 @@ class RunPodAnalyzerTests(unittest.TestCase):
                         "remain the request-scoped 5xx gate."
                     ),
                 },
+                "nodeNoiseComparability": {
+                    "enabled": True,
+                    "passed": True,
+                    "maximumAllowedSpreadCores": 0.5,
+                    "excludedCaseBlocks": [],
+                    "caseBlocks": [
+                        {
+                            "caseId": case_id,
+                            "block": 1,
+                            "comparable": True,
+                            "reasons": [],
+                            "nodes": [
+                                {
+                                    "node": "node-a",
+                                    "samples": 2,
+                                    "meanSpreadCores": 0.0,
+                                    "maximumSpreadCores": 0.0,
+                                    "maximumAllowedSpreadCores": 0.5,
+                                    "comparable": True,
+                                }
+                            ],
+                        }
+                        for case_id in sorted(
+                            {
+                                entry["matrixCaseId"]
+                                for entry in schedule["entries"]
+                            }
+                        )
+                    ],
+                },
                 "entries": [
                     {
                         "sequence": entry["sequence"],
@@ -851,9 +881,29 @@ class RunPodAnalyzerTests(unittest.TestCase):
                 entry = args[1]
                 assert isinstance(entry, dict)
                 return {
+                    "entryId": entry["entryId"],
                     "sequence": entry["sequence"],
+                    "block": entry["block"],
+                    "caseId": entry["matrixCaseId"],
+                    "variantId": entry["variantId"],
                     "result": "passed",
                     "eligibleForFormalComparison": True,
+                    "metricEligibility": {
+                        "http": True,
+                        "webResource": True,
+                        "webPrometheus": True,
+                    },
+                    "failedGates": [],
+                    "gates": {},
+                    "controlIdentity": {
+                        "nodes": ["node-a"],
+                        "observability": {
+                            "prometheus": {
+                                "enabled": True,
+                                "maximumNonTargetNodeCpuRangeCores": 0.5,
+                            }
+                        },
+                    },
                     "timing": {
                         "resultStartedEpoch": START_EPOCH
                         + 12
@@ -866,6 +916,22 @@ class RunPodAnalyzerTests(unittest.TestCase):
                         "runnerCooldownSatisfied": True,
                     },
                     "metrics": {
+                        "nodeNoise": {
+                            "enabled": True,
+                            "available": True,
+                            "passed": True,
+                            "repetitions": [
+                                {
+                                    "nodes": [
+                                        {
+                                            "node": "node-a",
+                                            "meanCores": 1.0,
+                                            "maximumCores": 1.25,
+                                        }
+                                    ]
+                                }
+                            ],
+                        },
                         "transportProof": {
                             "mode": "ssh-l4-traefik",
                             "passed": True,
@@ -1938,6 +2004,101 @@ class RunPodAnalyzerTests(unittest.TestCase):
             analyze.metric_eligibility_counts(rows, "metricEligibility"),
             {"http": 4, "webResource": 3, "webPrometheus": 4},
         )
+
+    def test_block_noise_compares_paired_variant_mean_and_maximum_spreads(
+        self,
+    ) -> None:
+        rows = []
+        for block in range(1, 6):
+            for variant, mean, maximum in (
+                ("java", 1.0, 1.25),
+                (
+                    "rust",
+                    1.7 if block == 3 else 1.2,
+                    2.0 if block == 3 else 1.4,
+                ),
+            ):
+                rows.append(
+                    {
+                        "entryId": f"case/{variant}/block-{block}",
+                        "caseId": "case",
+                        "variantId": variant,
+                        "block": block,
+                        "eligibleForFormalComparison": True,
+                        "metricEligibility": {
+                            "http": True,
+                            "webResource": True,
+                            "webPrometheus": True,
+                        },
+                        "failedGates": [],
+                        "gates": {},
+                        "metrics": {
+                            "nodeNoise": {
+                                "enabled": True,
+                                "available": True,
+                                "passed": True,
+                                "repetitions": [
+                                    {
+                                        "nodes": [
+                                            {
+                                                "node": "node-a",
+                                                "meanCores": mean,
+                                                "maximumCores": maximum,
+                                                "rangeCores": 10.0,
+                                            }
+                                        ]
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                )
+        control_identity = {
+            "nodes": ["node-a"],
+            "observability": {
+                "prometheus": {
+                    "enabled": True,
+                    "maximumNonTargetNodeCpuRangeCores": 0.5,
+                }
+            },
+        }
+
+        result = analyze.apply_block_noise_comparability(rows, control_identity)
+
+        self.assertEqual(
+            result["excludedCaseBlocks"],
+            [{"caseId": "case", "block": 3}],
+        )
+        block_three = next(
+            report
+            for report in result["caseBlocks"]
+            if report["caseId"] == "case" and report["block"] == 3
+        )
+        self.assertFalse(block_three["comparable"])
+        self.assertEqual(
+            block_three["reasons"],
+            ["node-a: cross-run-background-spread"],
+        )
+        self.assertAlmostEqual(block_three["nodes"][0]["meanSpreadCores"], 0.7)
+        self.assertAlmostEqual(
+            block_three["nodes"][0]["maximumSpreadCores"], 0.75
+        )
+        self.assertEqual(
+            block_three["nodes"][0]["maximumAllowedSpreadCores"],
+            0.5,
+        )
+
+        for row in rows:
+            with self.subTest(entry=row["entryId"]):
+                expected = row["block"] != 3
+                self.assertIs(
+                    row["gates"]["blockNodeNoiseComparability"], expected
+                )
+                self.assertIs(row["eligibleForFormalComparison"], expected)
+                self.assertEqual(
+                    all(row["metricEligibility"].values()),
+                    expected,
+                )
 
     def test_kubernetes_sampler_rejects_legacy_loadgen_role(self) -> None:
         workload = {

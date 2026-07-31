@@ -825,16 +825,39 @@ When enabled, the runner derives exact nodes from the selected Pods. It
 captures selected-Pod cAdvisor metrics, aggregate selected-node container
 CPU/throttling/network, node-exporter idle/steal CPU, disk IO and network
 joined through `node_uname_info{nodename,instance}`, plus non-target container
-CPU on those nodes. Every measurement repetition is rejected if any selected
-node has fewer than two background samples or exceeds the configured
-non-target CPU range, mean, or maximum. Defaults are 0.5, 3, and 4 cores;
-all three are configurable and recorded.
+CPU on those nodes. The non-target query must return exactly one series for
+every selected node and no other or duplicate node series. Every timestamp and
+value must be finite. Formal captures use a 15-second step; for each measurement
+window the sampler requires all and only the timestamps on the query-start-
+anchored 15-second grid. The gaps from the window edges to its first and last
+grid evaluations must each be no greater than one step. This proves evaluation
+coverage at the edges, not independent scrape freshness. Missing, duplicate,
+off-grid, edge-incomplete, negative, or non-finite samples fail closed instead
+of being silently discarded.
 
-Absolute gates catch a single noisy run, but accepted cases can still have
-different background levels. Before comparing variants, group the Prometheus
-`nodeNoise.repetitions[].nodes[]` mean/maximum values by schedule block and
-node, and reject/re-run a block whose cross-case background baseline is not
-comparable. Never tune a threshold after looking at which variant won.
+Each repetition applies absolute caps to the per-node mean and maximum
+non-target CPU levels. The query is a 60-second `rate(...)` evaluated every 15
+seconds, so adjacent samples overlap and the first 60 seconds of each
+measurement still include warm-up history. Those first four evaluations remain
+in the full-window diagnostics but are excluded from the gated statistics. At
+least four complete post-lookback evaluations are required. The formal caps are
+3 mean cores and 4 maximum cores. The observed minimum, maximum, and raw range
+remain in
+`nodeNoise.repetitions[].nodes[]` as diagnostics, but the raw within-run range
+is not itself an absolute rejection gate.
+
+Accepted cases can still have different background levels. Before comparing
+variants, the analyzer pairs their Prometheus node-noise values by case,
+schedule block, and exact node. It rejects the whole paired block when either
+the per-node mean spread or maximum spread across variants exceeds the frozen
+limit (0.5 cores by default). This is the existing
+`maximumNonTargetNodeCpuRangeCores` control; despite its legacy name it governs
+the paired cross-variant spread, not a single run's raw range. All three values
+are recorded. The formal controller binds the 15-second step, 0.5-core paired
+spread, 3-core mean, and 4-core maximum to the reviewed source revision rather
+than accepting them from a matrix or captured artifact. Direct non-formal runner
+invocations may configure these controls. Never tune a threshold after looking
+at which variant won.
 
 The cluster's MariaDB exporter is disabled. MariaDB parity therefore consists
 of database-Pod cAdvisor data and application-visible connection behavior;

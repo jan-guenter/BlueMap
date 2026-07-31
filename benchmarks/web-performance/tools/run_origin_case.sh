@@ -148,12 +148,12 @@ Workload options:
   --prometheus-url URL            optional Prometheus base URL
   --prometheus-step-seconds N     query_range step (default: 15)
   --max-non-target-node-cpu-range-cores N
-                                  reject noisy repetitions above this CPU range
-                                  (default: 0.5 cores; Prometheus only)
+                                  paired cross-variant mean/maximum spread limit
+                                  (default: 0.5 cores; raw run range is diagnostic)
   --max-non-target-node-cpu-mean-cores N
-                                  reject mean background CPU above N (default: 3)
+                                  reject post-lookback mean CPU above N (default: 3)
   --max-non-target-node-cpu-maximum-cores N
-                                  reject peak background CPU above N (default: 4)
+                                  reject post-lookback peak CPU above N (default: 4)
 
 Path/cluster options:
   --load-generator-backend kubernetes|runpod-ssh
@@ -595,7 +595,7 @@ validate_positive_integer "Prometheus step" "$PROMETHEUS_STEP_SECONDS"
 validate_positive_number "latency p95" "$LATENCY_P95_MS"
 validate_positive_number "latency p99" "$LATENCY_P99_MS"
 validate_positive_number \
-    "maximum non-target node CPU range" \
+    "maximum paired non-target node CPU spread" \
     "$MAX_NON_TARGET_NODE_CPU_RANGE_CORES"
 validate_positive_number \
     "maximum non-target node CPU mean" \
@@ -2166,7 +2166,7 @@ capture_prometheus_metrics() {
                 "$ARTIFACT_DIR/samples/prometheus-query-range.json"
         )"
         record_failure \
-            "Prometheus flagged noisy or incomplete node samples in repetitions $noisy_repetitions"
+            "Prometheus rejected incomplete, invalid, or absolute over-limit node samples in repetitions $noisy_repetitions"
         return 1
     fi
 }

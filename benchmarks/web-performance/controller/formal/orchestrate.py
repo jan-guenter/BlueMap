@@ -12,6 +12,7 @@ import argparse
 import copy
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -82,6 +83,10 @@ TRAFFIC_SERVICE_PORT = 8100
 CONFIRMATION = "RUN-FROZEN-80-ENTRY-MATRIX"
 PREFLIGHT_CONFIRMATION = "RUN-FROZEN-SSH-L4-PREFLIGHT"
 PREFLIGHT_TRAFFIC_MODE = "ssh-l4-traefik"
+PROMETHEUS_STEP_SECONDS = 15
+MAXIMUM_NON_TARGET_NODE_CPU_SPREAD_CORES = 0.5
+MAXIMUM_NON_TARGET_NODE_CPU_MEAN_CORES = 3.0
+MAXIMUM_NON_TARGET_NODE_CPU_LEVEL_CORES = 4.0
 PREFLIGHT_SCHEDULE_SEED = "bluemap-web-performance-ssh-l4-preflight-v1"
 PREFLIGHT_VARIANTS = (
     "java-new-postgresql",
@@ -2306,13 +2311,13 @@ def build_runner_command(
         "--metrics-interval-seconds",
         "5",
         "--prometheus-step-seconds",
-        "15",
+        str(PROMETHEUS_STEP_SECONDS),
         "--max-non-target-node-cpu-range-cores",
-        "0.5",
+        str(MAXIMUM_NON_TARGET_NODE_CPU_SPREAD_CORES),
         "--max-non-target-node-cpu-mean-cores",
-        "3.0",
+        str(MAXIMUM_NON_TARGET_NODE_CPU_MEAN_CORES),
         "--max-non-target-node-cpu-maximum-cores",
-        "4.0",
+        str(MAXIMUM_NON_TARGET_NODE_CPU_LEVEL_CORES),
         "--artifact-root",
         str(options.artifact_root),
         "--python",
@@ -3049,6 +3054,259 @@ def assess_preflight_state(
     }
 
 
+def compare_preflight_node_noise_rows(
+    rows: Sequence[dict[str, Any]],
+    expected_nodes: set[str],
+    spread_limit: float,
+) -> dict[str, Any]:
+    """Apply the formal paired mean/maximum spread gate to block-one rows."""
+
+    expected_variants: dict[str, set[str]] = {}
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        expected_variants.setdefault(row["caseId"], set()).add(row["variantId"])
+        grouped.setdefault((row["caseId"], row["block"]), []).append(row)
+    expected_groups = {(case_id, 1) for case_id in expected_variants}
+    if set(grouped) != expected_groups:
+        raise SafetyError("Preflight node-noise case/block groups are incomplete")
+
+    case_block_reports: list[dict[str, Any]] = []
+    excluded_case_blocks: list[dict[str, Any]] = []
+    for case_id, block in sorted(grouped):
+        block_rows = grouped[(case_id, block)]
+        if {row["variantId"] for row in block_rows} != expected_variants[case_id]:
+            raise SafetyError(
+                f"Preflight node-noise variants are incomplete for {case_id}"
+            )
+        values: dict[str, dict[str, list[float]]] = {
+            node: {"mean": [], "maximum": []} for node in expected_nodes
+        }
+        reasons: list[str] = []
+        for row in block_rows:
+            noise = row["nodeNoise"]
+            repetitions = noise.get("repetitions")
+            if (
+                noise.get("enabled") is not True
+                or noise.get("available") is not True
+                or noise.get("passed") is not True
+                or not isinstance(repetitions, list)
+                or len(repetitions) != 1
+                or not isinstance(repetitions[0], dict)
+                or not isinstance(repetitions[0].get("nodes"), list)
+            ):
+                reasons.append(
+                    f"{row['entryId']}: unavailable-invalid-or-over-limit"
+                )
+                continue
+            nodes = repetitions[0]["nodes"]
+            by_node = {
+                item.get("node"): item for item in nodes if isinstance(item, dict)
+            }
+            if len(by_node) != len(nodes) or set(by_node) != expected_nodes:
+                reasons.append(f"{row['entryId']}: node-set-mismatch")
+                continue
+            malformed = False
+            for node, item in by_node.items():
+                mean = item.get("meanCores")
+                maximum = item.get("maximumCores")
+                if (
+                    isinstance(mean, bool)
+                    or not isinstance(mean, (int, float))
+                    or not math.isfinite(float(mean))
+                    or float(mean) < 0
+                    or isinstance(maximum, bool)
+                    or not isinstance(maximum, (int, float))
+                    or not math.isfinite(float(maximum))
+                    or float(maximum) < 0
+                ):
+                    malformed = True
+                    break
+                values[node]["mean"].append(float(mean))
+                values[node]["maximum"].append(float(maximum))
+            if malformed:
+                reasons.append(f"{row['entryId']}: malformed-node-summary")
+
+        node_reports = []
+        if not reasons:
+            for node in sorted(expected_nodes):
+                means = values[node]["mean"]
+                maxima = values[node]["maximum"]
+                mean_spread = max(means) - min(means)
+                maximum_spread = max(maxima) - min(maxima)
+                comparable = (
+                    len(means) == len(block_rows)
+                    and mean_spread <= spread_limit
+                    and maximum_spread <= spread_limit
+                )
+                node_reports.append(
+                    {
+                        "node": node,
+                        "samples": len(means),
+                        "meanSpreadCores": mean_spread,
+                        "maximumSpreadCores": maximum_spread,
+                        "maximumAllowedSpreadCores": spread_limit,
+                        "comparable": comparable,
+                    }
+                )
+                if not comparable:
+                    reasons.append(f"{node}: cross-run-background-spread")
+        comparable = not reasons
+        if not comparable:
+            excluded_case_blocks.append({"caseId": case_id, "block": block})
+        case_block_reports.append(
+            {
+                "caseId": case_id,
+                "block": block,
+                "comparable": comparable,
+                "reasons": reasons,
+                "nodes": node_reports,
+            }
+        )
+    return {
+        "enabled": True,
+        "passed": not excluded_case_blocks,
+        "maximumAllowedSpreadCores": spread_limit,
+        "excludedCaseBlocks": excluded_case_blocks,
+        "caseBlocks": case_block_reports,
+    }
+
+
+def load_prometheus_capture_helper() -> Any:
+    path = TOOLS_DIR / "capture_prometheus.py"
+    if not path.is_file() or path.is_symlink():
+        raise SafetyError("Prometheus capture helper is not a regular source file")
+    spec = importlib.util.spec_from_file_location(
+        "bluemap_preflight_capture_prometheus",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise SafetyError("Could not load the Prometheus capture helper")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as error:
+        raise SafetyError(
+            f"Could not execute the Prometheus capture helper: {error}"
+        ) from error
+    return module
+
+
+def assess_preflight_node_noise_comparability(
+    preflight_root: Path,
+    schedule: dict[str, Any],
+) -> dict[str, Any]:
+    """Recompute three paired preflight background comparisons from raw files."""
+
+    entries = schedule.get("entries")
+    if not isinstance(entries, list) or len(entries) != 6:
+        raise SafetyError("Preflight node-noise assessment requires six entries")
+    helper = load_prometheus_capture_helper()
+    helper_path = TOOLS_DIR / "capture_prometheus.py"
+    helper_sha256 = file_sha256(helper_path)
+    rows = []
+    expected_nodes: set[str] | None = None
+    for entry in entries:
+        case_root = preflight_root / "results" / entry["runnerCaseId"]
+        path = (
+            case_root
+            / "samples"
+            / "prometheus-query-range.json"
+        )
+        noise_summary: dict[str, Any] = {
+            "enabled": True,
+            "available": False,
+            "passed": False,
+            "repetitions": [],
+        }
+        workload_path = case_root / "inputs" / "workload.json"
+        archived_helper_path = case_root / "inputs" / "capture_prometheus.py"
+        phases_path = case_root / "phases.ndjson"
+        required_paths = (
+            path,
+            workload_path,
+            archived_helper_path,
+            phases_path,
+        )
+        if all(item.is_file() and not item.is_symlink() for item in required_paths):
+            try:
+                bundle = load_json(path)
+                workload = load_json(workload_path)
+                capture_range = bundle.get("range")
+                nodes = workload.get("targets", {}).get("nodes")
+                prometheus = workload.get("observability", {}).get("prometheus")
+                controls_match = (
+                    isinstance(prometheus, dict)
+                    and prometheus.get("enabled") is True
+                    and prometheus.get("stepSeconds") == PROMETHEUS_STEP_SECONDS
+                    and prometheus.get("maximumNonTargetNodeCpuRangeCores")
+                    == MAXIMUM_NON_TARGET_NODE_CPU_SPREAD_CORES
+                    and prometheus.get("maximumNonTargetNodeCpuMeanCores")
+                    == MAXIMUM_NON_TARGET_NODE_CPU_MEAN_CORES
+                    and prometheus.get("maximumNonTargetNodeCpuLevelCores")
+                    == MAXIMUM_NON_TARGET_NODE_CPU_LEVEL_CORES
+                )
+                nodes_valid = (
+                    isinstance(nodes, list)
+                    and nodes
+                    and all(isinstance(node, str) and node for node in nodes)
+                    and nodes == sorted(set(nodes))
+                    and bundle.get("nodes") == nodes
+                )
+                range_valid = (
+                    isinstance(capture_range, dict)
+                    and isinstance(capture_range.get("start"), int)
+                    and not isinstance(capture_range.get("start"), bool)
+                    and isinstance(capture_range.get("end"), int)
+                    and not isinstance(capture_range.get("end"), bool)
+                    and capture_range["end"] >= capture_range["start"]
+                    and capture_range.get("stepSeconds")
+                    == PROMETHEUS_STEP_SECONDS
+                )
+                helper_matches = file_sha256(archived_helper_path) == helper_sha256
+                if controls_match and nodes_valid and range_valid and helper_matches:
+                    recomputed = helper.assess_node_noise(
+                        bundle.get("queries"),
+                        nodes,
+                        helper.measurement_windows(phases_path),
+                        MAXIMUM_NON_TARGET_NODE_CPU_SPREAD_CORES,
+                        MAXIMUM_NON_TARGET_NODE_CPU_MEAN_CORES,
+                        MAXIMUM_NON_TARGET_NODE_CPU_LEVEL_CORES,
+                        query_start=capture_range["start"],
+                        query_end=capture_range["end"],
+                        step_seconds=PROMETHEUS_STEP_SECONDS,
+                    )
+                    if bundle.get("nodeNoise") == recomputed:
+                        node_set = set(nodes)
+                        if expected_nodes is None:
+                            expected_nodes = node_set
+                        if node_set == expected_nodes:
+                            noise_summary = {
+                                "enabled": True,
+                                "available": True,
+                                "passed": recomputed.get("passed") is True,
+                                "repetitions": recomputed.get("repetitions"),
+                            }
+            except (OSError, SafetyError, TypeError, ValueError, KeyError):
+                pass
+        rows.append(
+            {
+                "entryId": entry["entryId"],
+                "caseId": entry.get("matrixCaseId")
+                or entry["entryId"].split("/", 1)[0],
+                "variantId": entry["variantId"],
+                "block": entry.get("block", 1),
+                "nodeNoise": noise_summary,
+            }
+        )
+    if expected_nodes is None:
+        expected_nodes = set()
+    return compare_preflight_node_noise_rows(
+        rows,
+        expected_nodes,
+        MAXIMUM_NON_TARGET_NODE_CPU_SPREAD_CORES,
+    )
+
+
 def validate_preflight_state_identity(
     state: dict[str, Any],
     matrix_path: Path,
@@ -3280,7 +3538,15 @@ def persist_preflight_outcome(
     if load_json(relay_path) != relay_report:
         raise SafetyError("Preserved relay headroom report differs from sampler output")
     assessment = assess_preflight_state(state, schedule)
-    passed = assessment["passed"] and relay_report["passed"]
+    node_noise_comparability = assess_preflight_node_noise_comparability(
+        preflight_root,
+        schedule,
+    )
+    passed = (
+        assessment["passed"]
+        and relay_report["passed"]
+        and node_noise_comparability["passed"]
+    )
     failures = list(assessment["failures"])
     if not relay_report["passed"]:
         failed_checks = sorted(
@@ -3289,6 +3555,14 @@ def persist_preflight_outcome(
         failures.append(
             "controller SSH relay headroom gate failed: "
             + ", ".join(failed_checks)
+        )
+    if not node_noise_comparability["passed"]:
+        failed_blocks = ", ".join(
+            f"{item['caseId']}/block-{item['block']}"
+            for item in node_noise_comparability["excludedCaseBlocks"]
+        )
+        failures.append(
+            "preflight paired node-noise comparability failed: " + failed_blocks
         )
     evidence_path = preflight_root / "preflight-evidence.json"
     atomic_write_json(
@@ -3319,6 +3593,7 @@ def persist_preflight_outcome(
             "passed": relay_report["passed"],
         },
         "traefikPrometheus": traefik_limitation,
+        "nodeNoiseComparability": node_noise_comparability,
         "entries": assessment["entries"],
         "failures": failures,
     }
@@ -3562,6 +3837,10 @@ def validate_preflight_report(
         expected_preflight_execution,
     )
     assessment = assess_preflight_state(state, schedule)
+    node_noise_comparability = assess_preflight_node_noise_comparability(
+        preflight_root,
+        schedule,
+    )
     relay_path = preflight_root / "observability" / "relay-headroom.json"
     relay = load_json(relay_path)
     validate_relay_headroom_report(relay, args.controller_pod)
@@ -3632,8 +3911,10 @@ def validate_preflight_report(
         or report.get("generatorSha256") != file_sha256(args.generator)
         or report.get("evidenceManifestSha256") != file_sha256(evidence_path)
         or report.get("entries") != assessment["entries"]
+        or report.get("nodeNoiseComparability") != node_noise_comparability
         or report.get("failures") != []
         or not assessment["passed"]
+        or node_noise_comparability.get("passed") is not True
         or relay.get("passed") is not True
         or report.get("controllerRelay")
         != {
