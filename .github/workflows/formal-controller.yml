@@ -1,6 +1,9 @@
 name: Formal benchmark controller image
 
 on:
+  push:
+    branches:
+      - experiment/runpod-formal-harness
   workflow_dispatch:
 
 permissions:
@@ -41,8 +44,44 @@ jobs:
           [[ "$benchmark_revision" =~ ^[0-9a-f]{40}$ ]]
           git cat-file -e "$benchmark_revision^{commit}"
 
+          bundle_revision="$GITHUB_SHA"
+          mapfile -t trigger_diff < <(
+            git diff-tree \
+              --no-commit-id \
+              --name-status \
+              --no-renames \
+              -r \
+              "$GITHUB_SHA"
+          )
+          expected_bootstrap_diff=(
+            $'M\t.github/workflows/formal-controller.yml'
+          )
+          bootstrap_commit=true
+          if [[ "${#trigger_diff[@]}" -ne \
+            "${#expected_bootstrap_diff[@]}" ]]; then
+            bootstrap_commit=false
+          else
+            for index in "${!expected_bootstrap_diff[@]}"; do
+              if [[ "${trigger_diff[$index]}" != \
+                "${expected_bootstrap_diff[$index]}" ]]; then
+                bootstrap_commit=false
+                break
+              fi
+            done
+          fi
+          if [[ "$bootstrap_commit" == true ]]; then
+            read -r -a trigger_commit < <(
+              git rev-list --parents -n 1 "$GITHUB_SHA"
+            )
+            [[ "${#trigger_commit[@]}" -eq 2 ]] || {
+              printf 'Workflow bootstrap commit must have exactly one parent\n' >&2
+              exit 1
+            }
+            bundle_revision="${trigger_commit[1]}"
+          fi
+
           read -r -a bundle_commit < <(
-            git rev-list --parents -n 1 "$GITHUB_SHA"
+            git rev-list --parents -n 1 "$bundle_revision"
           )
           [[ "${#bundle_commit[@]}" -eq 2 ]] || {
             printf 'Bundle commit must have exactly one parent\n' >&2
@@ -68,7 +107,7 @@ jobs:
               --name-status \
               --no-renames \
               -r \
-              "$GITHUB_SHA"
+              "$bundle_revision"
           )
           [[ "${#actual_bundle_diff[@]}" -eq "${#expected_bundle_diff[@]}" ]] || {
             printf 'Bundle commit must add exactly the six frozen JSON files\n' >&2
@@ -88,9 +127,12 @@ jobs:
             }
           done
 
-          printf 'benchmark_revision=%s\n' "$benchmark_revision" >> "$GITHUB_OUTPUT"
-          printf 'created=%s\n' "$(git show -s --format=%cI "$GITHUB_SHA")" \
-            >> "$GITHUB_OUTPUT"
+          {
+            printf 'benchmark_revision=%s\n' "$benchmark_revision"
+            printf 'bundle_revision=%s\n' "$bundle_revision"
+            printf 'created=%s\n' \
+              "$(git show -s --format=%cI "$bundle_revision")"
+          } >> "$GITHUB_OUTPUT"
 
           validation_root="$(mktemp -d)"
           git worktree add --detach "$validation_root" "$benchmark_revision"
@@ -121,6 +163,7 @@ jobs:
         shell: bash
         env:
           BENCHMARK_REVISION: ${{ steps.bundle.outputs.benchmark_revision }}
+          BUNDLE_REVISION: ${{ steps.bundle.outputs.bundle_revision }}
         run: |
           set -Eeuo pipefail
           owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
@@ -129,7 +172,7 @@ jobs:
             printf 'image=%s\n' "$image"
             printf 'tags<<EOF\n'
             printf '%s:formal-%s\n' "$image" "$BENCHMARK_REVISION"
-            printf '%s:bundle-%s\n' "$image" "$GITHUB_SHA"
+            printf '%s:bundle-%s\n' "$image" "$BUNDLE_REVISION"
             printf 'EOF\n'
           } >> "$GITHUB_OUTPUT"
 
@@ -152,7 +195,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.bundle.outputs.benchmark_revision }}
-            io.bluemap.benchmark.bundle-revision=${{ github.sha }}
+            io.bluemap.benchmark.bundle-revision=${{ steps.bundle.outputs.bundle_revision }}
 
       - name: Report immutable reference
         shell: bash
