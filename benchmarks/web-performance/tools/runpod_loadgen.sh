@@ -11,6 +11,7 @@ usage() {
 Usage:
   runpod_loadgen.sh --identity FILE --identity-key FILE validate
   runpod_loadgen.sh --identity FILE --identity-key FILE exec COMMAND [ARG...]
+  runpod_loadgen.sh --identity FILE --identity-key FILE exec-traefik-forward COMMAND [ARG...]
   runpod_loadgen.sh --identity FILE --identity-key FILE copy-to LOCAL REMOTE
   runpod_loadgen.sh --identity FILE --identity-key FILE copy-from REMOTE LOCAL
 
@@ -59,6 +60,10 @@ jq -e '
     | .formatVersion == 1
     and .backend == "runpod-ssh"
     and (.runId | type == "string" and test("^[a-z0-9][a-z0-9-]{0,62}$"))
+    and (.sourceRevision | type == "string"
+        and length == 40
+        and (gsub("[a-f0-9]"; "") | length == 0)
+        and . != "0000000000000000000000000000000000000000")
     and (.runpod.podId | type == "string" and length > 0)
     and (.runpod.machineId | type == "string" and length > 0)
     and (.runpod.dataCenterId | type == "string" and length > 0)
@@ -71,9 +76,15 @@ jq -e '
     and .runpod.secureCloud == true
     and (.runpod.publicIp | type == "string" and length > 0)
     and (.runpod.imageDigest | type == "string"
-        and test("^sha256:[a-f0-9]{64}$"))
+        and length == 71
+        and startswith("sha256:")
+        and (.[7:] | length == 64
+            and (gsub("[a-f0-9]"; "") | length == 0)
+            and . != "0000000000000000000000000000000000000000000000000000000000000000"))
     and (.runpod.image | type == "string"
-        and endswith("@" + $root.runpod.imageDigest))
+        and length == 112
+        and . == ("ghcr.io/jan-guenter/bluemap-perf-loadgen@"
+            + $root.runpod.imageDigest))
     and (.ssh.host | type == "string"
         and test("^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$"))
     and .ssh.host == .runpod.publicIp
@@ -91,6 +102,7 @@ port="$(jq -r '.ssh.port' "$IDENTITY_FILE")"
 user="$(jq -r '.ssh.user' "$IDENTITY_FILE")"
 host_key="$(jq -r '.ssh.hostKey' "$IDENTITY_FILE")"
 expected_image_digest="$(jq -r '.runpod.imageDigest' "$IDENTITY_FILE")"
+expected_source_revision="$(jq -r '.sourceRevision' "$IDENTITY_FILE")"
 expected_pod_id="$(jq -r '.runpod.podId' "$IDENTITY_FILE")"
 expected_data_center_id="$(jq -r '.runpod.dataCenterId' "$IDENTITY_FILE")"
 expected_cpu_flavor="$(jq -r '.runpod.cpuFlavorId' "$IDENTITY_FILE")"
@@ -143,6 +155,25 @@ remote_exec() {
     ssh "${ssh_options[@]}" "$user@$host" "${quoted# }"
 }
 
+remote_exec_traefik_forward() {
+    (($# > 0)) || die "Remote command is empty"
+    local quoted=""
+    local argument
+    for argument in "$@"; do
+        printf -v quoted '%s %q' "$quoted" "$argument"
+    done
+    # This purpose-built reverse forward has no user-controlled listen or target.
+    # ExitOnForwardFailure prevents k6 from starting without the intended path.
+    # shellcheck disable=SC2029
+    ssh \
+        "${ssh_options[@]}" \
+        -o ExitOnForwardFailure=yes \
+        -R \
+        127.0.0.1:18080:rke2-traefik.kube-system.svc.cluster.local:80 \
+        "$user@$host" \
+        "${quoted# }"
+}
+
 validate_remote_identity() {
     local actual
     actual="$(remote_exec bluemap-runpod-identity)" ||
@@ -150,6 +181,7 @@ validate_remote_identity() {
     jq -e \
         --arg runId "$run_id" \
         --arg imageDigest "$expected_image_digest" \
+        --arg sourceRevision "$expected_source_revision" \
         --arg podId "$expected_pod_id" \
         --arg dataCenterId "$expected_data_center_id" \
         --arg cpuFlavor "$expected_cpu_flavor" \
@@ -158,6 +190,7 @@ validate_remote_identity() {
         .formatVersion == 1
         and .runId == $runId
         and .imageDigest == $imageDigest
+        and .sourceRevision == $sourceRevision
         and .runpod.podId == $podId
         and .runpod.dataCenterId == $dataCenterId
         and .runpod.cpuFlavor == $cpuFlavor
@@ -231,6 +264,10 @@ case "$command_name" in
     exec)
         validate_remote_identity >/dev/null
         remote_exec "$@"
+        ;;
+    exec-traefik-forward)
+        validate_remote_identity >/dev/null
+        remote_exec_traefik_forward "$@"
         ;;
     copy-to)
         (($# == 2)) || die "copy-to requires LOCAL and REMOTE"

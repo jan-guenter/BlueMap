@@ -6,12 +6,24 @@ single unprivileged `loadgen` user.
 
 The provisioner supplies an ephemeral Ed25519 public key through
 `BLUEMAP_RUNPOD_SSH_PUBLIC_KEY`. Password authentication, root login,
+local TCP forwarding, Unix-socket forwarding, agent forwarding, X11
 forwarding, tunnelling, and user-controlled SSH environment variables are
-disabled. The private key is never sent to RunPod.
+disabled. The only permitted TCP forwarding mode is a controller-created
+remote forward listening on RunPod loopback at `127.0.0.1:18080`.
+`GatewayPorts no` and `PermitListen 127.0.0.1:18080` prevent that listener
+from becoming a general-purpose or publicly reachable proxy. The private key
+is never sent to RunPod, and the RunPod API still exposes only SSH port 22.
+
+The restricted listener is reserved for the direct L4 benchmark route. It
+lets k6 retain `bluemap-test.guenter.cloud` as the URL host while the
+controller carries opaque HTTP bytes to the cluster's internal Traefik
+service. Consequently both `Host: bluemap-test.guenter.cloud` and
+`Accept-Encoding: zstd` reach Traefik without Cloudflare HTTP processing.
 
 The formal run freezes and records:
 
 - the image digest;
+- the full source revision baked into that image at build time;
 - RunPod Pod, machine, data-center, CPU-flavor, and vCPU identities;
 - the SSH host-key fingerprint;
 - the output of `bluemap-runpod-identity`;
@@ -28,15 +40,21 @@ The `runpod-loadgen-image` job in `.github/workflows/web.yml` publishes:
 ghcr.io/<lowercase-repository-owner>/bluemap-perf-loadgen:sha-<git-commit>
 ```
 
+The workflow passes its full lowercase Git SHA as a required Docker build
+argument. The image stores that revision in a root-owned, read-only build
+record. It is never supplied through the RunPod runtime environment.
+
 Provisioning must use the manifest digest, never the mutable tag:
 
 ```text
 ghcr.io/<lowercase-repository-owner>/bluemap-perf-loadgen@sha256:<digest>
 ```
 
-The lifecycle helper rejects every other repository name, a tag-only
-reference, Community/interruptible compute, non-EU placement, CPU flavors
-other than `cpu5c`, and allocations other than 8 vCPUs.
+The formal lifecycle helper accepts only
+`ghcr.io/jan-guenter/bluemap-perf-loadgen@sha256:<digest>`. It rejects every
+other repository, a tag-only reference, Community/interruptible compute,
+non-EU placement, CPU flavors other than `cpu5c`, and allocations other than
+8 vCPUs.
 
 ## Secret-safe provisioning
 
@@ -49,6 +67,7 @@ First inspect the exact, non-secret v1 request without making an API call:
 benchmarks/web-performance/tools/manage_runpod_loadgen.py plan \
   --run-id formal-25db-r3 \
   --image ghcr.io/jan-guenter/bluemap-perf-loadgen@sha256:<digest> \
+  --source-revision <40-character-source-S-git-sha> \
   --data-center EU-NL-1 \
   --ssh-public-key /secure/runpod-formal/id_ed25519.pub \
   --ssh-private-key /secure/runpod-formal/id_ed25519
@@ -65,6 +84,7 @@ Then create exactly one Pod. `--confirm-create` must repeat the run ID:
     --run-id formal-25db-r3 \
     --confirm-create formal-25db-r3 \
     --image ghcr.io/jan-guenter/bluemap-perf-loadgen@sha256:<digest> \
+    --source-revision <40-character-source-S-git-sha> \
     --data-center EU-NL-1 \
     --ssh-public-key /secure/runpod-formal/id_ed25519.pub \
     --ssh-private-key /secure/runpod-formal/id_ed25519 \
@@ -94,8 +114,8 @@ After the Pod is ready, the helper:
    Secure placement, exact data center, CPU allocation, and network floors;
 2. reads the Ed25519 SSH host key three times and requires an identical key;
 3. freezes that key and its SHA-256 fingerprint in `frozen-identity.json`;
-4. connects with strict host-key checking and runs
-   `bluemap-runpod-identity`;
+4. connects with strict host-key checking, runs `bluemap-runpod-identity`, and
+   requires its baked source revision to equal `--source-revision`;
 5. writes the independently observed result to
    `live-identity-before.json`.
 

@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 
@@ -36,6 +37,28 @@ def json_object(path: Path) -> dict[str, object]:
 def require_file(path: Path) -> None:
     if not path.is_file() or path.is_symlink():
         raise ValidationError(f"required regular file is missing: {path}")
+
+
+def validate_load_generator(value: object, revision: str) -> dict[str, str]:
+    keys = {"backend", "image", "imageDigest", "sourceRevision"}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ValidationError("bundle loadGenerator must contain exactly four fields")
+    image = value.get("image")
+    match = re.fullmatch(
+        r"ghcr\.io/jan-guenter/bluemap-perf-loadgen@"
+        r"(?P<digest>sha256:[0-9a-f]{64})",
+        image if isinstance(image, str) else "",
+    )
+    digest = value.get("imageDigest")
+    if (
+        value.get("backend") != "runpod-ssh"
+        or match is None
+        or digest != match.group("digest")
+        or set(str(digest).removeprefix("sha256:")) == {"0"}
+        or value.get("sourceRevision") != revision
+    ):
+        raise ValidationError("bundle loadGenerator binding is invalid")
+    return {key: value[key] for key in ("backend", "image", "imageDigest", "sourceRevision")}
 
 
 def main() -> int:
@@ -111,6 +134,44 @@ def main() -> int:
     if seen != set(expected_paths):
         raise ValidationError("controller lock is incomplete")
 
+    admission = json_object(files["runtime-admission-identities.json"])
+    bundle = json_object(files["bundle-manifest.json"])
+    expected_bundle = {
+        "formatVersion": 1,
+        "benchmarkGitRevision": revision,
+        "matrixSha256": sha256(files["matrix.json"]),
+        "scheduleSha256": sha256(files["schedule.json"]),
+        "runtimeAdmissionIdentitiesSha256": sha256(
+            files["runtime-admission-identities.json"]
+        ),
+        "controllerLockSha256": sha256(files["controller-lock.json"]),
+        "orchestratorSha256": sha256(files["orchestrate.py"]),
+        "freezerSha256": sha256(files["freeze.py"]),
+        "analyzerSha256": sha256(files["analyze.py"]),
+    }
+    if set(bundle) != set(expected_bundle) | {"createdAt", "loadGenerator"}:
+        raise ValidationError(
+            "bundle manifest must contain exactly the reviewed bindings"
+        )
+    for field, expected in expected_bundle.items():
+        if bundle.get(field) != expected:
+            raise ValidationError(f"bundle {field} differs from frozen inputs")
+    created_at = bundle.get("createdAt")
+    if not isinstance(created_at, str):
+        raise ValidationError("bundle createdAt is invalid")
+    try:
+        parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValidationError("bundle createdAt is invalid") from error
+    if parsed_created_at.tzinfo is None or parsed_created_at.utcoffset() is None:
+        raise ValidationError("bundle createdAt must include a timezone")
+    load_generator = validate_load_generator(bundle.get("loadGenerator"), revision)
+    if (
+        admission.get("formatVersion") != 1
+        or admission.get("benchmarkGitRevision") != revision
+    ):
+        raise ValidationError("runtime admission identities target another revision")
+
     analyzer = files["analyze.py"].read_text(encoding="utf-8")
     legacy_literals = ("loadgenPodIdentity", '"loadgenPod"')
     present_legacy = [value for value in legacy_literals if value in analyzer]
@@ -123,11 +184,14 @@ def main() -> int:
         "runpod-ssh",
         "loadGeneratorIdentity",
         "loadGeneratorCapacity",
+        "cloudflare-https",
+        "ssh-l4-traefik",
+        "SSH_L4_TRAEFIK_TUNNEL",
     )
     missing = [value for value in required_analyzer_literals if value not in analyzer]
     if missing:
         raise ValidationError(
-            "analyzer does not declare frozen RunPod identity/capacity evidence: "
+            "analyzer does not declare required RunPod/traffic controls: "
             + ", ".join(missing)
         )
 
@@ -136,6 +200,7 @@ def main() -> int:
     runner_text = runner.read_text(encoding="utf-8")
     for literal in (
         "--load-generator-backend",
+        "--traffic-mode",
         "--traffic-base-url",
         "--traffic-service",
         "--traffic-service-port",
@@ -154,6 +219,15 @@ def main() -> int:
                 "scheduleSha256": sha256(files["schedule.json"]),
                 "manifestSha256": sha256(files["manifest.json"]),
                 "analyzerSha256": sha256(files["analyze.py"]),
+                "loadGenerator": load_generator,
+                "loadGeneratorSha256": hashlib.sha256(
+                    json.dumps(
+                        load_generator,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest(),
             },
             indent=2,
             sort_keys=True,

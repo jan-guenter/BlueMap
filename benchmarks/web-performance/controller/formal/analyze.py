@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import ipaddress
 import itertools
 import json
@@ -65,14 +64,32 @@ GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 CONTAINER_NAME = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 DURATION = re.compile(r"^([1-9][0-9]*)(ms|s|m|h)$")
+METRICS_WINDOW = re.compile(r"^([0-9]+(?:\.[0-9]+)?)(ms|s|m)$")
 RUNPOD_ID = re.compile(r"^[A-Za-z0-9_-]{3,191}$")
 RUNPOD_RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 RUNPOD_IMAGE = re.compile(
-    r"^ghcr\.io/[a-z0-9][a-z0-9._-]*/"
-    r"bluemap-perf-loadgen@sha256:[a-f0-9]{64}$"
+    r"^ghcr\.io/jan-guenter/bluemap-perf-loadgen@"
+    r"(?P<digest>sha256:[a-f0-9]{64})$"
 )
+LOAD_GENERATOR_CONTROL_KEYS = {
+    "backend",
+    "image",
+    "imageDigest",
+    "sourceRevision",
+}
 SSH_HOST_KEY = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/=]+$")
 SSH_FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]+$")
+TRAFFIC_MODES = {"cloudflare-https", "ssh-l4-traefik"}
+TRAFFIC_BASE_URLS = {
+    "cloudflare-https": "https://bluemap-test.guenter.cloud",
+    "ssh-l4-traefik": "http://bluemap-test.guenter.cloud",
+}
+SSH_L4_TRAEFIK_TUNNEL = {
+    "listenHost": "127.0.0.1",
+    "listenPort": 18080,
+    "targetHost": "rke2-traefik.kube-system.svc.cluster.local",
+    "targetPort": 80,
+}
 PROFILES = {
     "static",
     "hot-tile",
@@ -196,6 +213,57 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def validate_load_generator_control(
+    value: Any,
+    benchmark_revision: str,
+    label: str = "frozen bundle loadGenerator",
+) -> dict[str, str]:
+    if (
+        GIT_REVISION.fullmatch(benchmark_revision) is None
+        or set(benchmark_revision) == {"0"}
+    ):
+        raise AnalysisFailure("benchmark revision for loadGenerator is invalid")
+    if not isinstance(value, dict) or set(value) != LOAD_GENERATOR_CONTROL_KEYS:
+        raise AnalysisFailure(f"{label} must contain exactly four fields")
+    image = value.get("image")
+    match = RUNPOD_IMAGE.fullmatch(image if isinstance(image, str) else "")
+    digest = value.get("imageDigest")
+    if (
+        value.get("backend") != "runpod-ssh"
+        or match is None
+        or digest != match.group("digest")
+        or set(str(digest).removeprefix("sha256:")) == {"0"}
+        or value.get("sourceRevision") != benchmark_revision
+    ):
+        raise AnalysisFailure(
+            f"{label} backend, immutable image, digest, or source revision differs"
+        )
+    return {
+        "backend": value["backend"],
+        "image": image,
+        "imageDigest": digest,
+        "sourceRevision": value["sourceRevision"],
+    }
+
+
+def validate_load_generator_execution_binding(
+    control: dict[str, str],
+    identity: dict[str, Any],
+) -> str:
+    runpod = identity.get("runpod")
+    if (
+        identity.get("backend") != control["backend"]
+        or identity.get("sourceRevision") != control["sourceRevision"]
+        or not isinstance(runpod, dict)
+        or runpod.get("image") != control["image"]
+        or runpod.get("imageDigest") != control["imageDigest"]
+    ):
+        raise AnalysisFailure(
+            "frozen bundle loadGenerator differs from execution identity"
+        )
+    return canonical_sha256(control)
+
+
 def load_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -293,6 +361,54 @@ def normalized_http_url(value: Any, label: str) -> str:
     return urlunsplit((parsed.scheme.lower(), netloc.lower(), path, "", ""))
 
 
+def validate_traffic_identity(
+    value: Any,
+    label: str,
+    *,
+    formal_run_id: str | None = None,
+) -> dict[str, Any]:
+    expected_keys = {
+        "mode",
+        "baseUrl",
+        "service",
+        "port",
+        "requiresEdgeBypass",
+        "tunnel",
+    }
+    if formal_run_id is not None:
+        expected_keys.add("formalRunId")
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise AnalysisFailure(f"{label} is malformed")
+    mode = value.get("mode")
+    if not isinstance(mode, str) or mode not in TRAFFIC_MODES:
+        raise AnalysisFailure(f"{label}.mode is invalid")
+    expected_base_url = TRAFFIC_BASE_URLS[mode]
+    if (
+        value.get("baseUrl") != expected_base_url
+        or normalized_http_url(value.get("baseUrl"), f"{label}.baseUrl")
+        != expected_base_url
+        or value.get("service") != "bluemap-perf-public"
+        or value.get("port") != 8100
+    ):
+        raise AnalysisFailure(f"{label} route is invalid")
+    if formal_run_id is not None and value.get("formalRunId") != formal_run_id:
+        raise AnalysisFailure(f"{label}.formalRunId differs from execution identity")
+    if mode == "cloudflare-https":
+        if (
+            value.get("requiresEdgeBypass") is not True
+            or value.get("tunnel") is not None
+        ):
+            raise AnalysisFailure(
+                f"{label} Cloudflare HTTPS controls are invalid"
+            )
+    elif (
+        value.get("requiresEdgeBypass") is not False
+        or value.get("tunnel") != SSH_L4_TRAEFIK_TUNNEL
+    ):
+        raise AnalysisFailure(f"{label} SSH L4 Traefik controls are invalid")
+    return value
+
+
 def seeded_shuffle(values: list[str], seed: str) -> list[str]:
     return sorted(
         values,
@@ -319,11 +435,15 @@ def validate_digest(value: Any, label: str, *, prefix: bool = False) -> None:
         )
 
 
-def validate_matrix_constraints(matrix: dict[str, Any]) -> None:
+def validate_matrix_constraints(
+    matrix: dict[str, Any], *, expected_repetitions: int = EXPECTED_BLOCKS
+) -> None:
     if matrix.get("formatVersion") != 3:
         raise AnalysisFailure("matrix formatVersion must be 3")
-    if matrix.get("repetitions") != EXPECTED_BLOCKS:
-        raise AnalysisFailure("formal matrix must have exactly five repetitions")
+    if matrix.get("repetitions") != expected_repetitions:
+        raise AnalysisFailure(
+            f"matrix must have exactly {expected_repetitions} repetitions"
+        )
     revision = matrix.get("benchmarkGitRevision")
     if (
         not isinstance(revision, str)
@@ -475,9 +595,15 @@ def validate_matrix_constraints(matrix: dict[str, Any]) -> None:
 
 
 def build_expected_schedule(
-    matrix: dict[str, Any], matrix_digest: str, schedule_seed: str
+    matrix: dict[str, Any],
+    matrix_digest: str,
+    schedule_seed: str,
+    *,
+    expected_repetitions: int = EXPECTED_BLOCKS,
 ) -> dict[str, Any]:
-    validate_matrix_constraints(matrix)
+    validate_matrix_constraints(
+        matrix, expected_repetitions=expected_repetitions
+    )
     variants_raw = matrix.get("variants")
     cases_raw = matrix.get("cases")
     controls = matrix.get("controls")
@@ -487,8 +613,15 @@ def build_expected_schedule(
         or not isinstance(controls, dict)
     ):
         raise AnalysisFailure(
-            "matrix must be the format-v3, five-block formal design"
+            "matrix must be the format-v3 deterministic benchmark design"
         )
+    if (
+        not isinstance(expected_repetitions, int)
+        or isinstance(expected_repetitions, bool)
+        or expected_repetitions < 1
+        or matrix.get("repetitions") != expected_repetitions
+    ):
+        raise AnalysisFailure("matrix repetition count differs from expectation")
     variants: dict[str, dict[str, Any]] = {}
     for variant in variants_raw:
         if not isinstance(variant, dict) or not isinstance(variant.get("id"), str):
@@ -514,7 +647,7 @@ def build_expected_schedule(
 
     entries: list[dict[str, Any]] = []
     sequence = 0
-    for block in range(1, EXPECTED_BLOCKS + 1):
+    for block in range(1, expected_repetitions + 1):
         case_order = seeded_shuffle(
             list(cases), f"{schedule_seed}\0block\0{block}\0cases"
         )
@@ -582,7 +715,7 @@ def build_expected_schedule(
         "scheduleSeed": schedule_seed,
         "traceSeed": matrix["traceSeed"],
         "benchmarkGitRevision": matrix["benchmarkGitRevision"],
-        "repetitions": EXPECTED_BLOCKS,
+        "repetitions": expected_repetitions,
         "entries": entries,
     }
 
@@ -715,11 +848,20 @@ def validate_frozen_bundle(
         "analyzerSha256": analyzer_digest,
         **{key: sha256_file(path) for key, path in control_paths.items()},
     }
+    if set(bundle) != set(expected_bundle) | {"createdAt", "loadGenerator"}:
+        raise AnalysisFailure(
+            "frozen bundle manifest must contain exactly the reviewed bindings"
+        )
+    timestamp_epoch(bundle.get("createdAt"), "frozen bundle createdAt")
     for key, expected in expected_bundle.items():
         if bundle.get(key) != expected:
             raise AnalysisFailure(
                 f"frozen bundle {key} does not match the exact formal inputs"
             )
+    bundle["loadGenerator"] = validate_load_generator_control(
+        bundle.get("loadGenerator"),
+        matrix["benchmarkGitRevision"],
+    )
     controller_lock = load_object(control_paths["controllerLockSha256"])
     if (
         controller_lock.get("formatVersion") != 1
@@ -765,6 +907,7 @@ def validate_runpod_identity(value: Any, label: str) -> dict[str, Any]:
         "formatVersion",
         "remoteRoot",
         "runId",
+        "sourceRevision",
         "runpod",
         "ssh",
     }
@@ -774,6 +917,8 @@ def validate_runpod_identity(value: Any, label: str) -> dict[str, Any]:
         value.get("backend") != "runpod-ssh"
         or value.get("remoteRoot") != "/artifacts"
         or RUNPOD_RUN_ID.fullmatch(value.get("runId", "")) is None
+        or GIT_REVISION.fullmatch(value.get("sourceRevision", "")) is None
+        or set(value["sourceRevision"]) == {"0"}
     ):
         raise AnalysisFailure(f"{label} has invalid fixed controls")
     timestamp_epoch(value.get("capturedAt"), f"{label}.capturedAt")
@@ -900,28 +1045,10 @@ def validate_execution_identity(value: Any) -> dict[str, Any]:
             "run state executionIdentity.formalRunId is invalid or differs "
             "from the frozen generator"
         )
-    traffic = value.get("traffic")
-    if (
-        not isinstance(traffic, dict)
-        or set(traffic)
-        != {"baseUrl", "service", "port", "requiresEdgeBypass"}
-        or traffic.get("requiresEdgeBypass") is not True
-        or traffic.get("service") != "bluemap-perf-public"
-        or traffic.get("port") != 8100
-    ):
-        raise AnalysisFailure("run state executionIdentity.traffic is malformed")
-    public_url = normalized_http_url(
-        traffic.get("baseUrl"),
-        "run state executionIdentity.traffic.baseUrl",
+    validate_traffic_identity(
+        value.get("traffic"),
+        "run state executionIdentity.traffic",
     )
-    parsed_public_url = urlsplit(public_url)
-    if (
-        public_url != "https://bluemap-test.guenter.cloud"
-        or parsed_public_url.scheme != "https"
-    ):
-        raise AnalysisFailure(
-            "run state executionIdentity traffic must use a public HTTPS URL"
-        )
     for key in ("runner", "benchmarkPython", "kubeconfig"):
         path = value.get(key)
         if not isinstance(path, str) or not Path(path).is_absolute():
@@ -984,6 +1111,7 @@ def validate_state(
         "orchestratorSha256": bundle["orchestratorSha256"],
         "analyzerSha256": analyzer_digest,
         "benchmarkGitRevision": matrix["benchmarkGitRevision"],
+        "loadGeneratorSha256": canonical_sha256(bundle["loadGenerator"]),
     }
     for key, expected in expected_header.items():
         if state.get(key) != expected:
@@ -994,7 +1122,11 @@ def validate_state(
     timestamp_epoch(state.get("createdAt"), "run state createdAt")
     timestamp_epoch(state.get("updatedAt"), "run state updatedAt")
     timestamp_epoch(state.get("completedAt"), "run state completedAt")
-    validate_execution_identity(state.get("executionIdentity"))
+    execution_identity = validate_execution_identity(state.get("executionIdentity"))
+    validate_load_generator_execution_binding(
+        bundle["loadGenerator"],
+        execution_identity["loadGeneratorIdentity"],
+    )
     state_entries = state.get("entries")
     if not isinstance(state_entries, dict):
         raise AnalysisFailure("run state entries must be an object")
@@ -1075,6 +1207,901 @@ def validate_state(
                 f"run state sequence {entry['sequence']} exit/result disagree"
             )
     return state
+
+
+def preflight_evidence_inventory(preflight_root: Path) -> dict[str, Any]:
+    excluded = {"preflight-evidence.json", "preflight-report.json", "SHA256SUMS"}
+    files = []
+    for path in sorted(preflight_root.rglob("*")):
+        relative = path.relative_to(preflight_root)
+        if path.is_symlink():
+            raise AnalysisFailure(f"preflight evidence symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise AnalysisFailure(f"preflight evidence is not regular: {relative}")
+        if len(relative.parts) == 1 and relative.name in excluded:
+            continue
+        files.append(
+            {
+                "path": relative.as_posix(),
+                "sha256": sha256_file(path),
+                "bytes": path.stat().st_size,
+            }
+        )
+    return {"formatVersion": 1, "files": files}
+
+
+def load_strict_ndjson(path: Path, label: str) -> list[dict[str, Any]]:
+    if not path.is_file() or path.is_symlink():
+        raise AnalysisFailure(f"{label} is missing or a symlink")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise AnalysisFailure(f"cannot read {label}: {error}") from error
+    values: list[dict[str, Any]] = []
+    for number, line in enumerate(lines, start=1):
+        if not line:
+            raise AnalysisFailure(f"{label}:{number} is blank")
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise AnalysisFailure(f"{label}:{number} is invalid JSON") from error
+        if not isinstance(value, dict):
+            raise AnalysisFailure(f"{label}:{number} is not an object")
+        values.append(value)
+    return values
+
+
+def validate_preflight_raw_execution(
+    preflight_root: Path,
+    schedule: dict[str, Any],
+    matrix: dict[str, Any],
+    matrix_path: Path,
+    schedule_path: Path,
+    execution_identity: dict[str, Any],
+    *,
+    admission_digest: str,
+    bundle_digest: str,
+    orchestrator_digest: str,
+    analyzer_digest: str,
+    load_generator_sha256: str,
+    expected_admission: dict[str, str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    state_path = preflight_root / "state.json"
+    if not state_path.is_file() or state_path.is_symlink():
+        raise AnalysisFailure("preflight state is missing or a symlink")
+    state = load_object(state_path)
+    expected_header = {
+        "formatVersion": 1,
+        "status": "completed",
+        "nextSequence": 7,
+        "matrixSha256": sha256_file(matrix_path),
+        "scheduleSha256": sha256_file(schedule_path),
+        "manifestSha256": matrix["manifestSha256"],
+        "runtimeAdmissionIdentitiesSha256": admission_digest,
+        "bundleManifestSha256": bundle_digest,
+        "orchestratorSha256": orchestrator_digest,
+        "analyzerSha256": analyzer_digest,
+        "benchmarkGitRevision": matrix["benchmarkGitRevision"],
+        "loadGeneratorSha256": load_generator_sha256,
+    }
+    for key, expected in expected_header.items():
+        if state.get(key) != expected:
+            raise AnalysisFailure(f"preflight state {key} differs")
+    if state.get("cleanupError") is not None:
+        raise AnalysisFailure("preflight candidate cleanup failed")
+    if validate_execution_identity(state.get("executionIdentity")) != execution_identity:
+        raise AnalysisFailure("preflight execution identity differs from formal run")
+    created = timestamp_epoch(state.get("createdAt"), "preflight state createdAt")
+    updated = timestamp_epoch(state.get("updatedAt"), "preflight state updatedAt")
+    completed = timestamp_epoch(
+        state.get("completedAt"), "preflight state completedAt"
+    )
+    if not created <= completed <= updated:
+        raise AnalysisFailure("preflight state timestamps are out of order")
+    state_entries = state.get("entries")
+    if not isinstance(state_entries, dict) or set(state_entries) != {
+        str(value) for value in range(1, 7)
+    }:
+        raise AnalysisFailure("preflight state must contain exactly sequence 1..6")
+    previous_completed = created
+    rows: list[dict[str, Any]] = []
+    results_root = preflight_root / "results"
+    logs_root = preflight_root / "logs"
+    if not results_root.is_dir() or results_root.is_symlink():
+        raise AnalysisFailure("preflight results directory is missing or a symlink")
+    if not logs_root.is_dir() or logs_root.is_symlink():
+        raise AnalysisFailure("preflight logs directory is missing or a symlink")
+    expected_case_names = {entry["runnerCaseId"] for entry in schedule["entries"]}
+    actual_case_names = {
+        path.name
+        for path in results_root.iterdir()
+        if path.is_dir() and not path.is_symlink()
+    }
+    if actual_case_names != expected_case_names or any(
+        not path.is_dir() or path.is_symlink() for path in results_root.iterdir()
+    ):
+        raise AnalysisFailure("preflight result directories differ from schedule")
+    expected_logs = {
+        f"{entry['sequence']:03d}-{entry['runnerCaseId']}.log"
+        for entry in schedule["entries"]
+    }
+    actual_logs = {path.name for path in logs_root.iterdir()}
+    if actual_logs != expected_logs or any(
+        not path.is_file() or path.is_symlink() for path in logs_root.iterdir()
+    ):
+        raise AnalysisFailure("preflight runner logs differ from schedule")
+    for entry in schedule["entries"]:
+        item = state_entries[str(entry["sequence"])]
+        if not isinstance(item, dict):
+            raise AnalysisFailure("preflight state entry is not an object")
+        for key, expected in (
+            ("status", "completed"),
+            ("entryId", entry["entryId"]),
+            ("runnerCaseId", entry["runnerCaseId"]),
+            ("variantId", entry["variantId"]),
+            ("result", "passed"),
+            ("runnerExitStatus", 0),
+        ):
+            if item.get(key) != expected:
+                raise AnalysisFailure(
+                    f"preflight state sequence {entry['sequence']} {key} differs"
+                )
+        started = timestamp_epoch(
+            item.get("startedAt"), f"preflight sequence {entry['sequence']} startedAt"
+        )
+        runner_started = timestamp_epoch(
+            item.get("runnerStartedAt"),
+            f"preflight sequence {entry['sequence']} runnerStartedAt",
+        )
+        entry_completed = timestamp_epoch(
+            item.get("completedAt"),
+            f"preflight sequence {entry['sequence']} completedAt",
+        )
+        if not previous_completed <= started <= runner_started <= entry_completed:
+            raise AnalysisFailure("preflight state entry chronology differs")
+        previous_completed = entry_completed
+        web_pods = item.get("webPods")
+        if (
+            not isinstance(web_pods, list)
+            or len(web_pods) != entry["replicaCount"]
+            or len(set(web_pods)) != len(web_pods)
+            or not all(isinstance(pod, str) and pod for pod in web_pods)
+        ):
+            raise AnalysisFailure("preflight state web Pod identity differs")
+        expected_digest = expected_admission.get(entry["variantId"])
+        admission = item.get("admissionPodSpecIdentity")
+        if (
+            not isinstance(expected_digest, str)
+            or not isinstance(admission, dict)
+            or admission.get("expected") != expected_digest
+            or not isinstance(admission.get("actual"), dict)
+            or set(admission["actual"]) != set(web_pods)
+            or set(admission["actual"].values()) != {expected_digest}
+        ):
+            raise AnalysisFailure("preflight admission Pod identity differs")
+        row = analyze_case(
+            results_root / entry["runnerCaseId"],
+            entry,
+            item,
+            execution_identity,
+            matrix_path,
+            schedule_path,
+            sha256_file(matrix_path),
+            sha256_file(schedule_path),
+        )
+        if (
+            row.get("result") != "passed"
+            or row.get("eligibleForFormalComparison") is not True
+            or nested(row, ("metrics", "transportProof", "mode"))
+            != "ssh-l4-traefik"
+            or nested(row, ("metrics", "transportProof", "passed")) is not True
+        ):
+            raise AnalysisFailure("preflight case semantic replay failed")
+        rows.append(row)
+    if previous_completed > completed:
+        raise AnalysisFailure("preflight completed before its final entry")
+
+    events = load_strict_ndjson(
+        preflight_root / "events.ndjson", "preflight orchestrator events"
+    )
+    if len(events) != 24 or any(
+        event.get("event") == "cleanup-failed" for event in events
+    ):
+        raise AnalysisFailure("preflight must preserve exactly 24 lifecycle events")
+    validate_run_chronology(
+        preflight_root,
+        schedule,
+        state,
+        rows,
+        expected_entries=6,
+    )
+    return state, rows
+
+
+def recompute_preflight_relay(
+    preflight_root: Path,
+    relay: dict[str, Any],
+    *,
+    controller_pod: str,
+    controller_pod_uid: str,
+    formal_run_id: str,
+) -> None:
+    observability = preflight_root / "observability"
+    identity = load_regular_object(observability / "relay-identity.json")
+    expected_identity = {
+        "formatVersion": 1,
+        "namespace": "minecraft",
+        "pod": controller_pod,
+        "podUid": controller_pod_uid,
+        "formalRunId": formal_run_id,
+        "container": "controller",
+        "serviceAccountName": "bluemap-perf-formal-controller",
+        "requiredLabels": {
+            "app.kubernetes.io/name": "bluemap-perf-formal-controller",
+            "app.kubernetes.io/part-of": "bluemap-web-performance",
+            "bluemap.guenter.cloud/experiment-id": formal_run_id,
+        },
+        "owner": {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "name": "bluemap-perf-formal-controller",
+            "uid": identity.get("owner", {}).get("uid")
+            if isinstance(identity.get("owner"), dict)
+            else None,
+        },
+        "limits": {"cpuCores": 2.0, "memoryBytes": float(2 * 1024**3)},
+        "source": "metrics.k8s.io/v1beta1",
+    }
+    owner_uid = expected_identity["owner"]["uid"]
+    if not isinstance(owner_uid, str) or not owner_uid or identity != expected_identity:
+        raise AnalysisFailure("preflight raw relay identity differs")
+    readiness = load_regular_object(observability / "relay-readiness.json")
+    readiness_started = timestamp_epoch(
+        readiness.get("startedAt"), "preflight relay readiness startedAt"
+    )
+    readiness_completed = timestamp_epoch(
+        readiness.get("completedAt"), "preflight relay readiness completedAt"
+    )
+    transient = readiness.get("transientErrors")
+    if (
+        readiness.get("formatVersion") != 1
+        or readiness.get("ready") is not True
+        or not isinstance(readiness.get("attempts"), int)
+        or isinstance(readiness.get("attempts"), bool)
+        or readiness["attempts"] < 1
+        or not isinstance(readiness.get("timeoutSeconds"), int)
+        or readiness["timeoutSeconds"] < 30
+        or isinstance(readiness.get("pollIntervalSeconds"), bool)
+        or not isinstance(readiness.get("pollIntervalSeconds"), (int, float))
+        or not 0.1 <= float(readiness["pollIntervalSeconds"]) <= 30
+        or not isinstance(transient, list)
+        or readiness["attempts"] != len(transient) + 1
+        or readiness_completed < readiness_started
+    ):
+        raise AnalysisFailure("preflight relay readiness evidence differs")
+    for error in transient:
+        if (
+            not isinstance(error, dict)
+            or set(error) != {"failedAt", "error"}
+            or not isinstance(error.get("error"), str)
+            or not error["error"]
+        ):
+            raise AnalysisFailure("preflight relay readiness error is malformed")
+        timestamp_epoch(error["failedAt"], "preflight relay readiness error")
+    errors_path = observability / "relay-errors.ndjson"
+    errors = load_strict_ndjson(errors_path, "preflight relay errors")
+    if errors or errors_path.stat().st_size != 0:
+        raise AnalysisFailure("preflight measured relay interval contains errors")
+    samples = load_strict_ndjson(
+        observability / "relay-samples.ndjson", "preflight relay samples"
+    )
+    if not samples:
+        raise AnalysisFailure("preflight relay samples are empty")
+    parsed: list[dict[str, Any]] = []
+    prior_fetched = -math.inf
+    expected_sample_keys = {
+        "requestedAt",
+        "fetchedAt",
+        "metricsTimestamp",
+        "window",
+        "pod",
+        "podUid",
+        "container",
+        "cpuCores",
+        "memoryBytes",
+        "cpuLimitRatio",
+        "memoryLimitRatio",
+        "metricAgeSeconds",
+    }
+    for sample in samples:
+        if set(sample) != expected_sample_keys:
+            raise AnalysisFailure("preflight relay sample shape differs")
+        requested = timestamp_epoch(sample["requestedAt"], "relay requestedAt")
+        fetched = timestamp_epoch(sample["fetchedAt"], "relay fetchedAt")
+        source = timestamp_epoch(sample["metricsTimestamp"], "relay metricsTimestamp")
+        if requested > fetched or fetched < prior_fetched or source > fetched + 5:
+            raise AnalysisFailure("preflight relay sample timestamps differ")
+        prior_fetched = fetched
+        match = METRICS_WINDOW.fullmatch(str(sample.get("window")))
+        if match is None or float(match.group(1)) <= 0:
+            raise AnalysisFailure("preflight relay sample window differs")
+        if (
+            sample.get("pod") != controller_pod
+            or sample.get("podUid") != controller_pod_uid
+            or sample.get("container") != "controller"
+        ):
+            raise AnalysisFailure("preflight relay sample identity differs")
+        cpu = finite_number(sample.get("cpuCores"), "relay cpuCores", minimum=0)
+        memory = finite_number(
+            sample.get("memoryBytes"), "relay memoryBytes", minimum=0
+        )
+        cpu_ratio = finite_number(
+            sample.get("cpuLimitRatio"), "relay cpuLimitRatio", minimum=0
+        )
+        memory_ratio = finite_number(
+            sample.get("memoryLimitRatio"), "relay memoryLimitRatio", minimum=0
+        )
+        age = finite_number(
+            sample.get("metricAgeSeconds"), "relay metricAgeSeconds", minimum=0
+        )
+        if (
+            not math.isclose(cpu_ratio, cpu / 2.0, rel_tol=1e-12, abs_tol=1e-12)
+            or not math.isclose(
+                memory_ratio,
+                memory / float(2 * 1024**3),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            or not math.isclose(age, max(0.0, fetched - source), abs_tol=1e-6)
+        ):
+            raise AnalysisFailure("preflight relay sample derived values differ")
+        parsed.append({**sample, "_source": source})
+    relay_started = timestamp_epoch(relay["startedAt"], "preflight relay startedAt")
+    relay_stopped = timestamp_epoch(relay["stoppedAt"], "preflight relay stoppedAt")
+    if (
+        not readiness_started <= relay_started <= readiness_completed
+        or not math.isclose(
+            timestamp_epoch(samples[0]["fetchedAt"], "first relay fetchedAt"),
+            relay_started,
+            abs_tol=1e-6,
+        )
+        or timestamp_epoch(samples[-1]["fetchedAt"], "last relay fetchedAt")
+        > relay_stopped
+    ):
+        raise AnalysisFailure("preflight relay interval does not bracket raw samples")
+    unique = {float(sample["_source"]): sample for sample in parsed}
+    selected = sorted(unique.values(), key=lambda sample: float(sample["_source"]))
+    sources = [float(sample["_source"]) for sample in selected]
+    cpu_ratios = [float(sample["cpuLimitRatio"]) for sample in selected]
+    memory_ratios = [float(sample["memoryLimitRatio"]) for sample in selected]
+    recomputed = {
+        "successfulFetches": len(samples),
+        "errors": 0,
+        "uniqueMetricTimestamps": len(selected),
+        "metricWindows": sorted({str(sample["window"]) for sample in selected}),
+        "maximumUniqueMetricTimestampGapSeconds": max(
+            (right - left for left, right in zip(sources, sources[1:])), default=0.0
+        ),
+        "maximumMetricAgeSeconds": max(
+            float(sample["metricAgeSeconds"]) for sample in selected
+        ),
+        "initialCoverageGapSeconds": abs(sources[0] - relay_started),
+        "finalCoverageGapSeconds": abs(relay_stopped - sources[-1]),
+        "p95CpuLimitRatio": sorted(cpu_ratios)[
+            max(0, math.ceil(0.95 * len(cpu_ratios)) - 1)
+        ],
+        "maximumCpuLimitRatio": max(cpu_ratios),
+        "maximumMemoryLimitRatio": max(memory_ratios),
+    }
+    observed = relay.get("observed")
+    if not isinstance(observed, dict) or set(observed) != set(recomputed):
+        raise AnalysisFailure("preflight relay observed summary shape differs")
+    for key, expected in recomputed.items():
+        actual = observed[key]
+        if isinstance(expected, list):
+            equal = actual == expected
+        elif isinstance(expected, (int, float)):
+            equal = (
+                not isinstance(actual, bool)
+                and isinstance(actual, (int, float))
+                and math.isclose(float(actual), float(expected), abs_tol=1e-6)
+            )
+        else:
+            equal = actual == expected
+        if not equal:
+            raise AnalysisFailure(f"preflight relay observed {key} was not recomputed")
+
+
+def validate_preflight_attestation(
+    value: Any,
+    *,
+    run_root: Path,
+    matrix: dict[str, Any],
+    matrix_digest: str,
+    schedule_digest: str,
+    admission_digest: str,
+    bundle_digest: str,
+    orchestrator_digest: str,
+    load_generator_sha256: str,
+    execution_identity: dict[str, Any],
+    expected_admission: dict[str, str],
+) -> dict[str, Any]:
+    expected_keys = {
+        "formatVersion",
+        "report",
+        "reportSha256",
+        "matrixSha256",
+        "scheduleSha256",
+        "evidenceManifestSha256",
+        "controllerPod",
+        "controllerPodUid",
+        "traffic",
+        "loadGeneratorSha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_keys
+        or value.get("formatVersion") != 1
+    ):
+        raise AnalysisFailure("run state preflightAttestation is malformed")
+    expected_root = run_root.with_name(f"{run_root.name}-preflight")
+    if expected_root.is_symlink():
+        raise AnalysisFailure("preflight artifact root must not be a symlink")
+    expected_report = expected_root / "preflight-report.json"
+    expected_reference = (
+        f"../{run_root.name}-preflight/preflight-report.json"
+    )
+    report_value = value.get("report")
+    if (
+        report_value != expected_reference
+        or (run_root / expected_reference).resolve() != expected_report
+    ):
+        raise AnalysisFailure("preflight report is not the exact sibling artifact")
+    if not expected_report.is_file() or expected_report.is_symlink():
+        raise AnalysisFailure("preflight report is missing or a symlink")
+    validate_digest(value.get("reportSha256"), "preflight reportSha256")
+    if sha256_file(expected_report) != value["reportSha256"]:
+        raise AnalysisFailure("preflight report digest differs")
+    report = load_object(expected_report)
+    evidence_path = expected_root / "preflight-evidence.json"
+    if not evidence_path.is_file() or evidence_path.is_symlink():
+        raise AnalysisFailure("preflight raw-evidence manifest is missing")
+    validate_digest(
+        value.get("evidenceManifestSha256"),
+        "preflight evidenceManifestSha256",
+    )
+    if (
+        sha256_file(evidence_path) != value["evidenceManifestSha256"]
+        or report.get("evidenceManifestSha256")
+        != value["evidenceManifestSha256"]
+        or load_object(evidence_path) != preflight_evidence_inventory(expected_root)
+    ):
+        raise AnalysisFailure("preflight raw-evidence inventory differs")
+    completed_at = timestamp_epoch(
+        report.get("completedAt"), "preflight report completedAt"
+    )
+    if completed_at <= 0:
+        raise AnalysisFailure("preflight completion time is invalid")
+    formal_state = load_regular_object(run_root / "state.json")
+    validate_digest(
+        formal_state.get("analyzerSha256"), "formal state analyzerSha256"
+    )
+    formal_created_at = timestamp_epoch(
+        formal_state.get("createdAt"), "formal state createdAt"
+    )
+    if (
+        completed_at > formal_created_at
+        or formal_created_at - completed_at > 300.0
+    ):
+        raise AnalysisFailure("preflight-to-formal handoff is stale or out of order")
+    expected_source = {
+        "matrixSha256": matrix_digest,
+        "scheduleSha256": schedule_digest,
+        "runtimeAdmissionIdentitiesSha256": admission_digest,
+        "bundleManifestSha256": bundle_digest,
+        "manifestSha256": matrix["manifestSha256"],
+    }
+    derived = report.get("derivedInputs")
+    if not isinstance(derived, dict) or set(derived) != {
+        "matrixSha256",
+        "scheduleSha256",
+        "provenanceSha256",
+        "sha256SumsSha256",
+    }:
+        raise AnalysisFailure("preflight derived input identity is malformed")
+    for key in ("matrixSha256", "scheduleSha256"):
+        validate_digest(derived.get(key), f"preflight derivedInputs.{key}")
+        if value.get(key) != derived[key]:
+            raise AnalysisFailure(f"preflight attestation {key} differs")
+    input_root = expected_root / "inputs"
+    derived_files = {
+        "matrixSha256": input_root / "matrix.json",
+        "scheduleSha256": input_root / "schedule.json",
+        "provenanceSha256": input_root / "provenance.json",
+        "sha256SumsSha256": input_root / "SHA256SUMS",
+    }
+    for key, path in derived_files.items():
+        if not path.is_file() or path.is_symlink() or sha256_file(path) != derived[key]:
+            raise AnalysisFailure(f"preserved preflight {key} differs")
+    preflight_matrix = load_object(derived_files["matrixSha256"])
+    preflight_schedule = load_object(derived_files["scheduleSha256"])
+    validate_digest(report.get("generatorSha256"), "preflight generatorSha256")
+    variant_order = (
+        "java-new-postgresql",
+        "rust-postgresql",
+        "java-new-postgresql-r3",
+        "rust-postgresql-r3",
+    )
+    formal_variant_map = {
+        variant["id"]: variant
+        for variant in matrix["variants"]
+        if isinstance(variant, dict) and isinstance(variant.get("id"), str)
+    }
+    try:
+        expected_preflight_variants = [
+            formal_variant_map[variant_id] for variant_id in variant_order
+        ]
+    except KeyError as error:
+        raise AnalysisFailure("formal preflight variant is missing") from error
+    formal_cases = {
+        case["id"]: case
+        for case in matrix["cases"]
+        if case["id"]
+        in {
+            "large-object-r1",
+            "map-mixed-r15",
+            "map-mixed-horizontal-r40",
+        }
+    }
+    expected_preflight_cases: list[dict[str, Any]] = []
+    for source_id, expected_case in (
+        (
+            "large-object-r1",
+            {
+                "id": "preflight-large-r1",
+                "profile": "large-object",
+                "rate": 1,
+                "viewers": 15,
+                "markerIntervalSeconds": 10,
+                "latencyP95Milliseconds": 10000,
+                "latencyP99Milliseconds": 20000,
+                "acceptEncoding": "zstd",
+                "storedEncoding": "zstd",
+                "variants": ["java-new-postgresql", "rust-postgresql"],
+            },
+        ),
+        (
+            "map-mixed-r15",
+            {
+                "id": "preflight-map-r15",
+                "profile": "map-data-mixed",
+                "rate": 15,
+                "viewers": 15,
+                "markerIntervalSeconds": 10,
+                "latencyP95Milliseconds": 10000,
+                "latencyP99Milliseconds": 20000,
+                "acceptEncoding": "zstd",
+                "storedEncoding": "zstd",
+                "variants": ["java-new-postgresql", "rust-postgresql"],
+            },
+        ),
+        (
+            "map-mixed-horizontal-r40",
+            {
+                "id": "preflight-horizontal-r40",
+                "profile": "map-data-mixed",
+                "rate": 40,
+                "viewers": 40,
+                "markerIntervalSeconds": 10,
+                "latencyP95Milliseconds": 5000,
+                "latencyP99Milliseconds": 10000,
+                "acceptEncoding": "zstd",
+                "storedEncoding": "zstd",
+                "variants": ["java-new-postgresql-r3", "rust-postgresql-r3"],
+            },
+        ),
+    ):
+        source = formal_cases.get(source_id)
+        if not isinstance(source, dict):
+            raise AnalysisFailure("formal preflight source case is missing")
+        source_controls = {
+            key: item for key, item in source.items() if key not in {"id", "variants"}
+        }
+        expected_controls = {
+            key: item
+            for key, item in expected_case.items()
+            if key not in {"id", "variants"}
+        }
+        if source_controls != expected_controls:
+            raise AnalysisFailure("formal preflight source case controls differ")
+        expected_preflight_cases.append(expected_case)
+    expected_preflight_matrix = {
+        "formatVersion": 3,
+        "benchmarkGitRevision": matrix["benchmarkGitRevision"],
+        "manifestSha256": matrix["manifestSha256"],
+        "mapIds": matrix["mapIds"],
+        "scheduleSeed": "bluemap-web-performance-ssh-l4-preflight-v1",
+        "traceSeed": matrix["traceSeed"],
+        "repetitions": 1,
+        "controls": {
+            "warmupDuration": "30s",
+            "measurementDuration": "2m",
+            "cooldownSeconds": 15,
+            "minimumAchievedRateRatio": 0.99,
+            "preAllocatedVUs": 256,
+            "maxVUs": 512,
+        },
+        "cases": expected_preflight_cases,
+        "variants": expected_preflight_variants,
+    }
+    expected_preflight_schedule = build_expected_schedule(
+        expected_preflight_matrix,
+        derived["matrixSha256"],
+        "bluemap-web-performance-ssh-l4-preflight-v1",
+        expected_repetitions=1,
+    )
+    entries = preflight_schedule.get("entries")
+    if (
+        preflight_matrix != expected_preflight_matrix
+        or preflight_schedule != expected_preflight_schedule
+        or not isinstance(entries, list)
+        or len(entries) != 6
+        or [entry.get("sequence") for entry in entries] != list(range(1, 7))
+    ):
+        raise AnalysisFailure("preserved preflight matrix/schedule identity differs")
+    preflight_state, preflight_rows = validate_preflight_raw_execution(
+        expected_root,
+        preflight_schedule,
+        preflight_matrix,
+        derived_files["matrixSha256"],
+        derived_files["scheduleSha256"],
+        execution_identity,
+        admission_digest=admission_digest,
+        bundle_digest=bundle_digest,
+        orchestrator_digest=orchestrator_digest,
+        analyzer_digest=formal_state["analyzerSha256"],
+        load_generator_sha256=load_generator_sha256,
+        expected_admission=expected_admission,
+    )
+    if completed_at < timestamp_epoch(
+        preflight_state.get("completedAt"), "preflight state completedAt"
+    ):
+        raise AnalysisFailure("preflight report predates execution completion")
+    report_entries = report.get("entries")
+    if (
+        not isinstance(report_entries, list)
+        or len(report_entries) != 6
+        or [entry.get("sequence") for entry in report_entries]
+        != list(range(1, 7))
+        or any(
+            entry.get("status") != "completed"
+            or entry.get("result") != "passed"
+            or entry.get("runnerExitStatus") != 0
+            for entry in report_entries
+        )
+    ):
+        raise AnalysisFailure("preflight report does not contain six passed entries")
+    for report_entry, scheduled_entry in zip(report_entries, entries):
+        expected_entry = {
+            "sequence": scheduled_entry["sequence"],
+            "entryId": scheduled_entry["entryId"],
+            "runnerCaseId": scheduled_entry["runnerCaseId"],
+            "variantId": scheduled_entry["variantId"],
+            "status": "completed",
+            "result": "passed",
+            "runnerExitStatus": 0,
+        }
+        if report_entry != expected_entry:
+            raise AnalysisFailure("preflight report entry identity differs")
+    expected_traffic = {
+        "mode": "ssh-l4-traefik",
+        "baseUrl": TRAFFIC_BASE_URLS["ssh-l4-traefik"],
+        "service": "bluemap-perf-public",
+        "port": 8100,
+        "requiresEdgeBypass": False,
+        "tunnel": SSH_L4_TRAEFIK_TUNNEL,
+    }
+    controller_relay = report.get("controllerRelay")
+    if (
+        report.get("formatVersion") != 1
+        or report.get("kind") != "ssh-l4-traefik-preflight"
+        or report.get("passed") is not True
+        or report.get("failures") != []
+        or report.get("formalRunId") != execution_identity["formalRunId"]
+        or report.get("benchmarkGitRevision") != matrix["benchmarkGitRevision"]
+        or report.get("sourceFormalInputs") != expected_source
+        or report.get("orchestratorSha256") != orchestrator_digest
+        or report.get("traffic") != expected_traffic
+        or value.get("traffic") != expected_traffic
+        or execution_identity.get("traffic") != expected_traffic
+        or report.get("loadGeneratorIdentitySha256")
+        != execution_identity["loadGeneratorIdentitySha256"]
+        or report.get("loadGeneratorSha256") != load_generator_sha256
+        or value.get("loadGeneratorSha256") != load_generator_sha256
+        or not isinstance(controller_relay, dict)
+        or controller_relay.get("passed") is not True
+        or controller_relay.get("pod") != value.get("controllerPod")
+        or controller_relay.get("podUid") != value.get("controllerPodUid")
+    ):
+        raise AnalysisFailure("preflight report identity or gate result differs")
+    relay_path = expected_root / "observability" / "relay-headroom.json"
+    if (
+        not relay_path.is_file()
+        or relay_path.is_symlink()
+        or controller_relay.get("headroomSha256") != sha256_file(relay_path)
+    ):
+        raise AnalysisFailure("preflight relay headroom evidence differs")
+    relay = load_object(relay_path)
+    relay_thresholds = {
+        "p95CpuLimitRatio": 0.70,
+        "maximumCpuLimitRatio": 0.90,
+        "maximumMemoryLimitRatio": 0.80,
+        "minimumUniqueMetricTimestamps": 6,
+        "maximumUniqueMetricTimestampGapSeconds": 30.0,
+        "maximumMetricAgeSeconds": 60.0,
+        "maximumCoverageGapSeconds": 60.0,
+    }
+    relay_checks = {
+        "noMetricsApiErrors",
+        "minimumUniqueMetricTimestamps",
+        "maximumUniqueMetricTimestampGapSeconds",
+        "maximumMetricAgeSeconds",
+        "initialCoverageGapSeconds",
+        "finalCoverageGapSeconds",
+        "p95CpuLimitRatio",
+        "maximumCpuLimitRatio",
+        "maximumMemoryLimitRatio",
+    }
+    relay_observed_keys = {
+        "successfulFetches",
+        "errors",
+        "uniqueMetricTimestamps",
+        "metricWindows",
+        "maximumUniqueMetricTimestampGapSeconds",
+        "maximumMetricAgeSeconds",
+        "initialCoverageGapSeconds",
+        "finalCoverageGapSeconds",
+        "p95CpuLimitRatio",
+        "maximumCpuLimitRatio",
+        "maximumMemoryLimitRatio",
+    }
+    relay_limitation = (
+        "metrics.k8s.io exposes coarse aggregate controller-container CPU and "
+        "memory only; it cannot attribute usage to the SSH relay process or "
+        "prove bandwidth and CPU-throttling headroom"
+    )
+    if (
+        relay.get("formatVersion") != 1
+        or relay.get("passed") is not True
+        or relay.get("namespace") != "minecraft"
+        or relay.get("pod") != value.get("controllerPod")
+        or relay.get("podUid") != value.get("controllerPodUid")
+        or relay.get("container") != "controller"
+        or relay.get("source") != "metrics.k8s.io/v1beta1"
+        or not isinstance(relay.get("startedAt"), str)
+        or not isinstance(relay.get("stoppedAt"), str)
+        or relay.get("limits")
+        != {"cpuCores": 2.0, "memoryBytes": float(2 * 1024**3)}
+        or relay.get("thresholds") != relay_thresholds
+        or not isinstance(relay.get("checks"), dict)
+        or set(relay["checks"]) != relay_checks
+        or any(check is not True for check in relay["checks"].values())
+        or not isinstance(relay.get("observed"), dict)
+        or set(relay["observed"]) != relay_observed_keys
+        or relay["observed"].get("errors") != 0
+        or relay.get("limitation") != relay_limitation
+    ):
+        raise AnalysisFailure("preflight relay headroom gate is invalid")
+    relay_started = timestamp_epoch(relay["startedAt"], "preflight relay startedAt")
+    relay_stopped = timestamp_epoch(relay["stoppedAt"], "preflight relay stoppedAt")
+    if relay_stopped <= relay_started:
+        raise AnalysisFailure("preflight relay sampling interval is invalid")
+    observed = relay.get("observed")
+    if not isinstance(observed, dict):
+        raise AnalysisFailure("preflight relay observations are malformed")
+
+    def relay_number(key: str) -> float:
+        raw = observed.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise AnalysisFailure(f"preflight relay {key} is malformed")
+        result = float(raw)
+        if not math.isfinite(result) or result < 0:
+            raise AnalysisFailure(f"preflight relay {key} is malformed")
+        return result
+
+    if relay_number("uniqueMetricTimestamps") < 6:
+        raise AnalysisFailure("preflight relay has insufficient unique samples")
+    metric_windows = observed.get("metricWindows")
+    if (
+        not isinstance(metric_windows, list)
+        or not metric_windows
+        or metric_windows != sorted(set(metric_windows))
+    ):
+        raise AnalysisFailure("preflight relay metric windows are malformed")
+    for window in metric_windows:
+        if not isinstance(window, str):
+            raise AnalysisFailure("preflight relay metric window is malformed")
+        match = METRICS_WINDOW.fullmatch(window)
+        if match is None or float(match.group(1)) <= 0:
+            raise AnalysisFailure("preflight relay metric window is malformed")
+    for observed_key, limit in (
+        ("maximumUniqueMetricTimestampGapSeconds", 30.0),
+        ("maximumMetricAgeSeconds", 60.0),
+        ("initialCoverageGapSeconds", 60.0),
+        ("finalCoverageGapSeconds", 60.0),
+        ("p95CpuLimitRatio", 0.70),
+        ("maximumCpuLimitRatio", 0.90),
+        ("maximumMemoryLimitRatio", 0.80),
+    ):
+        if relay_number(observed_key) > limit:
+            raise AnalysisFailure(f"preflight relay {observed_key} exceeded")
+    recompute_preflight_relay(
+        expected_root,
+        relay,
+        controller_pod=value["controllerPod"],
+        controller_pod_uid=value["controllerPodUid"],
+        formal_run_id=execution_identity["formalRunId"],
+    )
+    state_completed = timestamp_epoch(
+        preflight_state.get("completedAt"), "preflight state completedAt"
+    )
+    state_created = timestamp_epoch(
+        preflight_state.get("createdAt"), "preflight state createdAt"
+    )
+    relay_started = timestamp_epoch(
+        relay.get("startedAt"), "preflight relay startedAt"
+    )
+    relay_stopped = timestamp_epoch(
+        relay.get("stoppedAt"), "preflight relay stoppedAt"
+    )
+    if not (
+        relay_started
+        <= state_created
+        <= state_completed
+        <= relay_stopped
+        <= completed_at
+        <= formal_created_at
+    ):
+        raise AnalysisFailure("preflight completion chronology differs")
+    traefik = report.get("traefikPrometheus")
+    expected_traefik = {
+        "formatVersion": 1,
+        "available": False,
+        "gating": False,
+        "metric": "traefik_service_requests_total",
+        "serviceLabelRegex": (
+            r"^minecraft-bluemap-perf-public-(?:http|8100)@kubernetes$"
+        ),
+        "reason": (
+            "The configured rancher-monitoring Prometheus has no Traefik "
+            "series. Traefik's separate three-replica metrics Service "
+            "load-balances one endpoint per scrape, so a complete counter "
+            "delta cannot be proven without expanding scope. Exact k6 "
+            "status/error checks remain the request-scoped 5xx gate."
+        ),
+    }
+    if traefik != expected_traefik:
+        raise AnalysisFailure("preflight Traefik observability limitation differs")
+    return {
+        "validated": True,
+        "report": str(expected_report),
+        "reportSha256": value["reportSha256"],
+        "completedAt": report["completedAt"],
+        "traffic": expected_traffic,
+        "entries": 6,
+        "semanticReplay": {
+            "cases": len(preflight_rows),
+            "allEligibleForFormalComparison": all(
+                row.get("eligibleForFormalComparison") is True
+                for row in preflight_rows
+            ),
+            "rawRelayRecomputed": True,
+        },
+        "controllerRelay": controller_relay,
+        "traefikPrometheus": traefik,
+    }
 
 
 def verify_sha256s(inputs: Path) -> dict[str, str]:
@@ -1321,6 +2348,7 @@ def validate_runpod_runtime_identity(
         "formatVersion",
         "imageDigest",
         "runId",
+        "sourceRevision",
         "runpod",
         "runtime",
         "startedAt",
@@ -1333,6 +2361,7 @@ def validate_runpod_runtime_identity(
     runtime_runpod = value.get("runpod")
     if (
         value.get("runId") != frozen["runId"]
+        or value.get("sourceRevision") != frozen["sourceRevision"]
         or value.get("imageDigest") != frozen_runpod["imageDigest"]
         or not isinstance(runtime_runpod, dict)
         or set(runtime_runpod)
@@ -1767,25 +2796,18 @@ def workload_control_identity(
     ) != normalized_http_url(expected_origin, f"{entry_id}: expected origin"):
         raise AnalysisFailure(f"{entry_id}: workload origin baseUrl differs from Service")
 
-    traffic = workload.get("traffic")
-    if (
-        not isinstance(traffic, dict)
-        or set(traffic)
-        != {"baseUrl", "service", "port", "formalRunId", "requiresEdgeBypass"}
-        or traffic.get("formalRunId") != execution_identity["formalRunId"]
-        or traffic.get("requiresEdgeBypass") is not True
-        or traffic.get("service") != execution_identity["traffic"]["service"]
-        or traffic.get("port") != execution_identity["traffic"]["port"]
-        or normalized_http_url(
-            traffic.get("baseUrl"), f"{entry_id}: traffic baseUrl"
-        )
-        != normalized_http_url(
-            execution_identity["traffic"]["baseUrl"],
-            "execution identity traffic baseUrl",
-        )
-    ):
+    traffic = validate_traffic_identity(
+        workload.get("traffic"),
+        f"{entry_id}: workload traffic identity",
+        formal_run_id=execution_identity["formalRunId"],
+    )
+    expected_traffic = {
+        **execution_identity["traffic"],
+        "formalRunId": execution_identity["formalRunId"],
+    }
+    if traffic != expected_traffic:
         raise AnalysisFailure(
-            f"{entry_id}: public traffic identity differs from execution identity"
+            f"{entry_id}: traffic identity differs from execution identity"
         )
     load_generator = workload.get("loadGenerator")
     if (
@@ -2287,8 +3309,161 @@ def validate_latency_identity(
             raise AnalysisFailure(f"{entry_id}: latency gate {key} mismatch")
 
 
+def manifest_route_list(manifest: dict[str, Any], key: str) -> list[str]:
+    routes = manifest.get(key)
+    if not isinstance(routes, list) or not all(
+        isinstance(route, str) and route.startswith("/") for route in routes
+    ):
+        raise AnalysisFailure(f"manifest {key} is not a route array")
+    return routes
+
+
+def is_stored_compressed_route(path: Any, manifest: dict[str, Any]) -> bool:
+    if not isinstance(path, str):
+        return False
+    tiles = manifest_route_list(manifest, "tiles")
+    textures = manifest_route_list(manifest, "textures")
+    return path in textures or (path in tiles and "/tiles/0/" in path)
+
+
+def stored_compression_proof_applicable(
+    entry: dict[str, Any], manifest: dict[str, Any]
+) -> bool:
+    if entry.get("contractMode") != "enhanced":
+        return False
+    profile = entry.get("profile")
+    if profile in {"hot-tile", "conditional"}:
+        return is_stored_compressed_route(manifest.get("hotTile"), manifest)
+    if profile == "random-tiles":
+        return any(
+            is_stored_compressed_route(path, manifest)
+            for path in manifest_route_list(manifest, "tiles")
+        )
+    if profile == "large-tile":
+        return is_stored_compressed_route(manifest.get("largeTile"), manifest)
+    if profile == "textures":
+        return any(
+            is_stored_compressed_route(path, manifest)
+            for path in manifest_route_list(manifest, "textures")
+        )
+    if profile == "large-object":
+        return is_stored_compressed_route(manifest.get("largeObject"), manifest)
+    if profile in {"map-data-mixed", "browser-mixed"}:
+        return any(
+            is_stored_compressed_route(path, manifest)
+            for key in ("tiles", "textures")
+            for path in manifest_route_list(manifest, key)
+        )
+    return False
+
+
+def direct_transport_metrics(
+    entry: dict[str, Any], traffic_mode: str, manifest: dict[str, Any]
+) -> tuple[str, ...]:
+    if traffic_mode != "ssh-l4-traefik":
+        return ()
+    metrics = ["bluemap_prohibited_edge_header"]
+    if stored_compression_proof_applicable(entry, manifest):
+        metrics.append("bluemap_stored_content_encoding_violation")
+    return tuple(metrics)
+
+
+def rate_metric_proof(
+    summary: dict[str, Any] | None,
+    metric: str,
+    *,
+    applicable: bool,
+) -> dict[str, Any]:
+    if not applicable:
+        return {
+            "applicable": False,
+            "samples": None,
+            "passes": None,
+            "fails": None,
+            "violationRate": None,
+            "passed": None,
+        }
+    rate = metric_value(summary, metric, "rate")
+    passes = metric_value(summary, metric, "passes")
+    fails = metric_value(summary, metric, "fails")
+    samples = passes + fails if passes is not None and fails is not None else None
+    consistent = bool(
+        samples is not None
+        and samples > 0
+        and rate is not None
+        and rate <= 1
+        and close_number(rate, passes / samples)
+    )
+    return {
+        "applicable": True,
+        "samples": samples,
+        "passes": passes,
+        "fails": fails,
+        "violationRate": rate,
+        "passed": bool(consistent and rate == 0),
+    }
+
+
+def transport_phase_proof(
+    summary: dict[str, Any] | None,
+    entry: dict[str, Any],
+    traffic_mode: str,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    direct = traffic_mode == "ssh-l4-traefik"
+    stored_applicable = bool(
+        direct and stored_compression_proof_applicable(entry, manifest)
+    )
+    edge = rate_metric_proof(
+        summary,
+        "bluemap_prohibited_edge_header",
+        applicable=direct,
+    )
+    stored = rate_metric_proof(
+        summary,
+        "bluemap_stored_content_encoding_violation",
+        applicable=stored_applicable,
+    )
+    return {
+        "applicable": direct,
+        "passed": (
+            bool(
+                edge["passed"] is True
+                and (
+                    not stored_applicable
+                    or stored["passed"] is True
+                )
+            )
+            if direct
+            else None
+        ),
+        "prohibitedEdgeHeaders": edge,
+        "storedContentEncoding": stored,
+    }
+
+
+def require_transport_phase_proof(
+    proof: dict[str, Any], entry_id: str, phase: str
+) -> None:
+    if proof["applicable"] is not True:
+        return
+    failures = [
+        name
+        for name in ("prohibitedEdgeHeaders", "storedContentEncoding")
+        if proof[name]["applicable"] is True and proof[name]["passed"] is not True
+    ]
+    if failures:
+        raise AnalysisFailure(
+            f"{entry_id}: {phase} direct transport proof failed: "
+            + ", ".join(failures)
+        )
+
+
 def validate_required_measurement_metrics(
-    summary: dict[str, Any], entry: dict[str, Any]
+    summary: dict[str, Any],
+    entry: dict[str, Any],
+    traffic_mode: str,
+    manifest: dict[str, Any],
 ) -> None:
     entry_id = entry["entryId"]
     required = {
@@ -2310,22 +3485,36 @@ def validate_required_measurement_metrics(
     for metric_name, fields in required.items():
         for field in fields:
             require_summary_metric(summary, metric_name, field, entry_id)
+    require_transport_phase_proof(
+        transport_phase_proof(summary, entry, traffic_mode, manifest),
+        entry_id,
+        "measurement",
+    )
 
 
 def measurement_metrics_available(
-    summary: dict[str, Any] | None, entry: dict[str, Any]
+    summary: dict[str, Any] | None,
+    entry: dict[str, Any],
+    traffic_mode: str,
+    manifest: dict[str, Any],
 ) -> bool:
     if summary is None:
         return False
     try:
-        validate_required_measurement_metrics(summary, entry)
+        validate_required_measurement_metrics(
+            summary, entry, traffic_mode, manifest
+        )
     except AnalysisFailure:
         return False
     return True
 
 
 def validate_status_metrics(
-    summary: dict[str, Any], entry: dict[str, Any], phase: str
+    summary: dict[str, Any],
+    entry: dict[str, Any],
+    phase: str,
+    traffic_mode: str,
+    manifest: dict[str, Any],
 ) -> None:
     entry_id = entry["entryId"]
     unexpected = require_summary_metric(
@@ -2338,6 +3527,11 @@ def validate_status_metrics(
         raise AnalysisFailure(
             f"{entry_id}: {phase} status/failure metrics violate the gate"
         )
+    require_transport_phase_proof(
+        transport_phase_proof(summary, entry, traffic_mode, manifest),
+        entry_id,
+        phase,
+    )
 
 
 def parse_phase_windows(path: Path) -> dict[str, tuple[float, float]]:
@@ -3377,6 +4571,7 @@ def analyze_case(
         manifest,
         checksums,
     )
+    traffic_mode = workload["traffic"]["mode"]
     public_ingress_identity = validate_public_ingress(
         case_dir, entry["entryId"]
     )
@@ -3432,6 +4627,12 @@ def analyze_case(
     warmup_exit = read_exit_status(warmup / "exit-status.txt")
     measurement_exit = read_exit_status(measurement / "exit-status.txt")
     summary = load_optional_object(measurement / "summary.json")
+    warmup_transport_proof = transport_phase_proof(
+        warmup_summary, entry, traffic_mode, manifest
+    )
+    measurement_transport_proof = transport_phase_proof(
+        summary, entry, traffic_mode, manifest
+    )
     warmup_raw_present = (warmup / "raw.ndjson").is_file() and (
         warmup / "raw.ndjson"
     ).stat().st_size > 0
@@ -3487,7 +4688,9 @@ def analyze_case(
             duration=entry["warmupDuration"],
         )
         warmup_arrival_valid = True
-        validate_status_metrics(warmup_summary, entry, "warmup")
+        validate_status_metrics(
+            warmup_summary, entry, "warmup", traffic_mode, manifest
+        )
         validate_arrival_identity(
             arrival,
             summary,
@@ -3498,7 +4701,12 @@ def analyze_case(
         measurement_arrival_valid = True
         validate_latency_identity(latency_artifact, summary, entry)
         latency_identity_valid = True
-        validate_required_measurement_metrics(summary, entry)
+        validate_required_measurement_metrics(
+            summary, entry, traffic_mode, manifest
+        )
+        validate_status_metrics(
+            summary, entry, "measurement", traffic_mode, manifest
+        )
     else:
         if (
             warmup_summary is not None
@@ -3581,6 +4789,14 @@ def analyze_case(
         "latency": latency is True,
         "measurementSummary": summary is not None,
         "measurementRawOutput": raw_present,
+        "warmupTransportProof": (
+            warmup_transport_proof["applicable"] is not True
+            or warmup_transport_proof["passed"] is True
+        ),
+        "measurementTransportProof": (
+            measurement_transport_proof["applicable"] is not True
+            or measurement_transport_proof["passed"] is True
+        ),
         "warmupLoadGeneratorCapacity": (
             load_generator_capacity.get("warmup", {}).get("passed") is True
         ),
@@ -3622,7 +4838,9 @@ def analyze_case(
             + ", ".join(runner_consistency_failures)
         )
 
-    metrics_complete = measurement_metrics_available(summary, entry)
+    metrics_complete = measurement_metrics_available(
+        summary, entry, traffic_mode, manifest
+    )
     http_evidence = bool(
         runtime_passed
         and gates["finishedPhase"]
@@ -3636,6 +4854,8 @@ def analyze_case(
         and warmup_arrival_valid
         and measurement_arrival_valid
         and latency_identity_valid
+        and gates["warmupTransportProof"]
+        and gates["measurementTransportProof"]
         and gates["warmupLoadGeneratorCapacity"]
         and gates["measurementLoadGeneratorCapacity"]
         and metrics_complete
@@ -3717,6 +4937,19 @@ def analyze_case(
             "unexpectedStatusRate": metric_value(
                 summary, "bluemap_unexpected_status", "rate"
             ),
+        },
+        "transportProof": {
+            "mode": traffic_mode,
+            "passed": (
+                bool(
+                    warmup_transport_proof["passed"] is True
+                    and measurement_transport_proof["passed"] is True
+                )
+                if traffic_mode == "ssh-l4-traefik"
+                else None
+            ),
+            "warmup": warmup_transport_proof,
+            "measurement": measurement_transport_proof,
         },
         "latencyMilliseconds": trend(
             summary, "http_req_duration{traffic:workload}"
@@ -3812,6 +5045,8 @@ def validate_run_chronology(
     schedule: dict[str, Any],
     state: dict[str, Any],
     rows: list[dict[str, Any]],
+    *,
+    expected_entries: int = EXPECTED_ENTRIES,
 ) -> dict[str, Any]:
     events = load_orchestrator_events(run_root / "events.ndjson")
     relevant = {
@@ -3830,13 +5065,15 @@ def validate_run_chronology(
             name not in relevant
             or not isinstance(sequence, int)
             or isinstance(sequence, bool)
-            or not 1 <= sequence <= EXPECTED_ENTRIES
+            or not 1 <= sequence <= expected_entries
             or name in by_sequence[sequence]
         ):
             raise AnalysisFailure("orchestrator event log has an invalid event identity")
         by_sequence[sequence][name] = event
-    if set(by_sequence) != set(range(1, EXPECTED_ENTRIES + 1)):
-        raise AnalysisFailure("orchestrator event log does not cover all 80 entries")
+    if set(by_sequence) != set(range(1, expected_entries + 1)):
+        raise AnalysisFailure(
+            "orchestrator event log does not cover every expected entry"
+        )
 
     rows_by_sequence = {row["sequence"]: row for row in rows}
     previous_completed = timestamp_epoch(
@@ -4073,13 +5310,15 @@ def validate_run_control_continuity(
                 "RunPod load-generator identity changed across the run"
             )
         if control["traffic"] != first["traffic"]:
-            raise AnalysisFailure("public traffic identity changed across the run")
+            raise AnalysisFailure("traffic identity changed across the run")
         if (
             control["traffic"]["formalRunId"] != execution["formalRunId"]
+            or control["traffic"]["mode"] != execution["traffic"]["mode"]
             or control["traffic"]["service"] != execution["traffic"]["service"]
             or control["traffic"]["port"] != execution["traffic"]["port"]
             or control["traffic"]["requiresEdgeBypass"]
             != execution["traffic"]["requiresEdgeBypass"]
+            or control["traffic"]["tunnel"] != execution["traffic"]["tunnel"]
             or control["traffic"]["baseUrl"]
             != normalized_http_url(
                 execution["traffic"]["baseUrl"],
@@ -4087,7 +5326,7 @@ def validate_run_control_continuity(
             )
         ):
             raise AnalysisFailure(
-                "public traffic controls differ from execution identity"
+                "traffic controls differ from execution identity"
             )
         if (
             row["inputSha256"].get("run_origin_case.sh")
@@ -4765,6 +6004,24 @@ def analyze(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         analyzer_digest=analyzer_digest,
         expected_admission=expected_admission,
     )
+    execution_identity = validate_execution_identity(state["executionIdentity"])
+    load_generator_sha256 = validate_load_generator_execution_binding(
+        bundle["loadGenerator"],
+        execution_identity["loadGeneratorIdentity"],
+    )
+    preflight_attestation = validate_preflight_attestation(
+        state.get("preflightAttestation"),
+        run_root=run_root,
+        matrix=matrix,
+        matrix_digest=matrix_digest,
+        schedule_digest=schedule_digest,
+        admission_digest=admission_digest,
+        bundle_digest=bundle_digest,
+        orchestrator_digest=bundle["orchestratorSha256"],
+        load_generator_sha256=load_generator_sha256,
+        execution_identity=execution_identity,
+        expected_admission=expected_admission,
+    )
     results_root = run_root / "results"
     if not results_root.is_dir():
         raise AnalysisFailure("run root has no results directory")
@@ -4780,7 +6037,6 @@ def analyze(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             f"(missing={missing}, extra={extra})"
         )
 
-    execution_identity = validate_execution_identity(state["executionIdentity"])
     rows: list[dict[str, Any]] = []
     for entry in schedule["entries"]:
         try:
@@ -4855,6 +6111,8 @@ def analyze(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "freezerSha256": bundle["freezerSha256"],
             "controllerLockSha256": bundle["controllerLockSha256"],
             "analyzerSha256": analyzer_digest,
+            "loadGenerator": bundle["loadGenerator"],
+            "loadGeneratorSha256": load_generator_sha256,
         },
         "run": {
             "stateStatus": state["status"],
@@ -4888,6 +6146,7 @@ def analyze(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             ),
         },
         "failedEntries": failed,
+        "preflightAttestation": preflight_attestation,
         "controlIdentity": control_identity,
         "chronology": chronology,
         "nodeNoiseComparability": noise_comparability,

@@ -2,8 +2,19 @@
 set -Eeuo pipefail
 
 environment_file=/runner/runpod-environment.json
-[[ -r "$environment_file" ]] || {
+[[ -f "$environment_file" && ! -L "$environment_file" && -r "$environment_file" ]] || {
     printf 'ERROR: %s is unavailable\n' "$environment_file" >&2
+    exit 1
+}
+jq -e '
+    type == "object"
+    and .formatVersion == 1
+    and (.sourceRevision | type == "string"
+        and length == 40
+        and (gsub("[a-f0-9]"; "") | length == 0)
+        and . != "0000000000000000000000000000000000000000")
+' "$environment_file" >/dev/null || {
+    printf 'ERROR: %s has invalid build provenance\n' "$environment_file" >&2
     exit 1
 }
 
