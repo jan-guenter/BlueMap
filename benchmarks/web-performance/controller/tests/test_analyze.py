@@ -30,6 +30,93 @@ from support import (  # noqa: E402
 
 
 class RunPodAnalyzerTests(unittest.TestCase):
+    COMMAND_SESSION_ID = "c" * 64
+    TRANSPORT_OUTPUT = (
+        "/artifacts/case/repetitions/01/measurement/"
+        "ssh-l4-transport.json"
+    )
+    COMMAND_SESSION_OUTPUT = (
+        f"{TRANSPORT_OUTPUT}.command-session.{COMMAND_SESSION_ID}.json"
+    )
+
+    @staticmethod
+    def ssh_l4_transport_evidence(command_status: int = 0) -> dict[str, object]:
+        lanes = []
+        for index, port in enumerate(range(18081, 18089), start=1):
+            lanes.append(
+                {
+                    "id": f"lane-{index}",
+                    "listenPort": port,
+                    "startAttempted": True,
+                    "started": True,
+                    "startedAt": iso(10),
+                    "preProbe": {
+                        "attempted": True,
+                        "passed": True,
+                        "at": iso(11),
+                        "httpStatus": 200,
+                    },
+                    "postProbe": {
+                        "attempted": True,
+                        "passed": True,
+                        "at": iso(19),
+                        "httpStatus": 200,
+                    },
+                    "exitedEarly": False,
+                    "exitStatus": 143,
+                    "stoppedByHelper": True,
+                }
+            )
+        return {
+            "formatVersion": 1,
+            "kind": "ssh-l4-traefik-transport",
+            "mode": "ssh-l4-traefik",
+            "startedAt": iso(10),
+            "finishedAt": iso(20),
+            "topology": copy.deepcopy(analyze.SSH_L4_TRAEFIK_TUNNEL),
+            "allRequired": True,
+            "commandExitStatus": command_status,
+            "commandTerminatedForLaneFailure": False,
+            "commandSession": {
+                "required": True,
+                "id": RunPodAnalyzerTests.COMMAND_SESSION_ID,
+                "outputPath": RunPodAnalyzerTests.COMMAND_SESSION_OUTPUT,
+                "leaseClosedByHelper": True,
+                "leaseCloseReason": "after-command-exit",
+                "confirmationAttempted": True,
+                "confirmed": True,
+                "receipt": {
+                    "kind": "runpod-command-session",
+                    "formatVersion": 1,
+                    "sessionId": RunPodAnalyzerTests.COMMAND_SESSION_ID,
+                    "sessionOutput": RunPodAnalyzerTests.COMMAND_SESSION_OUTPUT,
+                    "activeLock": "/tmp/bluemap-runpod-active-phase.lock",
+                    "startedAt": iso(10.25),
+                    "completedAt": iso(19.75),
+                    "lease": {
+                        "required": True,
+                        "eofObserved": False,
+                        "protocolViolation": False,
+                        "observedAt": None,
+                    },
+                    "termination": {
+                        "requested": False,
+                        "termSignal": None,
+                        "killEscalated": False,
+                        "commandExitStatus": command_status,
+                        "processGroupId": 12345,
+                        "processGroupEmpty": True,
+                        "watcherReaped": True,
+                        "samplerReaped": True,
+                    },
+                    "passed": True,
+                },
+            },
+            "lanes": lanes,
+            "failure": None,
+            "passed": True,
+        }
+
     @staticmethod
     def proof_manifest() -> dict[str, object]:
         return {
@@ -244,7 +331,7 @@ class RunPodAnalyzerTests(unittest.TestCase):
                     "maximumCpuLimitRatio": 0.90,
                     "maximumMemoryLimitRatio": 0.80,
                     "minimumUniqueMetricTimestamps": 6,
-                    "maximumUniqueMetricTimestampGapSeconds": 30.0,
+                    "maximumUniqueMetricTimestampGapSeconds": 45.0,
                     "maximumMetricAgeSeconds": 60.0,
                     "maximumCoverageGapSeconds": 60.0,
                 },
@@ -902,12 +989,7 @@ class RunPodAnalyzerTests(unittest.TestCase):
             "mode": "ssh-l4-traefik",
             "baseUrl": "http://bluemap-test.guenter.cloud",
             "requiresEdgeBypass": False,
-            "tunnel": {
-                "listenHost": "127.0.0.1",
-                "listenPort": 18080,
-                "targetHost": "rke2-traefik.kube-system.svc.cluster.local",
-                "targetPort": 80,
-            },
+            "tunnel": copy.deepcopy(analyze.SSH_L4_TRAEFIK_TUNNEL),
             "formalRunId": RUN_ID,
         }
         self.assertEqual(
@@ -939,6 +1021,122 @@ class RunPodAnalyzerTests(unittest.TestCase):
                 "traffic",
                 formal_run_id=RUN_ID,
             )
+
+    def test_eight_lane_transport_evidence_preserves_command_status(self) -> None:
+        evidence = self.ssh_l4_transport_evidence(command_status=17)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ssh-l4-transport.json"
+            write_json(path, evidence)
+            validated = analyze.validate_ssh_l4_transport_artifact(
+                path,
+                "measurement",
+                (START_EPOCH + 9, START_EPOCH + 21),
+                17,
+                self.TRANSPORT_OUTPUT,
+            )
+
+        self.assertIs(validated["passed"], True)
+        self.assertEqual(validated["commandExitStatus"], 17)
+        self.assertEqual(
+            validated["topology"], analyze.SSH_L4_TRAEFIK_TUNNEL
+        )
+
+    def test_eight_lane_transport_failure_is_valid_but_not_passed(self) -> None:
+        evidence = self.ssh_l4_transport_evidence()
+        evidence["lanes"][1]["postProbe"] = {
+            "attempted": True,
+            "passed": False,
+            "at": iso(19),
+            "httpStatus": 503,
+        }
+        evidence["failure"] = "lane-2-post-probe-failed"
+        evidence["passed"] = False
+        evidence["commandExitStatus"] = 0
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ssh-l4-transport.json"
+            write_json(path, evidence)
+            validated = analyze.validate_ssh_l4_transport_artifact(
+                path,
+                "measurement",
+                (START_EPOCH + 9, START_EPOCH + 21),
+                86,
+                self.TRANSPORT_OUTPUT,
+            )
+
+        self.assertIs(validated["passed"], False)
+        self.assertEqual(validated["failure"], "lane-2-post-probe-failed")
+
+    def test_eight_lane_transport_rejects_degraded_or_forged_topology(self) -> None:
+        mutations = []
+        missing_lane = self.ssh_l4_transport_evidence()
+        missing_lane["lanes"] = missing_lane["lanes"][:1]
+        mutations.append(missing_lane)
+        forged_topology = self.ssh_l4_transport_evidence()
+        forged_topology["topology"]["tunnelCount"] = 1
+        mutations.append(forged_topology)
+        inconsistent_probe = self.ssh_l4_transport_evidence()
+        inconsistent_probe["lanes"][0]["postProbe"]["httpStatus"] = 503
+        mutations.append(inconsistent_probe)
+        missing_exit = self.ssh_l4_transport_evidence()
+        missing_exit["lanes"][0]["exitStatus"] = None
+        mutations.append(missing_exit)
+        reversed_probes = self.ssh_l4_transport_evidence()
+        reversed_probes["lanes"][0]["postProbe"]["at"] = iso(10.5)
+        mutations.append(reversed_probes)
+        live_process_group = self.ssh_l4_transport_evidence()
+        live_process_group["commandSession"]["receipt"]["termination"][
+            "processGroupEmpty"
+        ] = False
+        mutations.append(live_process_group)
+        forged_session = self.ssh_l4_transport_evidence()
+        forged_session["commandSession"]["id"] = "d" * 64
+        mutations.append(forged_session)
+        lease_violation = self.ssh_l4_transport_evidence()
+        lease_violation["commandSession"]["receipt"]["lease"][
+            "protocolViolation"
+        ] = True
+        mutations.append(lease_violation)
+        cancelled_but_claimed_passed = self.ssh_l4_transport_evidence()
+        cancelled_but_claimed_passed["commandSession"]["receipt"]["lease"].update(
+            {
+                "eofObserved": True,
+                "observedAt": iso(15),
+            }
+        )
+        cancelled_but_claimed_passed["commandSession"]["receipt"][
+            "termination"
+        ].update(
+            {
+                "requested": True,
+                "termSignal": "TERM",
+            }
+        )
+        mutations.append(cancelled_but_claimed_passed)
+        unterminated_lane = self.ssh_l4_transport_evidence()
+        unterminated_lane["failure"] = "synthetic-failure"
+        unterminated_lane["passed"] = False
+        unterminated_lane["lanes"][0].update(
+            {
+                "stoppedByHelper": False,
+                "exitedEarly": False,
+                "exitStatus": None,
+            }
+        )
+        mutations.append(unterminated_lane)
+
+        for index, evidence in enumerate(mutations):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "ssh-l4-transport.json"
+                write_json(path, evidence)
+                with self.assertRaises(analyze.AnalysisFailure):
+                    helper_status = 86 if evidence is unterminated_lane else 0
+                    analyze.validate_ssh_l4_transport_artifact(
+                        path,
+                        "measurement",
+                        (START_EPOCH + 9, START_EPOCH + 21),
+                        helper_status,
+                        self.TRANSPORT_OUTPUT,
+                    )
 
     def test_finished_phase_tracks_completed_repetition_count(self) -> None:
         self.assertTrue(

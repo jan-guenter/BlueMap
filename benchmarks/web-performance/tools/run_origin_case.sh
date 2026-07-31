@@ -1061,12 +1061,17 @@ loadgen_exec() {
 }
 
 loadgen_k6_exec() {
+    local transport_output="${1:-}"
+    shift || return 1
     if [[ "$LOADGEN_BACKEND" == "runpod-ssh" &&
         "$TRAFFIC_MODE" == "ssh-l4-traefik" ]]; then
         "$RUNPOD_LOADGEN_HELPER" \
             --identity "$LOADGEN_IDENTITY" \
             --identity-key "$LOADGEN_IDENTITY_KEY" \
-            exec-traefik-forward "$@"
+            exec-traefik-forward \
+            --transport-output "$transport_output" \
+            -- \
+            "$@"
     else
         loadgen_exec "$@"
     fi
@@ -2221,6 +2226,298 @@ validate_latency_gate() {
     jq -e '.passed == true' "$destination" >/dev/null
 }
 
+validate_ssh_l4_transport_evidence() {
+    local artifact="$1"
+    local helper_status="$2"
+    local expected_transport_output="$3"
+
+    jq -e \
+        --argjson helperStatus "$helper_status" \
+        --arg expectedTransportOutput "$expected_transport_output" \
+        '
+        def exact_keys($expected):
+            (keys | sort) == ($expected | sort);
+        def timestamp:
+            type == "string"
+            and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$");
+        def probe($transportStarted; $transportFinished):
+            exact_keys(["attempted", "passed", "at", "httpStatus"])
+            and (.attempted | type) == "boolean"
+            and (.passed | type) == "boolean"
+            and (
+                if .attempted
+                then (.at | timestamp)
+                    and $transportStarted <= .at
+                    and .at <= $transportFinished
+                else .at == null
+                end
+            )
+            and (.httpStatus == null or (
+                (.httpStatus | type) == "number"
+                and .httpStatus == (.httpStatus | floor)
+            ))
+            and .passed == (.attempted and .httpStatus == 200);
+        def expected_backends:
+            [range(1; 9) | {
+                id: "lane-\(.)",
+                listenHost: "127.0.0.1",
+                listenPort: (18080 + .),
+                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                targetPort: 80
+            }];
+        def lane($id; $port; $transportStarted; $transportFinished):
+            exact_keys([
+                "id", "listenPort", "startAttempted", "started", "startedAt",
+                "preProbe", "postProbe", "exitedEarly", "exitStatus",
+                "stoppedByHelper"
+            ])
+            and .id == $id
+            and .listenPort == $port
+            and (.startAttempted | type) == "boolean"
+            and (.started | type) == "boolean"
+            and (
+                if .started
+                then (.startedAt | timestamp)
+                    and $transportStarted <= .startedAt
+                    and .startedAt <= $transportFinished
+                else .startedAt == null
+                end
+            )
+            and (.preProbe | probe($transportStarted; $transportFinished))
+            and (.postProbe | probe($transportStarted; $transportFinished))
+            and (.exitedEarly | type) == "boolean"
+            and (.exitStatus == null or (
+                (.exitStatus | type) == "number"
+                and .exitStatus == (.exitStatus | floor)
+            ))
+            and (.stoppedByHelper | type) == "boolean"
+            and (if .started then .startAttempted else true end)
+            and (if .preProbe.attempted then .started else true end)
+            and (if .postProbe.attempted
+                then .preProbe.attempted else true end)
+            and (if .stoppedByHelper then .started else true end)
+            and (if .exitedEarly then .startAttempted else true end)
+            and (if .exitStatus != null then .startAttempted else true end)
+            and (
+                if .startAttempted == false
+                then .started == false
+                    and .preProbe.attempted == false
+                    and .postProbe.attempted == false
+                    and .exitedEarly == false
+                    and .exitStatus == null
+                    and .stoppedByHelper == false
+                elif .started == false
+                then .exitedEarly == true
+                    and (.exitStatus | type) == "number"
+                    and .stoppedByHelper == false
+                else (.exitStatus | type) == "number"
+                    and (.exitedEarly != .stoppedByHelper)
+                end
+            )
+            and (if .started and .preProbe.attempted
+                then .startedAt <= .preProbe.at else true end)
+            and (if .preProbe.attempted and .postProbe.attempted
+                then .preProbe.at <= .postProbe.at else true end);
+        def healthy_lane($transportStarted; $transportFinished):
+            .startAttempted == true
+            and .started == true
+            and ((.startedAt | type) == "string" and (.startedAt | length) > 0)
+            and .preProbe == {
+                attempted: true,
+                passed: true,
+                at: .preProbe.at,
+                httpStatus: 200
+            }
+            and ((.preProbe.at | type) == "string" and (.preProbe.at | length) > 0)
+            and .postProbe == {
+                attempted: true,
+                passed: true,
+                at: .postProbe.at,
+                httpStatus: 200
+            }
+            and ((.postProbe.at | type) == "string" and (.postProbe.at | length) > 0)
+            and $transportStarted <= .startedAt
+            and .startedAt <= .preProbe.at
+            and .preProbe.at <= .postProbe.at
+            and .postProbe.at <= $transportFinished
+            and .exitedEarly == false
+            and (.exitStatus | type) == "number"
+            and .exitStatus == (.exitStatus | floor)
+            and .stoppedByHelper == true;
+        def command_receipt($id; $output):
+            exact_keys([
+                "kind", "formatVersion", "sessionId", "sessionOutput",
+                "activeLock", "startedAt", "completedAt", "lease",
+                "termination", "passed"
+            ])
+            and .kind == "runpod-command-session"
+            and .formatVersion == 1
+            and .sessionId == $id
+            and .sessionOutput == $output
+            and .activeLock == "/tmp/bluemap-runpod-active-phase.lock"
+            and ((.startedAt | type) == "string" and (.startedAt | length) > 0)
+            and ((.completedAt | type) == "string" and (.completedAt | length) > 0)
+            and (.startedAt | timestamp)
+            and (.completedAt | timestamp)
+            and .startedAt <= .completedAt
+            and (.lease | exact_keys([
+                "required", "eofObserved", "protocolViolation", "observedAt"
+            ]))
+            and .lease.required == true
+            and (.lease.eofObserved | type) == "boolean"
+            and .lease.protocolViolation == false
+            and (
+                if .lease.eofObserved
+                then (.lease.observedAt | timestamp)
+                    and .startedAt <= .lease.observedAt
+                    and .lease.observedAt <= .completedAt
+                else .lease.observedAt == null
+                end
+            )
+            and (.termination | exact_keys([
+                "requested", "termSignal", "killEscalated",
+                "commandExitStatus", "processGroupId", "processGroupEmpty",
+                "watcherReaped", "samplerReaped"
+            ]))
+            and (.termination.requested | type) == "boolean"
+            and .termination.termSignal == (
+                if .termination.requested then "TERM" else null end
+            )
+            and (.termination.killEscalated | type) == "boolean"
+            and (if .termination.killEscalated
+                then .termination.requested else true end)
+            and ((.termination.commandExitStatus | type) == "number"
+                and .termination.commandExitStatus
+                    == (.termination.commandExitStatus | floor)
+                and .termination.commandExitStatus >= 0
+                and .termination.commandExitStatus <= 255)
+            and ((.termination.processGroupId | type) == "number"
+                and .termination.processGroupId
+                    == (.termination.processGroupId | floor)
+                and .termination.processGroupId > 0)
+            and .termination.processGroupEmpty == true
+            and .termination.watcherReaped == true
+            and .termination.samplerReaped == true
+            and .passed == true
+            and (if .lease.eofObserved
+                then .termination.requested == true else true end);
+        def command_session($root):
+            . as $session
+            | exact_keys([
+                "required", "id", "outputPath", "leaseClosedByHelper",
+                "leaseCloseReason", "confirmationAttempted", "confirmed",
+                "receipt"
+            ])
+            and (.required | type) == "boolean"
+            and ((.id | type) == "string"
+                and (.id | test("^[a-f0-9]{64}$")))
+            and .outputPath == (
+                $expectedTransportOutput + ".command-session." + .id + ".json"
+            )
+            and (.leaseClosedByHelper | type) == "boolean"
+            and (.confirmationAttempted | type) == "boolean"
+            and (.confirmed | type) == "boolean"
+            and (
+                if .required
+                then .leaseClosedByHelper == true
+                    and (.leaseCloseReason == "after-command-exit"
+                        or .leaseCloseReason == "lane-failure"
+                        or .leaseCloseReason == "helper-deadline"
+                        or .leaseCloseReason == "local-exit-timeout")
+                    and .confirmationAttempted == true
+                    and (
+                        if .confirmed
+                        then (.receipt
+                            | command_receipt($session.id; $session.outputPath))
+                            and $root.startedAt <= .receipt.startedAt
+                            and .receipt.completedAt <= $root.finishedAt
+                            and (
+                                $root.commandExitStatus == null
+                                or
+                                .receipt.lease.eofObserved
+                                or .receipt.termination.commandExitStatus
+                                    == $root.commandExitStatus
+                            )
+                        else .receipt == null
+                        end
+                    )
+                else .leaseClosedByHelper == false
+                    and .leaseCloseReason == null
+                    and .confirmationAttempted == false
+                    and .confirmed == false
+                    and .receipt == null
+                end
+            );
+        . as $root
+        |
+        exact_keys([
+            "formatVersion", "kind", "mode", "startedAt", "finishedAt",
+            "topology", "allRequired", "commandExitStatus",
+            "commandTerminatedForLaneFailure", "commandSession", "lanes",
+            "failure", "passed"
+        ])
+        and .formatVersion == 1
+        and .kind == "ssh-l4-traefik-transport"
+        and .mode == "ssh-l4-traefik"
+        and (.startedAt | timestamp)
+        and (.finishedAt | timestamp)
+        and .startedAt <= .finishedAt
+        and .topology == {
+            formatVersion: 1,
+            balancer: "haproxy-tcp-static-rr",
+            frontend: {host: "127.0.0.1", port: 18080},
+            tunnelCount: 8,
+            backends: expected_backends,
+            healthPolicy: "all-required"
+        }
+        and .allRequired == true
+        and (.commandExitStatus == null or (
+            (.commandExitStatus | type) == "number"
+            and .commandExitStatus == (.commandExitStatus | floor)
+        ))
+        and (.commandTerminatedForLaneFailure | type) == "boolean"
+        and (.commandSession | command_session($root))
+        and (.lanes | type) == "array"
+        and (.lanes | length) == 8
+        and all(
+            range(0; 8);
+            . as $index
+            | ($root.lanes[$index]
+                | lane(
+                    "lane-\($index + 1)";
+                    18081 + $index;
+                    $root.startedAt;
+                    $root.finishedAt
+                ))
+        )
+        and (.failure == null or ((.failure | type) == "string" and (.failure | length) > 0))
+        and (.passed | type) == "boolean"
+        and .passed == (
+            .commandTerminatedForLaneFailure == false
+            and .failure == null
+            and .commandSession.required == true
+            and .commandSession.confirmed == true
+            and .commandSession.leaseCloseReason == "after-command-exit"
+            and .commandSession.receipt.lease.eofObserved == false
+            and .commandSession.receipt.termination.requested == false
+            and .commandSession.receipt.termination.killEscalated == false
+            and .commandSession.receipt.termination.commandExitStatus
+                == .commandExitStatus
+            and all(
+                .lanes[];
+                healthy_lane($root.startedAt; $root.finishedAt)
+            )
+        )
+        and (
+            if .passed
+            then (.commandExitStatus | type) == "number"
+                and .commandExitStatus == $helperStatus
+            else $helperStatus == 86
+            end
+        )
+        ' "$artifact" >/dev/null
+}
+
 run_k6_phase() {
     local repetition="$1"
     local phase="$2"
@@ -2232,6 +2529,7 @@ run_k6_phase() {
     local remote_summary="$remote_dir/summary.json"
     local remote_raw="$remote_dir/raw.ndjson"
     local remote_resources="$remote_dir/load-generator-resources.ndjson"
+    local remote_transport="$remote_dir/ssh-l4-transport.json"
     local phase_timeout_seconds
     local -a phase_command
     mkdir -- "$local_dir" || return 1
@@ -2310,7 +2608,7 @@ print(math.ceil(value * factor) + 90)
     fi
 
     set +e
-    loadgen_k6_exec "${phase_command[@]}" \
+    loadgen_k6_exec "$remote_transport" "${phase_command[@]}" \
         2>&1 | tee "$local_dir/console.log"
     local status="${PIPESTATUS[0]}"
     set -e
@@ -2344,6 +2642,27 @@ print(math.ceil(value * factor) + 90)
         record_failure \
             "Repetition $repetition $phase: RunPod load generator exceeded its capacity gate"
         artifact_failure=1
+    fi
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" &&
+        "$TRAFFIC_MODE" == "ssh-l4-traefik" ]] &&
+        ! copy_remote_file \
+            "$remote_transport" \
+            "$local_dir/ssh-l4-transport.json"; then
+        die "Repetition $repetition $phase: SSH L4 transport evidence is missing; remote phase termination is unconfirmed"
+    elif [[ "$LOADGEN_BACKEND" == "runpod-ssh" &&
+        "$TRAFFIC_MODE" == "ssh-l4-traefik" ]] &&
+        ! validate_ssh_l4_transport_evidence \
+            "$local_dir/ssh-l4-transport.json" \
+            "$status" \
+            "$remote_transport"; then
+        die "Repetition $repetition $phase: SSH L4 transport or command-session evidence failed validation"
+    elif [[ "$LOADGEN_BACKEND" == "runpod-ssh" &&
+        "$TRAFFIC_MODE" == "ssh-l4-traefik" ]] &&
+        jq -e '
+            .commandSession.required == true
+            and .commandSession.confirmed != true
+        ' "$local_dir/ssh-l4-transport.json" >/dev/null; then
+        die "Repetition $repetition $phase: remote process-group termination is unconfirmed"
     fi
     if [[ -s "$local_dir/summary.json" ]] &&
         ! validate_arrival_gate \
@@ -2549,10 +2868,72 @@ write_workload_metadata() {
                 tunnel: (
                     if $trafficMode == "ssh-l4-traefik"
                     then {
-                        listenHost: "127.0.0.1",
-                        listenPort: 18080,
-                        targetHost: "rke2-traefik.kube-system.svc.cluster.local",
-                        targetPort: 80
+                        formatVersion: 1,
+                        balancer: "haproxy-tcp-static-rr",
+                        frontend: {
+                            host: "127.0.0.1",
+                            port: 18080
+                        },
+                        tunnelCount: 8,
+                        backends: [
+                            {
+                                id: "lane-1",
+                                listenHost: "127.0.0.1",
+                                listenPort: 18081,
+                                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                                targetPort: 80
+                            },
+                            {
+                                id: "lane-2",
+                                listenHost: "127.0.0.1",
+                                listenPort: 18082,
+                                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                                targetPort: 80
+                            },
+                            {
+                                id: "lane-3",
+                                listenHost: "127.0.0.1",
+                                listenPort: 18083,
+                                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                                targetPort: 80
+                            },
+                            {
+                                id: "lane-4",
+                                listenHost: "127.0.0.1",
+                                listenPort: 18084,
+                                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                                targetPort: 80
+                            },
+                            {
+                                id: "lane-5",
+                                listenHost: "127.0.0.1",
+                                listenPort: 18085,
+                                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                                targetPort: 80
+                            },
+                            {
+                                id: "lane-6",
+                                listenHost: "127.0.0.1",
+                                listenPort: 18086,
+                                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                                targetPort: 80
+                            },
+                            {
+                                id: "lane-7",
+                                listenHost: "127.0.0.1",
+                                listenPort: 18087,
+                                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                                targetPort: 80
+                            },
+                            {
+                                id: "lane-8",
+                                listenHost: "127.0.0.1",
+                                listenPort: 18088,
+                                targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                                targetPort: 80
+                            }
+                        ],
+                        healthPolicy: "all-required"
                     }
                     else null
                     end

@@ -6,7 +6,11 @@ fail() {
     exit 1
 }
 
-[[ "${BLUEMAP_RUNPOD_SSH_PUBLIC_KEY:-}" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+([[:space:]].*)?$ ]] ||
+ssh_public_key="${BLUEMAP_RUNPOD_SSH_PUBLIC_KEY:-}"
+if [[ "$ssh_public_key" == *$'\r'* || "$ssh_public_key" == *$'\n'* ]]; then
+    fail "BLUEMAP_RUNPOD_SSH_PUBLIC_KEY must not contain CR or LF"
+fi
+[[ "$ssh_public_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+([[:space:]].*)?$ ]] ||
     fail "BLUEMAP_RUNPOD_SSH_PUBLIC_KEY must contain one Ed25519 public key"
 [[ "${BLUEMAP_RUNPOD_RUN_ID:-}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] ||
     fail "BLUEMAP_RUNPOD_RUN_ID is missing or invalid"
@@ -29,8 +33,9 @@ jq -e '
 source_revision="$(jq -r '.sourceRevision' "$build_identity")"
 
 install -m 0600 -o loadgen -g loadgen /dev/null /home/loadgen/.ssh/authorized_keys
-printf '%s\n' "$BLUEMAP_RUNPOD_SSH_PUBLIC_KEY" > /home/loadgen/.ssh/authorized_keys
+printf '%s\n' "$ssh_public_key" > /home/loadgen/.ssh/authorized_keys
 unset BLUEMAP_RUNPOD_SSH_PUBLIC_KEY
+unset ssh_public_key
 
 if [[ ! -s /etc/ssh/ssh_host_ed25519_key ]]; then
     ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
@@ -68,4 +73,43 @@ jq -n \
 
 chmod 0444 /runner/runpod-environment.json
 unset RUNPOD_API_KEY
-exec /usr/sbin/sshd -D -e
+
+haproxy_pid=""
+sshd_pid=""
+
+stop_services() {
+    local pid
+
+    trap - TERM INT
+    for pid in "$haproxy_pid" "$sshd_pid"; do
+        [[ -n "$pid" ]] || continue
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    for pid in "$haproxy_pid" "$sshd_pid"; do
+        [[ -n "$pid" ]] || continue
+        wait "$pid" 2>/dev/null || true
+    done
+}
+
+trap 'stop_services; exit 143' TERM
+trap 'stop_services; exit 130' INT
+
+/usr/sbin/haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null ||
+    fail "HAProxy configuration is invalid"
+/usr/sbin/haproxy -W -db -f /etc/haproxy/haproxy.cfg &
+haproxy_pid="$!"
+/usr/sbin/sshd -D -e &
+sshd_pid="$!"
+
+set +e
+wait -n "$haproxy_pid" "$sshd_pid"
+service_status="$?"
+set -e
+
+if kill -0 "$haproxy_pid" 2>/dev/null; then
+    stopped_service="sshd"
+else
+    stopped_service="haproxy"
+fi
+stop_services
+fail "$stopped_service exited unexpectedly with status $service_status"

@@ -76,6 +76,14 @@ class RunPodOrchestratorTests(unittest.TestCase):
             first["scheduleSeed"],
             "bluemap-web-performance-ssh-l4-preflight-v1",
         )
+        self.assertEqual(
+            formal["controls"]["minimumAchievedRateRatio"],
+            0.99,
+        )
+        self.assertEqual(
+            first["controls"]["minimumAchievedRateRatio"],
+            1.0,
+        )
         self.assertEqual(first["controls"], orchestrate.PREFLIGHT_CONTROLS)
         self.assertEqual(
             [variant["id"] for variant in first["variants"]],
@@ -271,19 +279,14 @@ class RunPodOrchestratorTests(unittest.TestCase):
         self.assertFalse(assessment["passed"])
         self.assertTrue(any("entry 4" in item for item in assessment["failures"]))
 
-    def test_relay_headroom_report_is_revalidated_at_exact_boundaries(self) -> None:
-        self.assertEqual(
-            orchestrate.validate_metrics_window("28.454s"),
-            "28.454s",
-        )
-        for invalid in ("0s", "-1s", "nan", "28.454"):
-            with self.subTest(window=invalid):
-                with self.assertRaises(orchestrate.SafetyError):
-                    orchestrate.validate_metrics_window(invalid)
+    @staticmethod
+    def relay_headroom_report() -> dict[str, object]:
         thresholds = orchestrate.PREFLIGHT_RELAY_THRESHOLDS
-        report = {
+        return {
             "formatVersion": 1,
             "passed": True,
+            "startedAt": "2026-07-31T00:00:00Z",
+            "stoppedAt": "2026-07-31T00:15:00Z",
             "namespace": "minecraft",
             "pod": "bluemap-perf-formal-controller-test",
             "podUid": "controller-uid",
@@ -328,16 +331,152 @@ class RunPodOrchestratorTests(unittest.TestCase):
                     "maximumMemoryLimitRatio"
                 ],
             },
+            "limitation": "metrics.k8s.io exposes coarse aggregate metrics",
         }
+
+    def test_relay_headroom_report_is_revalidated_at_exact_boundaries(self) -> None:
+        self.assertEqual(
+            orchestrate.validate_metrics_window("28.454s"),
+            "28.454s",
+        )
+        for invalid in ("0s", "-1s", "nan", "28.454"):
+            with self.subTest(window=invalid):
+                with self.assertRaises(orchestrate.SafetyError):
+                    orchestrate.validate_metrics_window(invalid)
+        self.assertEqual(
+            orchestrate.PREFLIGHT_RELAY_THRESHOLDS[
+                "maximumUniqueMetricTimestampGapSeconds"
+            ],
+            45.0,
+        )
+        self.assertEqual(
+            orchestrate.PREFLIGHT_RELAY_THRESHOLDS[
+                "maximumCoverageGapSeconds"
+            ],
+            60.0,
+        )
+        report = self.relay_headroom_report()
         orchestrate.validate_relay_headroom_report(
             report,
             "bluemap-perf-formal-controller-test",
         )
-        report["observed"]["errors"] = 1
-        with self.assertRaisesRegex(orchestrate.SafetyError, "API error"):
+
+        failed = copy.deepcopy(report)
+        failed["passed"] = False
+        failed["checks"]["noMetricsApiErrors"] = False
+        failed["observed"]["errors"] = 1
+        orchestrate.validate_relay_headroom_report(
+            failed,
+            "bluemap-perf-formal-controller-test",
+        )
+
+        malformed = copy.deepcopy(failed)
+        malformed["checks"]["noMetricsApiErrors"] = True
+        with self.assertRaisesRegex(orchestrate.SafetyError, "inconsistent"):
             orchestrate.validate_relay_headroom_report(
-                report,
+                malformed,
                 "bluemap-perf-formal-controller-test",
+            )
+
+        malformed = copy.deepcopy(report)
+        malformed["unexpected"] = True
+        with self.assertRaisesRegex(orchestrate.SafetyError, "schema"):
+            orchestrate.validate_relay_headroom_report(
+                malformed,
+                "bluemap-perf-formal-controller-test",
+            )
+
+    def test_failed_relay_gate_is_preserved_before_preflight_raises(self) -> None:
+        schedule = {
+            "entries": [
+                {
+                    "sequence": sequence,
+                    "entryId": f"entry-{sequence}",
+                    "runnerCaseId": f"case-{sequence}",
+                    "variantId": "java-new-postgresql",
+                }
+                for sequence in range(1, 7)
+            ]
+        }
+        state = {
+            "status": "completed",
+            "nextSequence": 7,
+            "entries": {
+                str(entry["sequence"]): {
+                    "status": "completed",
+                    "entryId": entry["entryId"],
+                    "runnerCaseId": entry["runnerCaseId"],
+                    "variantId": entry["variantId"],
+                    "result": "passed",
+                    "runnerExitStatus": 0,
+                }
+                for entry in schedule["entries"]
+            },
+        }
+        relay = self.relay_headroom_report()
+        relay["passed"] = False
+        relay["checks"]["maximumUniqueMetricTimestampGapSeconds"] = False
+        relay["observed"]["maximumUniqueMetricTimestampGapSeconds"] = 46.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            preflight_root = Path(directory) / "preflight"
+            relay_path = (
+                preflight_root / "observability" / "relay-headroom.json"
+            )
+            write_json(relay_path, relay)
+            with self.assertRaisesRegex(
+                orchestrate.SafetyError,
+                "headroom gate failed",
+            ):
+                orchestrate.persist_preflight_outcome(
+                    preflight_root=preflight_root,
+                    state=state,
+                    schedule=schedule,
+                    relay_report=relay,
+                    controller_pod="bluemap-perf-formal-controller-test",
+                    formal_run_id=RUN_ID,
+                    formal_matrix={"benchmarkGitRevision": SOURCE_REVISION},
+                    provenance={
+                        "sourceFormalInputs": {"matrixSha256": "a" * 64},
+                        "traffic": {"mode": "ssh-l4-traefik"},
+                        "loadGeneratorIdentitySha256": "b" * 64,
+                        "loadGeneratorSha256": "c" * 64,
+                        "orchestratorSha256": "d" * 64,
+                        "generatorSha256": "e" * 64,
+                    },
+                    derived_hashes={"matrixSha256": "f" * 64},
+                    traefik_limitation={
+                        "formatVersion": 1,
+                        "available": False,
+                        "gating": False,
+                    },
+                )
+
+            evidence_path = preflight_root / "preflight-evidence.json"
+            report_path = preflight_root / "preflight-report.json"
+            sums_path = preflight_root / "SHA256SUMS"
+            self.assertTrue(evidence_path.is_file())
+            self.assertTrue(report_path.is_file())
+            self.assertTrue(sums_path.is_file())
+            self.assertEqual(
+                orchestrate.load_json(evidence_path),
+                orchestrate.preflight_evidence_inventory(preflight_root),
+            )
+            report = orchestrate.load_json(report_path)
+            self.assertFalse(report["passed"])
+            self.assertFalse(report["controllerRelay"]["passed"])
+            self.assertIn(
+                "maximumUniqueMetricTimestampGapSeconds",
+                report["failures"][0],
+            )
+            self.assertEqual(
+                sums_path.read_text(encoding="utf-8"),
+                (
+                    f"{orchestrate.file_sha256(evidence_path)}  "
+                    "preflight-evidence.json\n"
+                    f"{orchestrate.file_sha256(report_path)}  "
+                    "preflight-report.json\n"
+                ),
             )
 
     @staticmethod
@@ -971,7 +1110,9 @@ class RunPodOrchestratorTests(unittest.TestCase):
             )
 
             invalid_tunnel = copy.deepcopy(tunnel_identity)
-            invalid_tunnel["traffic"]["tunnel"]["targetPort"] = 443
+            invalid_tunnel["traffic"]["tunnel"]["backends"][0][
+                "targetPort"
+            ] = 443
             with self.assertRaisesRegex(
                 analyze.AnalysisFailure,
                 "SSH L4 Traefik controls are invalid",
