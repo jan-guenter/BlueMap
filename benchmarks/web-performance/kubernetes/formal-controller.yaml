@@ -1,0 +1,251 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bluemap-perf-formal-controller
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: replace-with-formal-run-id
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bluemap-perf-formal-controller
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: replace-with-formal-run-id
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames:
+      - bluemap-perf-java
+      - bluemap-perf-java-new-postgresql
+      - bluemap-perf-java-new-postgresql-r3
+      - bluemap-perf-java-php
+      - bluemap-perf-rust-postgresql
+      - bluemap-perf-rust-postgresql-r3
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames:
+      - bluemap-perf-java
+      - bluemap-perf-java-new-postgresql
+      - bluemap-perf-java-new-postgresql-r3
+      - bluemap-perf-java-php
+      - bluemap-perf-rust-postgresql
+      - bluemap-perf-rust-postgresql-r3
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames:
+      - bluemap-perf-java
+      - bluemap-perf-java-new-postgresql
+      - bluemap-perf-java-new-postgresql-r3
+      - bluemap-perf-java-php
+      - bluemap-perf-public
+      - bluemap-perf-rust-postgresql
+      - bluemap-perf-rust-postgresql-r3
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - bluemap-perf-java-config
+      - bluemap-perf-java-storage
+      - bluemap-perf-java-new-postgresql-config
+      - bluemap-perf-java-new-postgresql-storage
+      - bluemap-perf-java-new-postgresql-r3-config
+      - bluemap-perf-java-new-postgresql-r3-storage
+      - bluemap-perf-java-php-fpm
+      - bluemap-perf-java-php-nginx
+      - bluemap-perf-rust-postgresql-r3-rust
+      - bluemap-perf-rust-postgresql-rust
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    resourceNames:
+      - bluemap-perf-public
+    verbs: ["get"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bluemap-perf-formal-controller
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: replace-with-formal-run-id
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bluemap-perf-formal-controller
+subjects:
+  - kind: ServiceAccount
+    name: bluemap-perf-formal-controller
+    namespace: minecraft
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bluemap-perf-formal-artifacts
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: replace-with-formal-run-id
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: longhorn
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bluemap-perf-formal-controller-runtime
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: replace-with-formal-run-id
+data:
+  BLUEMAP_BENCHMARK_REVISION: "0000000000000000000000000000000000000000"
+  BLUEMAP_FORMAL_RUN_ID: "replace-with-formal-run-id"
+  BLUEMAP_TRAFFIC_BASE_URL: "https://bluemap-test.guenter.cloud"
+  BLUEMAP_PROMETHEUS_URL: "http://rancher-monitoring-prometheus.cattle-monitoring-system.svc:9090"
+  BLUEMAP_CONTROLLER_IMAGE_DIGEST: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bluemap-perf-formal-controller
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/name: bluemap-perf-formal-controller
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: replace-with-formal-run-id
+spec:
+  activeDeadlineSeconds: 72000
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bluemap-perf-formal-controller
+        app.kubernetes.io/part-of: bluemap-web-performance
+        bluemap.guenter.cloud/experiment-id: replace-with-formal-run-id
+    spec:
+      automountServiceAccountToken: true
+      nodeSelector:
+        kubernetes.io/hostname: contabo1
+      restartPolicy: Never
+      serviceAccountName: bluemap-perf-formal-controller
+      terminationGracePeriodSeconds: 2100
+      securityContext:
+        fsGroup: 12345
+        runAsGroup: 12345
+        runAsNonRoot: true
+        runAsUser: 12345
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-runpod-credentials
+          image: ghcr.io/jan-guenter/bluemap-perf-controller@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              umask 077
+              install -m 0600 /runpod-secret/id_ed25519 /credentials/id_ed25519
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsGroup: 12345
+            runAsNonRoot: true
+            runAsUser: 12345
+          volumeMounts:
+            - name: runpod-secret
+              mountPath: /runpod-secret
+              readOnly: true
+            - name: credentials
+              mountPath: /credentials
+      containers:
+        - name: controller
+          image: ghcr.io/jan-guenter/bluemap-perf-controller@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: bluemap-perf-formal-controller-runtime
+          env:
+            - name: BLUEMAP_CONTROLLER_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsGroup: 12345
+            runAsNonRoot: true
+            runAsUser: 12345
+          volumeMounts:
+            - name: artifacts
+              mountPath: /opt/bluemap/benchmarks/web-performance/artifacts/formal-runs
+            - name: credentials
+              mountPath: /opt/bluemap-runtime/credentials
+              readOnly: true
+            - name: runpod-identity
+              mountPath: /runpod-identity/identity.json
+              subPath: identity.json
+              readOnly: true
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: bluemap-perf-formal-artifacts
+        - name: credentials
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: runpod-identity
+          configMap:
+            name: bluemap-perf-runpod-identity
+            defaultMode: 292
+            items:
+              - key: identity.json
+                path: identity.json
+        - name: runpod-secret
+          secret:
+            secretName: bluemap-perf-runpod-ssh
+            defaultMode: 288
+            items:
+              - key: id_ed25519
+                path: id_ed25519
+        - name: temporary
+          emptyDir:
+            sizeLimit: 512Mi
