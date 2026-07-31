@@ -1,0 +1,1542 @@
+{
+  "assets": [
+    "/maps/world/assets/playerheads/a4aac08e-0d4f-475b-8bdf-c0b72c16d516.png"
+  ],
+  "counts": {
+    "assets": 1,
+    "markers": 1,
+    "players": 1,
+    "settings": 1,
+    "static": 44,
+    "textures": 1,
+    "tiles": 165
+  },
+  "expected": {
+    "/": {
+      "decodedSha256": "d17d695dd47d4845cc0150ff980073e1cc87f5794b071719735a50c6fcae8fd3",
+      "decodedSize": 1681,
+      "sourceEncoding": "identity",
+      "sourceSize": 1681
+    },
+    "/assets/Quicksand-BuVPtn-J.ttf": {
+      "decodedSha256": "06927fae113c34dca0a33a2bc522da1f4cccc6dda735858090dcf48b0f280535",
+      "decodedSize": 124196,
+      "sourceEncoding": "identity",
+      "sourceSize": 124196
+    },
+    "/assets/favicon-DEN7TZ5X.png": {
+      "decodedSha256": "8768b87253c96e5244e06ab588c45fb9a71ea7c9f11bdbd5a7d1363a3845b2cb",
+      "decodedSize": 6073,
+      "sourceEncoding": "identity",
+      "sourceSize": 6073
+    },
+    "/assets/index-BgiqB2rB.css": {
+      "decodedSha256": "616e6975e51cf2fbc65396ec94b1268ce130b6715edc0551f60560ab9f8a2b77",
+      "decodedSize": 19414,
+      "sourceEncoding": "identity",
+      "sourceSize": 19414
+    },
+    "/assets/index-BxD3mV_W.js": {
+      "decodedSha256": "daaf67fd6eedf9bbdd0d341c1f4427414a4051231532c4501a42a0c4d15ad965",
+      "decodedSize": 1031649,
+      "sourceEncoding": "identity",
+      "sourceSize": 1031649
+    },
+    "/assets/index-BxD3mV_W.js.map": {
+      "decodedSha256": "7952ba42463bf5fa603d1aa2a9e9579ff586adf4d41dbf8011663055e002661d",
+      "decodedSize": 3711271,
+      "sourceEncoding": "identity",
+      "sourceSize": 3711271
+    },
+    "/assets/logo.png": {
+      "decodedSha256": "74695a2859c6598c24d25d64e8af279c8d02ad1c652612ad56d48d2b242ba1d8",
+      "decodedSize": 16338,
+      "sourceEncoding": "identity",
+      "sourceSize": 16338
+    },
+    "/assets/logoCircle512.png": {
+      "decodedSha256": "76356bee1069cef19abfc9b01818a75fde0489f81a134d2a000a6145e4c66cda",
+      "decodedSize": 53997,
+      "sourceEncoding": "identity",
+      "sourceSize": 53997
+    },
+    "/assets/logoCircle64.png": {
+      "decodedSha256": "09c95453eceabddc37a766f10788ca5c49ba68951ac9de1f7768d8ae3f739e65",
+      "decodedSize": 7071,
+      "sourceEncoding": "identity",
+      "sourceSize": 7071
+    },
+    "/assets/manifest-vz4Wm4Dd.webmanifest": {
+      "decodedSha256": "7688dd50be6ab9a8bd96ebf322653473850c0d36f243e4650bf228f97b87ad4b",
+      "decodedSize": 536,
+      "sourceEncoding": "identity",
+      "sourceSize": 536
+    },
+    "/assets/poi.svg": {
+      "decodedSha256": "83485d0aad7396430445d83ba01ebcaea160b60349ecbe87a06412cb219340ec",
+      "decodedSize": 919,
+      "sourceEncoding": "identity",
+      "sourceSize": 919
+    },
+    "/assets/steve.png": {
+      "decodedSha256": "a930307e4a94a0b1e2fd80cc1bba1b1f798870fad29670c139d57eaab0af4935",
+      "decodedSize": 844,
+      "sourceEncoding": "identity",
+      "sourceSize": 844
+    },
+    "/index.html": {
+      "decodedSha256": "d17d695dd47d4845cc0150ff980073e1cc87f5794b071719735a50c6fcae8fd3",
+      "decodedSize": 1681,
+      "sourceEncoding": "identity",
+      "sourceSize": 1681
+    },
+    "/lang/cs.conf": {
+      "decodedSha256": "5c195d371367b88c61a0f65a9be918a7b2c3aed1102c2b34866fa17264eb90b9",
+      "decodedSize": 3571,
+      "sourceEncoding": "identity",
+      "sourceSize": 3571
+    },
+    "/lang/de.conf": {
+      "decodedSha256": "2eb8531ab31dfe1176d89f8eaa8aec3306280c570b302dd0995172984c6bda16",
+      "decodedSize": 4196,
+      "sourceEncoding": "identity",
+      "sourceSize": 4196
+    },
+    "/lang/en.conf": {
+      "decodedSha256": "85e6951f16d5211c0f8027e4356e8e62da94904dbaa4e17a03b4ebd54a5f0261",
+      "decodedSize": 4001,
+      "sourceEncoding": "identity",
+      "sourceSize": 4001
+    },
+    "/lang/es.conf": {
+      "decodedSha256": "4fd44afa5da9de19af2684814db0b10a3dd5a00927643b7abd5c74adc7eb3191",
+      "decodedSize": 3811,
+      "sourceEncoding": "identity",
+      "sourceSize": 3811
+    },
+    "/lang/fi.conf": {
+      "decodedSha256": "bb4e839d69f0bbcf249b1956d8c1ead9d60a629c73ed1d88b545cc0c64377126",
+      "decodedSize": 4379,
+      "sourceEncoding": "identity",
+      "sourceSize": 4379
+    },
+    "/lang/fr.conf": {
+      "decodedSha256": "2d4f721979b186b1ab5e7b3d036155319026e9ac25db468291b0630c2f3bb19a",
+      "decodedSize": 4341,
+      "sourceEncoding": "identity",
+      "sourceSize": 4341
+    },
+    "/lang/hi.conf": {
+      "decodedSha256": "9151a4f9403e74fab57489a6f52d65c9076e797b3868065831660953e4b008cb",
+      "decodedSize": 5189,
+      "sourceEncoding": "identity",
+      "sourceSize": 5189
+    },
+    "/lang/hu.conf": {
+      "decodedSha256": "289ee6e05972b99f2b99f09ab7be56c4401832ee9bb9c2b60073c9988319ac94",
+      "decodedSize": 3765,
+      "sourceEncoding": "identity",
+      "sourceSize": 3765
+    },
+    "/lang/id.conf": {
+      "decodedSha256": "2dc7f1ae64a00c019894247737c1fab52dec2e76253bbf27e6b6a585a6259612",
+      "decodedSize": 4720,
+      "sourceEncoding": "identity",
+      "sourceSize": 4720
+    },
+    "/lang/it.conf": {
+      "decodedSha256": "0fd4bd8e1e8c7935cef390145e3c565057a47767cdf323242d7295dab7de5c03",
+      "decodedSize": 3567,
+      "sourceEncoding": "identity",
+      "sourceSize": 3567
+    },
+    "/lang/ja.conf": {
+      "decodedSha256": "d807e9bb8a7f1caa801e0097000b07956258730bf78974a67548d0a750659cab",
+      "decodedSize": 4815,
+      "sourceEncoding": "identity",
+      "sourceSize": 4815
+    },
+    "/lang/ko.conf": {
+      "decodedSha256": "d7563572870b4084024b5bc734d6747d28acde320bedc8de2fb66b38057c5a49",
+      "decodedSize": 4411,
+      "sourceEncoding": "identity",
+      "sourceSize": 4411
+    },
+    "/lang/lv.conf": {
+      "decodedSha256": "90150eda9e216b2902556268d2adcba44b9c7b1f5f95b3138dc8b2906599369b",
+      "decodedSize": 3809,
+      "sourceEncoding": "identity",
+      "sourceSize": 3809
+    },
+    "/lang/nb.conf": {
+      "decodedSha256": "b4c54ca189f1e271a09c21f7a5ff8a0551479e6058343e3b23e63c2346ec0621",
+      "decodedSize": 3622,
+      "sourceEncoding": "identity",
+      "sourceSize": 3622
+    },
+    "/lang/nl.conf": {
+      "decodedSha256": "38ddc8d67abbf55acdf592ae380fa0c847dfaef78e4533f64d08ba04339742ea",
+      "decodedSize": 4222,
+      "sourceEncoding": "identity",
+      "sourceSize": 4222
+    },
+    "/lang/pl.conf": {
+      "decodedSha256": "3ae0777e2e8025f7e7ef8e8d8c850e6c4383e1142b3eb043ec6c84fb6ff1d1a7",
+      "decodedSize": 4272,
+      "sourceEncoding": "identity",
+      "sourceSize": 4272
+    },
+    "/lang/pt-PT.conf": {
+      "decodedSha256": "9ed7602023f53ac281ef49f2794d7e12aba20543641af85e371e4f24f055f8c9",
+      "decodedSize": 4230,
+      "sourceEncoding": "identity",
+      "sourceSize": 4230
+    },
+    "/lang/ru.conf": {
+      "decodedSha256": "0d67b49a038d741d1f46419b156c439c250b5bd3047419cfea8b3d28a728dc5b",
+      "decodedSize": 5673,
+      "sourceEncoding": "identity",
+      "sourceSize": 5673
+    },
+    "/lang/settings.conf": {
+      "decodedSha256": "64689d2d20ef1b2931c74a386a2dbf7a7b47a072320822c3efdbfc9827cf4137",
+      "decodedSize": 1464,
+      "sourceEncoding": "identity",
+      "sourceSize": 1464
+    },
+    "/lang/sr-Cyrl-RS.conf": {
+      "decodedSha256": "9af273006bb3f353dfb1b09efc1e6f944499c354533446cb8391dfba3a7cdba8",
+      "decodedSize": 5657,
+      "sourceEncoding": "identity",
+      "sourceSize": 5657
+    },
+    "/lang/sr-Latn-RS.conf": {
+      "decodedSha256": "c178e15c6fcfb1a2d1ccb7f622c05e574ddb9ebe8158dc4ab6d7082cf9bff2bc",
+      "decodedSize": 4382,
+      "sourceEncoding": "identity",
+      "sourceSize": 4382
+    },
+    "/lang/sv.conf": {
+      "decodedSha256": "c27fd2a66dc19f085c6841a7fa40b13e31a044a190503807eefcb3c6f413d029",
+      "decodedSize": 4136,
+      "sourceEncoding": "identity",
+      "sourceSize": 4136
+    },
+    "/lang/th.conf": {
+      "decodedSha256": "16886b7cb8cf93f3651148d9b1f68628c68ec5bd3749e25c31a4c9470c29ca25",
+      "decodedSize": 6031,
+      "sourceEncoding": "identity",
+      "sourceSize": 6031
+    },
+    "/lang/tr.conf": {
+      "decodedSha256": "ccbf83172f53a9287113597326236ff7ca291fbf3cef284f094172384dae8661",
+      "decodedSize": 4336,
+      "sourceEncoding": "identity",
+      "sourceSize": 4336
+    },
+    "/lang/tt.conf": {
+      "decodedSha256": "94b877b8e15301194afed4df37dfc1c30ec5db8c3c04d304f06609618082dd42",
+      "decodedSize": 5372,
+      "sourceEncoding": "identity",
+      "sourceSize": 5372
+    },
+    "/lang/ua.conf": {
+      "decodedSha256": "f921a7406b8b2cb199087009742d7f866db4e50758a935d72d731889f7c2a3b9",
+      "decodedSize": 5797,
+      "sourceEncoding": "identity",
+      "sourceSize": 5797
+    },
+    "/lang/vi.conf": {
+      "decodedSha256": "9a74f889e701ce848a1a517131668663431c4eeeed823cfb8c971e01ba808e24",
+      "decodedSize": 4414,
+      "sourceEncoding": "identity",
+      "sourceSize": 4414
+    },
+    "/lang/zh-CN.conf": {
+      "decodedSha256": "dfaf0a0fd722616ca1b4f83e62d2aa2a9218df54a6c3024108d4773cae689005",
+      "decodedSize": 4040,
+      "sourceEncoding": "identity",
+      "sourceSize": 4040
+    },
+    "/lang/zh-HK.conf": {
+      "decodedSha256": "ca6f239a9e6eb0b2f160544c4c014c7d5069e52861c71309b51baa1032c9536a",
+      "decodedSize": 3411,
+      "sourceEncoding": "identity",
+      "sourceSize": 3411
+    },
+    "/lang/zh-TW.conf": {
+      "decodedSha256": "3f3b945fe61e4e84e60820bac0992578c27ec1cf704f4472055b243b36c995df",
+      "decodedSize": 4083,
+      "sourceEncoding": "identity",
+      "sourceSize": 4083
+    },
+    "/maps/world/assets/playerheads/a4aac08e-0d4f-475b-8bdf-c0b72c16d516.png": {
+      "decodedSha256": "160799df9b9b4b6ee288f2115ada301d67dcf693d3bdff1e861b9b83cd1042c9",
+      "decodedSize": 391,
+      "sourceEncoding": "identity",
+      "sourceSize": 391
+    },
+    "/maps/world/live/markers.json": {
+      "decodedSha256": "437f5d73e0b263506aeb486f2514465daef96f7426fe5c97a688111c73ac732a",
+      "decodedSize": 18778,
+      "sourceEncoding": "identity",
+      "sourceSize": 18778
+    },
+    "/maps/world/live/players.json": {
+      "decodedSha256": "c8b12d5b12bd7f778f52bb69e2b1f2eefaaeb59ad8a3bce8d15b09eb106e7288",
+      "decodedSize": 5607,
+      "sourceEncoding": "identity",
+      "sourceSize": 5607
+    },
+    "/maps/world/settings.json": {
+      "decodedSha256": "2bf9e5ac7781ae6e974c20d4884bd493ecbcc51294ad12ee3e15540c7e1e3b72",
+      "decodedSize": 361,
+      "sourceEncoding": "identity",
+      "sourceSize": 361
+    },
+    "/maps/world/textures.json": {
+      "decodedSha256": "5dbc6016a4b995e7583b3792d3c5a44c59e0689c805cc80b87968cba6f14f243",
+      "decodedSize": 45711463,
+      "sourceEncoding": "gzip",
+      "sourceSize": 20220959
+    },
+    "/maps/world/tiles/0/x-1/0/z-1/0.prbm": {
+      "decodedSha256": "0a9e8f86756cf6eec6767601d02eb73b5431e6260e0918d943ddd1b6b6066881",
+      "decodedSize": 246924,
+      "sourceEncoding": "gzip",
+      "sourceSize": 15207
+    },
+    "/maps/world/tiles/0/x-1/0/z-1/1.prbm": {
+      "decodedSha256": "e12bec8e9d6b8544fd2f77ba03122d7a21e50def91240ed32e444611c0fcb3fa",
+      "decodedSize": 318492,
+      "sourceEncoding": "gzip",
+      "sourceSize": 21267
+    },
+    "/maps/world/tiles/0/x-1/0/z-1/2.prbm": {
+      "decodedSha256": "98ebe5c099d6e2d54e96b101db72fed5cc9aeb36f8359b4c614a230e8969ea3c",
+      "decodedSize": 564252,
+      "sourceEncoding": "gzip",
+      "sourceSize": 38596
+    },
+    "/maps/world/tiles/0/x-1/0/z-3.prbm": {
+      "decodedSha256": "5a73cb132822608e309f50f97c1be6f927d86b76f79af67da128d59691630e76",
+      "decodedSize": 1193244,
+      "sourceEncoding": "gzip",
+      "sourceSize": 69094
+    },
+    "/maps/world/tiles/0/x-1/0/z-4.prbm": {
+      "decodedSha256": "f30f3418aeeae0140de4bfce2ba3da098931597404e47e752e7e680ab4c72138",
+      "decodedSize": 1746732,
+      "sourceEncoding": "gzip",
+      "sourceSize": 108411
+    },
+    "/maps/world/tiles/0/x-1/0/z-5.prbm": {
+      "decodedSha256": "0992db15b8bcd47f236e214ee6e746ff1c9d03780bc79a822f33b63acc1352c4",
+      "decodedSize": 1914480,
+      "sourceEncoding": "gzip",
+      "sourceSize": 126727
+    },
+    "/maps/world/tiles/0/x-1/0/z-6.prbm": {
+      "decodedSha256": "1e69fa97bd78b965064a28aa31e0842505cfd9f533b1b64dec83376abe297aee",
+      "decodedSize": 2320680,
+      "sourceEncoding": "gzip",
+      "sourceSize": 154484
+    },
+    "/maps/world/tiles/0/x-1/0/z-7.prbm": {
+      "decodedSha256": "f58f3c4dfd7f3bc08342a59ff384d4e5513436ec31ac6df2c2f0b371e5412f05",
+      "decodedSize": 2379372,
+      "sourceEncoding": "gzip",
+      "sourceSize": 167662
+    },
+    "/maps/world/tiles/0/x-1/0/z-8.prbm": {
+      "decodedSha256": "1312aba9a7f9ec49d7b778fc2202d050217bdfaf1e6b5a312c10ac47fe75b904",
+      "decodedSize": 1111092,
+      "sourceEncoding": "gzip",
+      "sourceSize": 76816
+    },
+    "/maps/world/tiles/0/x-1/0/z-9.prbm": {
+      "decodedSha256": "cba05290ed9adc2a15d99035225ff75f07fdb708903b91ab76a488ad7989505c",
+      "decodedSize": 697872,
+      "sourceEncoding": "gzip",
+      "sourceSize": 42635
+    },
+    "/maps/world/tiles/0/x-1/z-1/0.prbm": {
+      "decodedSha256": "3527e159a9a2c3256def1faa3e96105ad37605f65d3887e1084e35746221462d",
+      "decodedSize": 4859508,
+      "sourceEncoding": "gzip",
+      "sourceSize": 263125
+    },
+    "/maps/world/tiles/0/x-1/z-1/1.prbm": {
+      "decodedSha256": "81b1f79f83d4bf0f56fc3b27c0d824fd4023cf7204219bd4d707e39912e6922f",
+      "decodedSize": 2424816,
+      "sourceEncoding": "gzip",
+      "sourceSize": 141920
+    },
+    "/maps/world/tiles/0/x-1/z-1/2.prbm": {
+      "decodedSha256": "00238eb15a2825865838c009f6e1a8d9e521473d719d96eb8501f08251905870",
+      "decodedSize": 1342776,
+      "sourceEncoding": "gzip",
+      "sourceSize": 70006
+    },
+    "/maps/world/tiles/0/x-1/z-2.prbm": {
+      "decodedSha256": "7132a12222de10f34d358f73bf8d5f4e72656699bd286fe2f985f0649e3e1402",
+      "decodedSize": 1047432,
+      "sourceEncoding": "gzip",
+      "sourceSize": 67278
+    },
+    "/maps/world/tiles/0/x-1/z-3.prbm": {
+      "decodedSha256": "11a3cebeb3d6949044bf114035cdf40e2f6b6ae91d5c2169f4193b0af4dd8d14",
+      "decodedSize": 871392,
+      "sourceEncoding": "gzip",
+      "sourceSize": 53884
+    },
+    "/maps/world/tiles/0/x-1/z-4.prbm": {
+      "decodedSha256": "e469b9ec755a7eb3ddbca4f6e4975cd374bb74ef84b36f195b4c97a09005c763",
+      "decodedSize": 836292,
+      "sourceEncoding": "gzip",
+      "sourceSize": 50053
+    },
+    "/maps/world/tiles/0/x-1/z-5.prbm": {
+      "decodedSha256": "2f26599dd10742ed0858cb3bb63b89ff1e7ea00ae8afb8de134e548d776ff767",
+      "decodedSize": 1625196,
+      "sourceEncoding": "gzip",
+      "sourceSize": 86340
+    },
+    "/maps/world/tiles/0/x-1/z-6.prbm": {
+      "decodedSha256": "750de17fe6fbe59a1feb118ce104ed3a69c788f2016e4695fd3be11672680471",
+      "decodedSize": 1103196,
+      "sourceEncoding": "gzip",
+      "sourceSize": 67273
+    },
+    "/maps/world/tiles/0/x-1/z-7.prbm": {
+      "decodedSha256": "6bca5b480d0126e682def676225a6ad38023a5a58ae7ff1b1e7efb3387edff4b",
+      "decodedSize": 2223684,
+      "sourceEncoding": "gzip",
+      "sourceSize": 126844
+    },
+    "/maps/world/tiles/0/x-1/z-8.prbm": {
+      "decodedSha256": "18c863262c7d85e03e1b3c6aaf75b8456cd5f69bcd300231516c280373ff0033",
+      "decodedSize": 1771344,
+      "sourceEncoding": "gzip",
+      "sourceSize": 105143
+    },
+    "/maps/world/tiles/0/x-1/z-9.prbm": {
+      "decodedSha256": "c3eecb91614ccb2458a10de4b7c3fb83028320fb943dad6e5f7139592c01c291",
+      "decodedSize": 4423080,
+      "sourceEncoding": "gzip",
+      "sourceSize": 244136
+    },
+    "/maps/world/tiles/0/x-2/z-1/0.prbm": {
+      "decodedSha256": "01ea7ea8f81c5f44226d4f1d530df41d66b5c48e5bcc5b15b466f74c8e818d3a",
+      "decodedSize": 4664844,
+      "sourceEncoding": "gzip",
+      "sourceSize": 252757
+    },
+    "/maps/world/tiles/0/x-2/z-1/1.prbm": {
+      "decodedSha256": "bbd4a24dc9a0de48fd44031a6504fd8899683d490bb353a71a022b914a173309",
+      "decodedSize": 3193296,
+      "sourceEncoding": "gzip",
+      "sourceSize": 182046
+    },
+    "/maps/world/tiles/0/x-2/z-1/2.prbm": {
+      "decodedSha256": "7c1c74ed85ab42b626284b684210c9452786d2137e77a2ac8e498430d3527f98",
+      "decodedSize": 1093620,
+      "sourceEncoding": "gzip",
+      "sourceSize": 65415
+    },
+    "/maps/world/tiles/0/x-2/z-2.prbm": {
+      "decodedSha256": "e5c0598765f4b961d88706136d530ae280d6f5026567896f33427ecd01e4745f",
+      "decodedSize": 982692,
+      "sourceEncoding": "gzip",
+      "sourceSize": 56641
+    },
+    "/maps/world/tiles/0/x-2/z-3.prbm": {
+      "decodedSha256": "a87fb3c4cb1109f05701641c627d1b792234ada676e9876e54a2cc000e2977e5",
+      "decodedSize": 934092,
+      "sourceEncoding": "gzip",
+      "sourceSize": 53542
+    },
+    "/maps/world/tiles/0/x-2/z-4.prbm": {
+      "decodedSha256": "824210f1bfec85ef4f7621765de5780df3825be47fab6462c18bd917baafa684",
+      "decodedSize": 1360680,
+      "sourceEncoding": "gzip",
+      "sourceSize": 69463
+    },
+    "/maps/world/tiles/0/x-2/z-5.prbm": {
+      "decodedSha256": "2705c81c6d1db48b02439480e548eae8cc02b07cc58d914f6edf693dfed002f6",
+      "decodedSize": 1664676,
+      "sourceEncoding": "gzip",
+      "sourceSize": 82087
+    },
+    "/maps/world/tiles/0/x-2/z-6.prbm": {
+      "decodedSha256": "bbd404e8e8a4e62c46bffe11bf9adbe4ac75f6f9eecd9bddedde76a52cf4228d",
+      "decodedSize": 1641444,
+      "sourceEncoding": "gzip",
+      "sourceSize": 95120
+    },
+    "/maps/world/tiles/0/x-2/z-7.prbm": {
+      "decodedSha256": "37eddd69d671134645244f2a8c5e97c771a8e774dc8a57512127bb6cb343014a",
+      "decodedSize": 2650104,
+      "sourceEncoding": "gzip",
+      "sourceSize": 152599
+    },
+    "/maps/world/tiles/0/x-2/z-8.prbm": {
+      "decodedSha256": "78f4c6a38149aaeabe91d6594695b2db13c28444085cd58c0847cf83c4c81384",
+      "decodedSize": 1450260,
+      "sourceEncoding": "gzip",
+      "sourceSize": 86732
+    },
+    "/maps/world/tiles/0/x-2/z-9.prbm": {
+      "decodedSha256": "be85f45ad9cdc42f3ad420bd2932d561fd8e79bdd704aa567ad5b25e1b3a80cf",
+      "decodedSize": 3145056,
+      "sourceEncoding": "gzip",
+      "sourceSize": 175261
+    },
+    "/maps/world/tiles/0/x-3/z-1/0.prbm": {
+      "decodedSha256": "a1f869036da8c82bba18f0fc6ce7c866d92d6ab09cb7867a2a9597df40bb4134",
+      "decodedSize": 2589492,
+      "sourceEncoding": "gzip",
+      "sourceSize": 149773
+    },
+    "/maps/world/tiles/0/x-3/z-1/1.prbm": {
+      "decodedSha256": "c64dd5934937a97051a8af25c5a012dda102d4e1eb9538e62a87d7cb0cb09a70",
+      "decodedSize": 2264112,
+      "sourceEncoding": "gzip",
+      "sourceSize": 129144
+    },
+    "/maps/world/tiles/0/x-3/z-1/2.prbm": {
+      "decodedSha256": "47302743f9defa611c5e611d449ba84b9f97dd9901dd5a1730079c74c74ecf0f",
+      "decodedSize": 1461132,
+      "sourceEncoding": "gzip",
+      "sourceSize": 90066
+    },
+    "/maps/world/tiles/0/x-3/z-2.prbm": {
+      "decodedSha256": "1505af7182a00e2fd39353afc3a4d32c4416144ed5db12cd7d3dcfcd063d2894",
+      "decodedSize": 1146180,
+      "sourceEncoding": "gzip",
+      "sourceSize": 63433
+    },
+    "/maps/world/tiles/0/x-3/z-3.prbm": {
+      "decodedSha256": "b2d80842644ce79b32f1ff38e2aa4753e95ce8c2a3fb3cd8298bae8e5137b2c8",
+      "decodedSize": 835740,
+      "sourceEncoding": "gzip",
+      "sourceSize": 46483
+    },
+    "/maps/world/tiles/0/x-3/z-4.prbm": {
+      "decodedSha256": "f1052384f6d8152049d01a4d4526d5b25a8e0fd7a204a72f5308062ecc9c3d40",
+      "decodedSize": 674580,
+      "sourceEncoding": "gzip",
+      "sourceSize": 36649
+    },
+    "/maps/world/tiles/0/x-3/z-5.prbm": {
+      "decodedSha256": "04359dd513986e447a27ff17c7079b4594af0c86cf4dcb057d56187af2fc5e5a",
+      "decodedSize": 716712,
+      "sourceEncoding": "gzip",
+      "sourceSize": 39350
+    },
+    "/maps/world/tiles/0/x-3/z-6.prbm": {
+      "decodedSha256": "c83fba13d8398e26647a1c88e78236ce15b7c5b43421cc2d9f8dab4a5b5b750e",
+      "decodedSize": 588744,
+      "sourceEncoding": "gzip",
+      "sourceSize": 36555
+    },
+    "/maps/world/tiles/0/x-3/z-7.prbm": {
+      "decodedSha256": "3fc3273eccc80f6d89159745897f6b7cbef930ff377c52843a3cfe0d6a06f1f9",
+      "decodedSize": 1227816,
+      "sourceEncoding": "gzip",
+      "sourceSize": 76952
+    },
+    "/maps/world/tiles/0/x-3/z-8.prbm": {
+      "decodedSha256": "ce749794c206dc589f2fe41043e1a370e9e98a13669825b2e71966c48fcab3d4",
+      "decodedSize": 1682652,
+      "sourceEncoding": "gzip",
+      "sourceSize": 100533
+    },
+    "/maps/world/tiles/0/x-3/z-9.prbm": {
+      "decodedSha256": "2f1faf4b1e25afa6e7743fb9606976af511020ece45d6276671b4e053424c38f",
+      "decodedSize": 2558592,
+      "sourceEncoding": "gzip",
+      "sourceSize": 150187
+    },
+    "/maps/world/tiles/0/x-4/z-1/0.prbm": {
+      "decodedSha256": "7710fc2abec1cb7fa2ee3866a2a3a8b4ca573e4fc061cefa649f1513fbbd18bb",
+      "decodedSize": 2539092,
+      "sourceEncoding": "gzip",
+      "sourceSize": 144571
+    },
+    "/maps/world/tiles/0/x-4/z-1/1.prbm": {
+      "decodedSha256": "a2a472d9927a8900b4cc87b217278e0e581a84d674f7eb092b378e9b7ef0f36a",
+      "decodedSize": 3416580,
+      "sourceEncoding": "gzip",
+      "sourceSize": 197386
+    },
+    "/maps/world/tiles/0/x-4/z-1/2.prbm": {
+      "decodedSha256": "3167abb4357dbc06b2888d1fa02583ede203d34ce1f7b26b369ce2b7b20577fe",
+      "decodedSize": 1897044,
+      "sourceEncoding": "gzip",
+      "sourceSize": 116846
+    },
+    "/maps/world/tiles/0/x-4/z-2.prbm": {
+      "decodedSha256": "67e1ad9f4b319ca5b1a2df2558408c9f4711ab5ae894ac039fd5a6655fb70b0c",
+      "decodedSize": 1515048,
+      "sourceEncoding": "gzip",
+      "sourceSize": 79145
+    },
+    "/maps/world/tiles/0/x-4/z-3.prbm": {
+      "decodedSha256": "460556fedd005a7d158660f6218b383083e6b09fe2fca933cea842ec9bd5f166",
+      "decodedSize": 1557804,
+      "sourceEncoding": "gzip",
+      "sourceSize": 78507
+    },
+    "/maps/world/tiles/0/x-4/z-4.prbm": {
+      "decodedSha256": "50270052efcb9c082c3f99830a91291c4e8b0385a5aa5a9592ec40ec66de46ce",
+      "decodedSize": 795012,
+      "sourceEncoding": "gzip",
+      "sourceSize": 43144
+    },
+    "/maps/world/tiles/0/x-4/z-5.prbm": {
+      "decodedSha256": "96aa4242f94403ad560e612345fd9f3977a409dba8a240f5c5228324a0a254ef",
+      "decodedSize": 1051116,
+      "sourceEncoding": "gzip",
+      "sourceSize": 53258
+    },
+    "/maps/world/tiles/0/x-4/z-6.prbm": {
+      "decodedSha256": "b0ff59d976cb156d3e09fb854c4d6646db99ded9265ad4a3efee13a04bf330df",
+      "decodedSize": 1641528,
+      "sourceEncoding": "gzip",
+      "sourceSize": 80827
+    },
+    "/maps/world/tiles/0/x-4/z-7.prbm": {
+      "decodedSha256": "095081668dab05426e107bdcfb9108630e00c088915ac0cd45716ac446cf82a7",
+      "decodedSize": 933288,
+      "sourceEncoding": "gzip",
+      "sourceSize": 60037
+    },
+    "/maps/world/tiles/0/x-4/z-8.prbm": {
+      "decodedSha256": "72645d8c83a556e679ebece3ceb0f21a513418d9f7acdf43459859d6d201f634",
+      "decodedSize": 3145248,
+      "sourceEncoding": "gzip",
+      "sourceSize": 178200
+    },
+    "/maps/world/tiles/0/x-4/z-9.prbm": {
+      "decodedSha256": "90442a6cb6899c2d5b97ef21477b7b992b09fc8f7cae686c66676957352f7ddd",
+      "decodedSize": 2112288,
+      "sourceEncoding": "gzip",
+      "sourceSize": 123274
+    },
+    "/maps/world/tiles/0/x-5/z-1/0.prbm": {
+      "decodedSha256": "6c191b79def855c8da7f960bdad0fb8863a6f2255186b0f6009f1232d2c0a107",
+      "decodedSize": 1182228,
+      "sourceEncoding": "gzip",
+      "sourceSize": 73926
+    },
+    "/maps/world/tiles/0/x-5/z-1/1.prbm": {
+      "decodedSha256": "73a0cd692f036f09b492911684fae76a98184c9bcf54e7f5731a9097de3f468e",
+      "decodedSize": 3062628,
+      "sourceEncoding": "gzip",
+      "sourceSize": 180673
+    },
+    "/maps/world/tiles/0/x-5/z-1/2.prbm": {
+      "decodedSha256": "0a70dfb8f057edd3e2ab274b37e177008f5e907cfb244ef770bb0574fd9480c7",
+      "decodedSize": 2412852,
+      "sourceEncoding": "gzip",
+      "sourceSize": 145485
+    },
+    "/maps/world/tiles/0/x-5/z-2.prbm": {
+      "decodedSha256": "3f4e9badb6d96777e2db6d4c3965ddd980cfa4e391bd6627b043d1dadef633a9",
+      "decodedSize": 842364,
+      "sourceEncoding": "gzip",
+      "sourceSize": 49514
+    },
+    "/maps/world/tiles/0/x-5/z-3.prbm": {
+      "decodedSha256": "154656d0ecbdcde4a32f67bfe95f0655d4d888bdee6a433e003cafd4175f4d84",
+      "decodedSize": 1408188,
+      "sourceEncoding": "gzip",
+      "sourceSize": 71588
+    },
+    "/maps/world/tiles/0/x-5/z-4.prbm": {
+      "decodedSha256": "17aa7781d044950a9694804a85aad4f8db3768538afa58d6a5478cd15923515f",
+      "decodedSize": 642048,
+      "sourceEncoding": "gzip",
+      "sourceSize": 34975
+    },
+    "/maps/world/tiles/0/x-5/z-5.prbm": {
+      "decodedSha256": "b89659cca3790c7b7b82f0c06737c4e5ecd1298be43bd04be5f77b75e7d77c8e",
+      "decodedSize": 1272120,
+      "sourceEncoding": "gzip",
+      "sourceSize": 63341
+    },
+    "/maps/world/tiles/0/x-5/z-6.prbm": {
+      "decodedSha256": "9ee9c23ee3248d6d88528a36f6f735620fc53233a18d6fe67ab3dc8d49d6b271",
+      "decodedSize": 1230324,
+      "sourceEncoding": "gzip",
+      "sourceSize": 67228
+    },
+    "/maps/world/tiles/0/x-5/z-7.prbm": {
+      "decodedSha256": "6a1fa85e43e2b15b9a1f6b6c10997714484b0fde03f81c345a699f514803517f",
+      "decodedSize": 631188,
+      "sourceEncoding": "gzip",
+      "sourceSize": 41713
+    },
+    "/maps/world/tiles/0/x-5/z-8.prbm": {
+      "decodedSha256": "9d8468c7c59add4dcb4d12619d3959125827a4260a00c8ba7422dbcf0032b0ae",
+      "decodedSize": 2291232,
+      "sourceEncoding": "gzip",
+      "sourceSize": 129261
+    },
+    "/maps/world/tiles/0/x-5/z-9.prbm": {
+      "decodedSha256": "4aeb78f77fea49dd264139ba65ea00608d96cf1526c9b723d780c68deae88737",
+      "decodedSize": 1389336,
+      "sourceEncoding": "gzip",
+      "sourceSize": 87043
+    },
+    "/maps/world/tiles/0/x-6/z-1/0.prbm": {
+      "decodedSha256": "e617a834926c4a9201793b2fd3aab353da0e116fe9e4c2b050eda01fb2e2de5f",
+      "decodedSize": 1204440,
+      "sourceEncoding": "gzip",
+      "sourceSize": 75635
+    },
+    "/maps/world/tiles/0/x-6/z-1/1.prbm": {
+      "decodedSha256": "543f22024d5cb0c76150751807e0452421fbf7d7797c57fcadd120f605f40fb8",
+      "decodedSize": 1328760,
+      "sourceEncoding": "gzip",
+      "sourceSize": 76309
+    },
+    "/maps/world/tiles/0/x-6/z-1/2.prbm": {
+      "decodedSha256": "bcf65f16ae4c6a869ca9883211fa94193eecf58df922b20abc51828a73f95191",
+      "decodedSize": 2360388,
+      "sourceEncoding": "gzip",
+      "sourceSize": 145819
+    },
+    "/maps/world/tiles/0/x-6/z-2.prbm": {
+      "decodedSha256": "c544ff1b8c5a8b303c87a5466730c8d0ee240d56b01f5b48afb40898e62128ef",
+      "decodedSize": 1063380,
+      "sourceEncoding": "gzip",
+      "sourceSize": 60658
+    },
+    "/maps/world/tiles/0/x-6/z-3.prbm": {
+      "decodedSha256": "f1c6f09246a0a26531c16bb800a07cdea8f477146ce7bea0f9e80f33c3a52981",
+      "decodedSize": 660564,
+      "sourceEncoding": "gzip",
+      "sourceSize": 41170
+    },
+    "/maps/world/tiles/0/x-6/z-4.prbm": {
+      "decodedSha256": "f2f5cd6d5a28c2f016276232a346e6ae27f34999f20973a99fc007cafb9a2cda",
+      "decodedSize": 633852,
+      "sourceEncoding": "gzip",
+      "sourceSize": 35030
+    },
+    "/maps/world/tiles/0/x-6/z-5.prbm": {
+      "decodedSha256": "a6db611c193e1e7d11a7ea16a01f36608d61f409af5ededb7c6f146d2030e3d4",
+      "decodedSize": 588564,
+      "sourceEncoding": "gzip",
+      "sourceSize": 33616
+    },
+    "/maps/world/tiles/0/x-6/z-6.prbm": {
+      "decodedSha256": "e14e98fe9393bfddc4b391693f6dd8a30e6d3e80b5123a15f9be824724e13b60",
+      "decodedSize": 821604,
+      "sourceEncoding": "gzip",
+      "sourceSize": 53111
+    },
+    "/maps/world/tiles/0/x-6/z-7.prbm": {
+      "decodedSha256": "79f226010cd9105c89e9477e1613901e5c804cf146e4f2fc9ff30f3eeca28350",
+      "decodedSize": 1969908,
+      "sourceEncoding": "gzip",
+      "sourceSize": 113145
+    },
+    "/maps/world/tiles/0/x-6/z-8.prbm": {
+      "decodedSha256": "28c6c85ff423e860571579eff6e21cc19fac6bb2bb62d6d11965e93bb6e7f605",
+      "decodedSize": 3859836,
+      "sourceEncoding": "gzip",
+      "sourceSize": 209564
+    },
+    "/maps/world/tiles/0/x-6/z-9.prbm": {
+      "decodedSha256": "c766d451cc87aa08d74f867e788a30e327900c89ad7c9681bb802342869f7da6",
+      "decodedSize": 2406396,
+      "sourceEncoding": "gzip",
+      "sourceSize": 138915
+    },
+    "/maps/world/tiles/0/x-7/z-1/0.prbm": {
+      "decodedSha256": "9bfd43249661b6699e426854c9a4a2523b2066c653bfc134ecafd0becd6dcc83",
+      "decodedSize": 713724,
+      "sourceEncoding": "gzip",
+      "sourceSize": 45032
+    },
+    "/maps/world/tiles/0/x-7/z-1/1.prbm": {
+      "decodedSha256": "fa59ac68f6db3be49cae359e4aa8a4c88a1512cf8952e189d4a0e0121efda494",
+      "decodedSize": 427320,
+      "sourceEncoding": "gzip",
+      "sourceSize": 28471
+    },
+    "/maps/world/tiles/0/x-7/z-1/2.prbm": {
+      "decodedSha256": "c3d3bc449120f89d6ab833116e220f2ba19c0c576ae410ff0cce82c8cf588907",
+      "decodedSize": 1093740,
+      "sourceEncoding": "gzip",
+      "sourceSize": 66542
+    },
+    "/maps/world/tiles/0/x-7/z-2.prbm": {
+      "decodedSha256": "0d1350d0d6304d3f8b6c7955f28ed7fa084bab62f7e6b9812a85d2547a53ca75",
+      "decodedSize": 1302300,
+      "sourceEncoding": "gzip",
+      "sourceSize": 73705
+    },
+    "/maps/world/tiles/0/x-7/z-3.prbm": {
+      "decodedSha256": "bef64ea4259c29e5bc8f5b5421099f7ffd7c530845394c4c713567a6dfad92d0",
+      "decodedSize": 753348,
+      "sourceEncoding": "gzip",
+      "sourceSize": 45259
+    },
+    "/maps/world/tiles/0/x-7/z-4.prbm": {
+      "decodedSha256": "a831dbd47c1b2fbc3d74c7845b1e783598f427ca5610bf59920d8d9353614fbe",
+      "decodedSize": 1318092,
+      "sourceEncoding": "gzip",
+      "sourceSize": 70040
+    },
+    "/maps/world/tiles/0/x-7/z-5.prbm": {
+      "decodedSha256": "b08e1a2eeee783b9acc8f5e27757112d74757e662fb70db63aeb5ceb98a3aef3",
+      "decodedSize": 719424,
+      "sourceEncoding": "gzip",
+      "sourceSize": 44543
+    },
+    "/maps/world/tiles/0/x-7/z-6.prbm": {
+      "decodedSha256": "34667f80ef5f6bfd67a30fdac09cc53560252f334df8d1f980d1333f8c7c2b6f",
+      "decodedSize": 689256,
+      "sourceEncoding": "gzip",
+      "sourceSize": 43307
+    },
+    "/maps/world/tiles/0/x-7/z-7.prbm": {
+      "decodedSha256": "c385641c86e129009e4d3fc0dd885708d03a2ef6406368fa2d59876db03cc288",
+      "decodedSize": 2002020,
+      "sourceEncoding": "gzip",
+      "sourceSize": 121932
+    },
+    "/maps/world/tiles/0/x-7/z-8.prbm": {
+      "decodedSha256": "04d471ca9443f22c0672c6beb501dfd5078f73c73fde9d0f36e11c31aaaaea73",
+      "decodedSize": 4079628,
+      "sourceEncoding": "gzip",
+      "sourceSize": 226927
+    },
+    "/maps/world/tiles/0/x-7/z-9.prbm": {
+      "decodedSha256": "04e53423e84c4107ef413706b16d91848d18eb9f76a831384c09a860c83d5b66",
+      "decodedSize": 5578452,
+      "sourceEncoding": "gzip",
+      "sourceSize": 302318
+    },
+    "/maps/world/tiles/0/x-8/z-1/0.prbm": {
+      "decodedSha256": "0085ab47998a5237081aee3161c2a0933791e2ed6eea1a3912e8f0754ad16cf9",
+      "decodedSize": 573600,
+      "sourceEncoding": "gzip",
+      "sourceSize": 36801
+    },
+    "/maps/world/tiles/0/x-8/z-1/1.prbm": {
+      "decodedSha256": "cb573059f78eb7ed73ce84f5d09c1562ea0def3ab0c131c6ec682af27ea0ecfd",
+      "decodedSize": 421488,
+      "sourceEncoding": "gzip",
+      "sourceSize": 26335
+    },
+    "/maps/world/tiles/0/x-8/z-1/2.prbm": {
+      "decodedSha256": "8a4de720012fc6f08c96e255e02f011a09478e561bcfeaf31eb43d4e68892789",
+      "decodedSize": 388512,
+      "sourceEncoding": "gzip",
+      "sourceSize": 24840
+    },
+    "/maps/world/tiles/0/x-8/z-3.prbm": {
+      "decodedSha256": "f9c5b028e1fa3f27a2d9d94ac9d5a97e05fe852d5a16139fe0b63030bc765b5f",
+      "decodedSize": 942420,
+      "sourceEncoding": "gzip",
+      "sourceSize": 51670
+    },
+    "/maps/world/tiles/0/x-8/z-4.prbm": {
+      "decodedSha256": "7d8520575faf8ef317a034d4fb45691a692b1d61c7bd4551f568eae82625084f",
+      "decodedSize": 978480,
+      "sourceEncoding": "gzip",
+      "sourceSize": 57891
+    },
+    "/maps/world/tiles/0/x-8/z-5.prbm": {
+      "decodedSha256": "869afd5dc535a253821dbda1f6dd1c874b5c39b8ab83911e9f14b8fcdc59ef8c",
+      "decodedSize": 702804,
+      "sourceEncoding": "gzip",
+      "sourceSize": 44882
+    },
+    "/maps/world/tiles/0/x-8/z-6.prbm": {
+      "decodedSha256": "50b1febb7aa9ccdffcb44a48a642d57a2bdb6f5e5313e7adae2aa8e93a243e10",
+      "decodedSize": 1979124,
+      "sourceEncoding": "gzip",
+      "sourceSize": 122212
+    },
+    "/maps/world/tiles/0/x-8/z-7.prbm": {
+      "decodedSha256": "9d4aebeb3c0e650c0a4349ebb882476e8b32691c3b42aca5e6f31a7616d42929",
+      "decodedSize": 1679136,
+      "sourceEncoding": "gzip",
+      "sourceSize": 104272
+    },
+    "/maps/world/tiles/0/x-8/z-8.prbm": {
+      "decodedSha256": "4526a28ab7ebf2fe332e2a7c9cfe8adbccb8a93bc0da0f8509ff2b18e612af4d",
+      "decodedSize": 1299432,
+      "sourceEncoding": "gzip",
+      "sourceSize": 82924
+    },
+    "/maps/world/tiles/0/x-8/z-9.prbm": {
+      "decodedSha256": "2cda747941c90222c30008e463ba842ea7af2fbac3fd3ba005f0b17f69f2074f",
+      "decodedSize": 733512,
+      "sourceEncoding": "gzip",
+      "sourceSize": 47835
+    },
+    "/maps/world/tiles/0/x-9/z-1/0.prbm": {
+      "decodedSha256": "edebd5a40246444632068af61b6973e4d71c45f38d123bc0597a05ba94319fdb",
+      "decodedSize": 296016,
+      "sourceEncoding": "gzip",
+      "sourceSize": 18823
+    },
+    "/maps/world/tiles/0/x-9/z-1/1.prbm": {
+      "decodedSha256": "53ac625ee48a522f9f085ced44db2df2d70bc6c8db2a3c467068f44205170321",
+      "decodedSize": 410016,
+      "sourceEncoding": "gzip",
+      "sourceSize": 25401
+    },
+    "/maps/world/tiles/0/x-9/z-1/2.prbm": {
+      "decodedSha256": "e05245063b1263d9c63eee24c3fe328f304a4b6861a05b548a4fb30655dac081",
+      "decodedSize": 445752,
+      "sourceEncoding": "gzip",
+      "sourceSize": 27488
+    },
+    "/maps/world/tiles/0/x-9/z-3.prbm": {
+      "decodedSha256": "33f4c1bb35f1a7410af791345a23a2e448ea7dec9da311d2fc5a5336b4dee686",
+      "decodedSize": 1299012,
+      "sourceEncoding": "gzip",
+      "sourceSize": 82647
+    },
+    "/maps/world/tiles/0/x-9/z-4.prbm": {
+      "decodedSha256": "07b3f504acbf3b4157d9a2eebd72ad5f21b1d043ff271b50a08669d826e997eb",
+      "decodedSize": 1492404,
+      "sourceEncoding": "gzip",
+      "sourceSize": 91383
+    },
+    "/maps/world/tiles/0/x-9/z-5.prbm": {
+      "decodedSha256": "8760b90b63e1d1470dbfdc5380c9880dad9cb3058972564c7c2c7d55bfece0d7",
+      "decodedSize": 1899600,
+      "sourceEncoding": "gzip",
+      "sourceSize": 119108
+    },
+    "/maps/world/tiles/0/x-9/z-6.prbm": {
+      "decodedSha256": "1abff84ee4359937e85a7dc81fc7cd6c1a38454a85017a83db0189dfd2daf496",
+      "decodedSize": 2335692,
+      "sourceEncoding": "gzip",
+      "sourceSize": 158173
+    },
+    "/maps/world/tiles/0/x-9/z-7.prbm": {
+      "decodedSha256": "70eb91712fda4e58371dee5d52c4692a26a7d24129429c588b9dd4c99902d56e",
+      "decodedSize": 1825728,
+      "sourceEncoding": "gzip",
+      "sourceSize": 125363
+    },
+    "/maps/world/tiles/0/x-9/z-8.prbm": {
+      "decodedSha256": "dcb50ebca73bfdea8148ae5c0c27505edb916cacd61bceef56f29eb48ba26a6a",
+      "decodedSize": 1224084,
+      "sourceEncoding": "gzip",
+      "sourceSize": 77030
+    },
+    "/maps/world/tiles/0/x-9/z-9.prbm": {
+      "decodedSha256": "f242b0254201dcc58d03183be0384f0808d0aa45c08f5a878ebe48cd8abc528f",
+      "decodedSize": 1057332,
+      "sourceEncoding": "gzip",
+      "sourceSize": 60140
+    },
+    "/maps/world/tiles/0/x0/z-1/0.prbm": {
+      "decodedSha256": "cb33a0773f7aaa71afd8ad0fdedd669b72e6d6c38d44057f1b4526352c565c3b",
+      "decodedSize": 1963896,
+      "sourceEncoding": "gzip",
+      "sourceSize": 112892
+    },
+    "/maps/world/tiles/0/x0/z-1/1.prbm": {
+      "decodedSha256": "e318e074c6401d2034d33d78852951e7cba292a401b2e41282992afa4c0f4450",
+      "decodedSize": 1282800,
+      "sourceEncoding": "gzip",
+      "sourceSize": 78155
+    },
+    "/maps/world/tiles/0/x0/z-2.prbm": {
+      "decodedSha256": "67232b3421d4eca7a18c780a93a809fb9a2ee502dcd7fa0d3c05b9ea80787187",
+      "decodedSize": 805812,
+      "sourceEncoding": "gzip",
+      "sourceSize": 52183
+    },
+    "/maps/world/tiles/0/x0/z-3.prbm": {
+      "decodedSha256": "f41e36d5ac4576c973b1034f11d0833e9fef53dac8c9fe1c83d52ed8067f3886",
+      "decodedSize": 791388,
+      "sourceEncoding": "gzip",
+      "sourceSize": 49301
+    },
+    "/maps/world/tiles/0/x0/z-4.prbm": {
+      "decodedSha256": "731af17032a21f36484fccc54923b04a909e714407216945634a240de1c0f0bd",
+      "decodedSize": 696708,
+      "sourceEncoding": "gzip",
+      "sourceSize": 42359
+    },
+    "/maps/world/tiles/0/x0/z-5.prbm": {
+      "decodedSha256": "c97f38312a8767de028e9ee4ec1eaa9debdf57fe634e76560a2019e7a3611153",
+      "decodedSize": 1900140,
+      "sourceEncoding": "gzip",
+      "sourceSize": 127724
+    },
+    "/maps/world/tiles/0/x0/z-6.prbm": {
+      "decodedSha256": "265071fcd19080cab8b2097189b359cd123f15dc68d91c03385d59211f16e6ae",
+      "decodedSize": 1034076,
+      "sourceEncoding": "gzip",
+      "sourceSize": 67652
+    },
+    "/maps/world/tiles/0/x0/z-7.prbm": {
+      "decodedSha256": "cc6a4e4201a07417dc859234de4c9adad6858e46c9dce842fe49bd1d13971c88",
+      "decodedSize": 1602492,
+      "sourceEncoding": "gzip",
+      "sourceSize": 101931
+    },
+    "/maps/world/tiles/0/x0/z-8.prbm": {
+      "decodedSha256": "e6633012d09899bf7f740bebb173d7d6beb6d346b98f4a0a9a33b3e14f6dcb89",
+      "decodedSize": 791460,
+      "sourceEncoding": "gzip",
+      "sourceSize": 51823
+    },
+    "/maps/world/tiles/0/x0/z-9.prbm": {
+      "decodedSha256": "9ac3656cf08a56d3a55262f2e775f9002521ca10896532fb23a88cdd95d5fffa",
+      "decodedSize": 1770096,
+      "sourceEncoding": "gzip",
+      "sourceSize": 105626
+    },
+    "/maps/world/tiles/0/x1/z-1/0.prbm": {
+      "decodedSha256": "7a3178d18270c7a994a5b7bc922e1068137044649b8213425a35ea9d6b6e0f16",
+      "decodedSize": 1451196,
+      "sourceEncoding": "gzip",
+      "sourceSize": 94781
+    },
+    "/maps/world/tiles/0/x1/z-1/1.prbm": {
+      "decodedSha256": "9a7a66b4aa49d246e4369b69b6aacfc49ea3b29f021369de09a33e3a9e9eacb7",
+      "decodedSize": 1153068,
+      "sourceEncoding": "gzip",
+      "sourceSize": 73265
+    },
+    "/maps/world/tiles/0/x1/z-2.prbm": {
+      "decodedSha256": "3a40aebb769d95d72e021f7a63ad1c28c18823d9f302761e5c8239fa910ef1a3",
+      "decodedSize": 588672,
+      "sourceEncoding": "gzip",
+      "sourceSize": 34497
+    },
+    "/maps/world/tiles/0/x1/z-3.prbm": {
+      "decodedSha256": "6a507eb2d0f021746575622b3dd9886dbf8394d8837602fec305020234885a85",
+      "decodedSize": 1221048,
+      "sourceEncoding": "gzip",
+      "sourceSize": 79833
+    },
+    "/maps/world/tiles/0/x1/z-4.prbm": {
+      "decodedSha256": "7a1a2280cfad4433ae4be47fdfae462fe1b1d1a651b8a2c52dc37497ead5cfb4",
+      "decodedSize": 1075560,
+      "sourceEncoding": "gzip",
+      "sourceSize": 70610
+    },
+    "/maps/world/tiles/0/x1/z-5.prbm": {
+      "decodedSha256": "f3d470b3b19f5d6d12cd0106aa1ae6e678fe508e213fc91e13b940d43b115666",
+      "decodedSize": 1233024,
+      "sourceEncoding": "gzip",
+      "sourceSize": 82203
+    },
+    "/maps/world/tiles/0/x1/z-6.prbm": {
+      "decodedSha256": "06bd650862f78a39fceee7a949da7adae589550778da45c70fbaec9fcfd3ef2b",
+      "decodedSize": 817380,
+      "sourceEncoding": "gzip",
+      "sourceSize": 52250
+    },
+    "/maps/world/tiles/0/x1/z-7.prbm": {
+      "decodedSha256": "267435c19597e272a4b011605ae1bc11c9b43844b7034f2382000f909f06e0e3",
+      "decodedSize": 1114764,
+      "sourceEncoding": "gzip",
+      "sourceSize": 74748
+    },
+    "/maps/world/tiles/0/x1/z-8.prbm": {
+      "decodedSha256": "c04b7325bc3eecec2a56f90c17508fe51dd8da0f0c3c7e3e4f4576c780c66df8",
+      "decodedSize": 1170192,
+      "sourceEncoding": "gzip",
+      "sourceSize": 75781
+    },
+    "/maps/world/tiles/0/x1/z-9.prbm": {
+      "decodedSha256": "bdaa892d898628ebf597fe31d8c61dcbdc65efd18f760f8ca73dad82249eaf2b",
+      "decodedSize": 857904,
+      "sourceEncoding": "gzip",
+      "sourceSize": 52214
+    },
+    "/maps/world/tiles/0/x2/z-1/0.prbm": {
+      "decodedSha256": "cb0998e56f9931fe245ca068c206eda293088d4e3d8f463be6eb9a3e48ab306e",
+      "decodedSize": 908148,
+      "sourceEncoding": "gzip",
+      "sourceSize": 54792
+    },
+    "/maps/world/tiles/0/x2/z-1/1.prbm": {
+      "decodedSha256": "b3102f51b631133814cf914386edfad1412a2d3b0438036a4e77b175d30d76c5",
+      "decodedSize": 1352352,
+      "sourceEncoding": "gzip",
+      "sourceSize": 91129
+    },
+    "/maps/world/tiles/0/x2/z-2.prbm": {
+      "decodedSha256": "1478c11119207816aeeb374515d0dae4efac15ed02d776bfc3cc4ccf0b06341f",
+      "decodedSize": 1553328,
+      "sourceEncoding": "gzip",
+      "sourceSize": 104755
+    },
+    "/maps/world/tiles/0/x2/z-3.prbm": {
+      "decodedSha256": "de1a8b5f1741ac5f3ecab41693190778416d8e0efdd217fb7b4b23930b050337",
+      "decodedSize": 2242236,
+      "sourceEncoding": "gzip",
+      "sourceSize": 152205
+    },
+    "/maps/world/tiles/0/x2/z-4.prbm": {
+      "decodedSha256": "5a14d3047408443b1a120972a845c6af757b0884aa36496cd2115949a4320bc5",
+      "decodedSize": 1423140,
+      "sourceEncoding": "gzip",
+      "sourceSize": 94976
+    },
+    "/maps/world/tiles/0/x2/z-5.prbm": {
+      "decodedSha256": "892f72c32eca4260296e08256fd3c17c1c44d6ac51c8e6469be0d998c47d1468",
+      "decodedSize": 1180116,
+      "sourceEncoding": "gzip",
+      "sourceSize": 78245
+    },
+    "/maps/world/tiles/0/x2/z-6.prbm": {
+      "decodedSha256": "487afe0ec22691fe95653b04ab0b2737a0a6c6f4a4096138639136eb688df78c",
+      "decodedSize": 632736,
+      "sourceEncoding": "gzip",
+      "sourceSize": 38646
+    },
+    "/maps/world/tiles/0/x2/z-7.prbm": {
+      "decodedSha256": "3686cf875f40c04db8dec3314716e109a71721cb56231a47ff5fa8ec125492ab",
+      "decodedSize": 847404,
+      "sourceEncoding": "gzip",
+      "sourceSize": 52602
+    },
+    "/maps/world/tiles/0/x2/z-8.prbm": {
+      "decodedSha256": "34acd69b00ed36a3fcca99674bc8c6a270dc58b5c64344f952610c3ba3f2990d",
+      "decodedSize": 1548696,
+      "sourceEncoding": "gzip",
+      "sourceSize": 102629
+    },
+    "/maps/world/tiles/0/x2/z-9.prbm": {
+      "decodedSha256": "a211b3177ce03366f997814d141e644ae1226c1d7183b501ee912d220e2734eb",
+      "decodedSize": 883308,
+      "sourceEncoding": "gzip",
+      "sourceSize": 55142
+    },
+    "/maps/world/tiles/1/x-1/z-1.png": {
+      "decodedSha256": "a3391b67a224898aee303776c5e0b1f8081f4cca58bd58e46c9dfb559e7ea854",
+      "decodedSize": 104067,
+      "sourceEncoding": "identity",
+      "sourceSize": 104067
+    },
+    "/maps/world/tiles/1/x-1/z-2.png": {
+      "decodedSha256": "9762bfa0d2fdc78e208b02a1edf56c969fb155f27bcae59c6bd7b0e3ee81c30f",
+      "decodedSize": 3488,
+      "sourceEncoding": "identity",
+      "sourceSize": 3488
+    },
+    "/maps/world/tiles/1/x-1/z-3.png": {
+      "decodedSha256": "a7252cf8c00ae5a073cf0b751c0b88ac0cfb550a07321327047a40045620fdbf",
+      "decodedSize": 2195,
+      "sourceEncoding": "identity",
+      "sourceSize": 2195
+    },
+    "/maps/world/tiles/1/x-1/z0.png": {
+      "decodedSha256": "9762bfa0d2fdc78e208b02a1edf56c969fb155f27bcae59c6bd7b0e3ee81c30f",
+      "decodedSize": 3488,
+      "sourceEncoding": "identity",
+      "sourceSize": 3488
+    },
+    "/maps/world/tiles/1/x-1/z1.png": {
+      "decodedSha256": "38a3bdafb81f166c4dfd94f9ca3bf1451f1840366b1cf0fff2d04483169b6a2c",
+      "decodedSize": 2076,
+      "sourceEncoding": "identity",
+      "sourceSize": 2076
+    },
+    "/maps/world/tiles/1/x-2/z-1.png": {
+      "decodedSha256": "d287c1b46735aa90689f1481fa86213342bba0b268a8a5e615d2a1be18a594f8",
+      "decodedSize": 3876,
+      "sourceEncoding": "identity",
+      "sourceSize": 3876
+    },
+    "/maps/world/tiles/1/x-2/z-2.png": {
+      "decodedSha256": "d287c1b46735aa90689f1481fa86213342bba0b268a8a5e615d2a1be18a594f8",
+      "decodedSize": 3876,
+      "sourceEncoding": "identity",
+      "sourceSize": 3876
+    },
+    "/maps/world/tiles/1/x-2/z-3.png": {
+      "decodedSha256": "54c8f2817fffa1f3bcd567af659a52e7e0f3f1ef35c8febc320f914624b04859",
+      "decodedSize": 2234,
+      "sourceEncoding": "identity",
+      "sourceSize": 2234
+    },
+    "/maps/world/tiles/1/x-2/z0.png": {
+      "decodedSha256": "d287c1b46735aa90689f1481fa86213342bba0b268a8a5e615d2a1be18a594f8",
+      "decodedSize": 3876,
+      "sourceEncoding": "identity",
+      "sourceSize": 3876
+    },
+    "/maps/world/tiles/1/x-2/z1.png": {
+      "decodedSha256": "0b4d8f8c62da3289641678257489af3155dc08e46f28ce3fdb2a13140fac2146",
+      "decodedSize": 2084,
+      "sourceEncoding": "identity",
+      "sourceSize": 2084
+    },
+    "/maps/world/tiles/1/x0/z-1.png": {
+      "decodedSha256": "4cbc8e0d9d6791be481d67a2926d2ebcd1083f3cec287853451a4896d456ac17",
+      "decodedSize": 33221,
+      "sourceEncoding": "identity",
+      "sourceSize": 33221
+    },
+    "/maps/world/tiles/1/x0/z-2.png": {
+      "decodedSha256": "9762bfa0d2fdc78e208b02a1edf56c969fb155f27bcae59c6bd7b0e3ee81c30f",
+      "decodedSize": 3488,
+      "sourceEncoding": "identity",
+      "sourceSize": 3488
+    },
+    "/maps/world/tiles/1/x0/z-3.png": {
+      "decodedSha256": "a7252cf8c00ae5a073cf0b751c0b88ac0cfb550a07321327047a40045620fdbf",
+      "decodedSize": 2195,
+      "sourceEncoding": "identity",
+      "sourceSize": 2195
+    },
+    "/maps/world/tiles/1/x0/z0.png": {
+      "decodedSha256": "9762bfa0d2fdc78e208b02a1edf56c969fb155f27bcae59c6bd7b0e3ee81c30f",
+      "decodedSize": 3488,
+      "sourceEncoding": "identity",
+      "sourceSize": 3488
+    },
+    "/maps/world/tiles/1/x0/z1.png": {
+      "decodedSha256": "38a3bdafb81f166c4dfd94f9ca3bf1451f1840366b1cf0fff2d04483169b6a2c",
+      "decodedSize": 2076,
+      "sourceEncoding": "identity",
+      "sourceSize": 2076
+    },
+    "/maps/world/tiles/1/x1/z-1.png": {
+      "decodedSha256": "bd8eb302449b5b57b50198a1431e044cdd796c24510d20116b7c34ad601bf9b5",
+      "decodedSize": 3941,
+      "sourceEncoding": "identity",
+      "sourceSize": 3941
+    },
+    "/maps/world/tiles/1/x1/z-2.png": {
+      "decodedSha256": "bd8eb302449b5b57b50198a1431e044cdd796c24510d20116b7c34ad601bf9b5",
+      "decodedSize": 3941,
+      "sourceEncoding": "identity",
+      "sourceSize": 3941
+    },
+    "/maps/world/tiles/1/x1/z-3.png": {
+      "decodedSha256": "af031fbf08f707a9b98dacfbba5f4280e715cd8ab3a201891d4d379dbcf9388d",
+      "decodedSize": 2243,
+      "sourceEncoding": "identity",
+      "sourceSize": 2243
+    },
+    "/maps/world/tiles/1/x1/z0.png": {
+      "decodedSha256": "bd8eb302449b5b57b50198a1431e044cdd796c24510d20116b7c34ad601bf9b5",
+      "decodedSize": 3941,
+      "sourceEncoding": "identity",
+      "sourceSize": 3941
+    },
+    "/maps/world/tiles/1/x1/z1.png": {
+      "decodedSha256": "2b10308da0e6a048fac1762e5846412b665f5e49c6b4027fba1338371a07c435",
+      "decodedSize": 2088,
+      "sourceEncoding": "identity",
+      "sourceSize": 2088
+    },
+    "/maps/world/tiles/2/x-1/z-1.png": {
+      "decodedSha256": "8c21971f9a421ea2027741d38e18254169e2c9101456e313e8092292345182a9",
+      "decodedSize": 19705,
+      "sourceEncoding": "identity",
+      "sourceSize": 19705
+    },
+    "/maps/world/tiles/2/x-1/z0.png": {
+      "decodedSha256": "9bba8789534a94419ca39b78fcc262df04586f1e4c7ac216cd0c143c4e2b09db",
+      "decodedSize": 2820,
+      "sourceEncoding": "identity",
+      "sourceSize": 2820
+    },
+    "/maps/world/tiles/2/x0/z-1.png": {
+      "decodedSha256": "43a8bf69700540fe5a31dacbc67c65c94ecbe5cd9f42025c4fd08eeaaa7f7392",
+      "decodedSize": 8812,
+      "sourceEncoding": "identity",
+      "sourceSize": 8812
+    },
+    "/maps/world/tiles/2/x0/z0.png": {
+      "decodedSha256": "9d6d24799260d76a06473d2b004244776d4a02103784432399f2f11747b4951c",
+      "decodedSize": 2796,
+      "sourceEncoding": "identity",
+      "sourceSize": 2796
+    },
+    "/maps/world/tiles/3/x-1/z-1.png": {
+      "decodedSha256": "e8e0f227b3b16d349241a5975dce0727cc29a3714c64ebbe225492368e9a5823",
+      "decodedSize": 3698,
+      "sourceEncoding": "identity",
+      "sourceSize": 3698
+    },
+    "/maps/world/tiles/3/x-1/z0.png": {
+      "decodedSha256": "10a7979c49f1b048eba437d522ee537c233297a6e3d5c99f5a6a88abca0b9857",
+      "decodedSize": 2415,
+      "sourceEncoding": "identity",
+      "sourceSize": 2415
+    },
+    "/maps/world/tiles/3/x0/z-1.png": {
+      "decodedSha256": "df012f86ac635008a7d9b31b71641f428bd1f1ecccce730f1e732d3470d31fe7",
+      "decodedSize": 2892,
+      "sourceEncoding": "identity",
+      "sourceSize": 2892
+    },
+    "/maps/world/tiles/3/x0/z0.png": {
+      "decodedSha256": "c4b418e6aee9761d6207ab0afbe716e54305622905bb801c25f9ba97d9bfa112",
+      "decodedSize": 2414,
+      "sourceEncoding": "identity",
+      "sourceSize": 2414
+    },
+    "/settings.json": {
+      "decodedSha256": "937f3bd4167972216f7a6010e44aa5a6a6d7d7f0f5a5a10751f8aad74382eb4a",
+      "decodedSize": 919,
+      "sourceEncoding": "identity",
+      "sourceSize": 919
+    }
+  },
+  "fixtures": {
+    "markers": {
+      "bytes": 18778,
+      "sha256": "437f5d73e0b263506aeb486f2514465daef96f7426fe5c97a688111c73ac732a"
+    },
+    "players": {
+      "bytes": 5607,
+      "sha256": "c8b12d5b12bd7f778f52bb69e2b1f2eefaaeb59ad8a3bce8d15b09eb106e7288"
+    }
+  },
+  "hotTile": "/maps/world/tiles/0/x-1/z-6.prbm",
+  "largeObject": "/maps/world/textures.json",
+  "largeTile": "/maps/world/tiles/0/x-7/z-9.prbm",
+  "mapIds": [
+    "world"
+  ],
+  "markers": [
+    "/maps/world/live/markers.json"
+  ],
+  "missingTile": "/maps/world/tiles/0/x2/1/4/7/4/8/3/6/4/7/z2/1/4/7/4/8/3/6/4/7.prbm",
+  "players": [
+    "/maps/world/live/players.json"
+  ],
+  "settings": [
+    "/maps/world/settings.json"
+  ],
+  "static": [
+    "/",
+    "/assets/Quicksand-BuVPtn-J.ttf",
+    "/assets/favicon-DEN7TZ5X.png",
+    "/assets/index-BgiqB2rB.css",
+    "/assets/index-BxD3mV_W.js",
+    "/assets/index-BxD3mV_W.js.map",
+    "/assets/logo.png",
+    "/assets/logoCircle512.png",
+    "/assets/logoCircle64.png",
+    "/assets/manifest-vz4Wm4Dd.webmanifest",
+    "/assets/poi.svg",
+    "/assets/steve.png",
+    "/index.html",
+    "/lang/cs.conf",
+    "/lang/de.conf",
+    "/lang/en.conf",
+    "/lang/es.conf",
+    "/lang/fi.conf",
+    "/lang/fr.conf",
+    "/lang/hi.conf",
+    "/lang/hu.conf",
+    "/lang/id.conf",
+    "/lang/it.conf",
+    "/lang/ja.conf",
+    "/lang/ko.conf",
+    "/lang/lv.conf",
+    "/lang/nb.conf",
+    "/lang/nl.conf",
+    "/lang/pl.conf",
+    "/lang/pt-PT.conf",
+    "/lang/ru.conf",
+    "/lang/settings.conf",
+    "/lang/sr-Cyrl-RS.conf",
+    "/lang/sr-Latn-RS.conf",
+    "/lang/sv.conf",
+    "/lang/th.conf",
+    "/lang/tr.conf",
+    "/lang/tt.conf",
+    "/lang/ua.conf",
+    "/lang/vi.conf",
+    "/lang/zh-CN.conf",
+    "/lang/zh-HK.conf",
+    "/lang/zh-TW.conf",
+    "/settings.json"
+  ],
+  "textures": [
+    "/maps/world/textures.json"
+  ],
+  "tiles": [
+    "/maps/world/tiles/0/x-1/0/z-1/0.prbm",
+    "/maps/world/tiles/0/x-1/0/z-1/1.prbm",
+    "/maps/world/tiles/0/x-1/0/z-1/2.prbm",
+    "/maps/world/tiles/0/x-1/0/z-3.prbm",
+    "/maps/world/tiles/0/x-1/0/z-4.prbm",
+    "/maps/world/tiles/0/x-1/0/z-5.prbm",
+    "/maps/world/tiles/0/x-1/0/z-6.prbm",
+    "/maps/world/tiles/0/x-1/0/z-7.prbm",
+    "/maps/world/tiles/0/x-1/0/z-8.prbm",
+    "/maps/world/tiles/0/x-1/0/z-9.prbm",
+    "/maps/world/tiles/0/x-1/z-1/0.prbm",
+    "/maps/world/tiles/0/x-1/z-1/1.prbm",
+    "/maps/world/tiles/0/x-1/z-1/2.prbm",
+    "/maps/world/tiles/0/x-1/z-2.prbm",
+    "/maps/world/tiles/0/x-1/z-3.prbm",
+    "/maps/world/tiles/0/x-1/z-4.prbm",
+    "/maps/world/tiles/0/x-1/z-5.prbm",
+    "/maps/world/tiles/0/x-1/z-6.prbm",
+    "/maps/world/tiles/0/x-1/z-7.prbm",
+    "/maps/world/tiles/0/x-1/z-8.prbm",
+    "/maps/world/tiles/0/x-1/z-9.prbm",
+    "/maps/world/tiles/0/x-2/z-1/0.prbm",
+    "/maps/world/tiles/0/x-2/z-1/1.prbm",
+    "/maps/world/tiles/0/x-2/z-1/2.prbm",
+    "/maps/world/tiles/0/x-2/z-2.prbm",
+    "/maps/world/tiles/0/x-2/z-3.prbm",
+    "/maps/world/tiles/0/x-2/z-4.prbm",
+    "/maps/world/tiles/0/x-2/z-5.prbm",
+    "/maps/world/tiles/0/x-2/z-6.prbm",
+    "/maps/world/tiles/0/x-2/z-7.prbm",
+    "/maps/world/tiles/0/x-2/z-8.prbm",
+    "/maps/world/tiles/0/x-2/z-9.prbm",
+    "/maps/world/tiles/0/x-3/z-1/0.prbm",
+    "/maps/world/tiles/0/x-3/z-1/1.prbm",
+    "/maps/world/tiles/0/x-3/z-1/2.prbm",
+    "/maps/world/tiles/0/x-3/z-2.prbm",
+    "/maps/world/tiles/0/x-3/z-3.prbm",
+    "/maps/world/tiles/0/x-3/z-4.prbm",
+    "/maps/world/tiles/0/x-3/z-5.prbm",
+    "/maps/world/tiles/0/x-3/z-6.prbm",
+    "/maps/world/tiles/0/x-3/z-7.prbm",
+    "/maps/world/tiles/0/x-3/z-8.prbm",
+    "/maps/world/tiles/0/x-3/z-9.prbm",
+    "/maps/world/tiles/0/x-4/z-1/0.prbm",
+    "/maps/world/tiles/0/x-4/z-1/1.prbm",
+    "/maps/world/tiles/0/x-4/z-1/2.prbm",
+    "/maps/world/tiles/0/x-4/z-2.prbm",
+    "/maps/world/tiles/0/x-4/z-3.prbm",
+    "/maps/world/tiles/0/x-4/z-4.prbm",
+    "/maps/world/tiles/0/x-4/z-5.prbm",
+    "/maps/world/tiles/0/x-4/z-6.prbm",
+    "/maps/world/tiles/0/x-4/z-7.prbm",
+    "/maps/world/tiles/0/x-4/z-8.prbm",
+    "/maps/world/tiles/0/x-4/z-9.prbm",
+    "/maps/world/tiles/0/x-5/z-1/0.prbm",
+    "/maps/world/tiles/0/x-5/z-1/1.prbm",
+    "/maps/world/tiles/0/x-5/z-1/2.prbm",
+    "/maps/world/tiles/0/x-5/z-2.prbm",
+    "/maps/world/tiles/0/x-5/z-3.prbm",
+    "/maps/world/tiles/0/x-5/z-4.prbm",
+    "/maps/world/tiles/0/x-5/z-5.prbm",
+    "/maps/world/tiles/0/x-5/z-6.prbm",
+    "/maps/world/tiles/0/x-5/z-7.prbm",
+    "/maps/world/tiles/0/x-5/z-8.prbm",
+    "/maps/world/tiles/0/x-5/z-9.prbm",
+    "/maps/world/tiles/0/x-6/z-1/0.prbm",
+    "/maps/world/tiles/0/x-6/z-1/1.prbm",
+    "/maps/world/tiles/0/x-6/z-1/2.prbm",
+    "/maps/world/tiles/0/x-6/z-2.prbm",
+    "/maps/world/tiles/0/x-6/z-3.prbm",
+    "/maps/world/tiles/0/x-6/z-4.prbm",
+    "/maps/world/tiles/0/x-6/z-5.prbm",
+    "/maps/world/tiles/0/x-6/z-6.prbm",
+    "/maps/world/tiles/0/x-6/z-7.prbm",
+    "/maps/world/tiles/0/x-6/z-8.prbm",
+    "/maps/world/tiles/0/x-6/z-9.prbm",
+    "/maps/world/tiles/0/x-7/z-1/0.prbm",
+    "/maps/world/tiles/0/x-7/z-1/1.prbm",
+    "/maps/world/tiles/0/x-7/z-1/2.prbm",
+    "/maps/world/tiles/0/x-7/z-2.prbm",
+    "/maps/world/tiles/0/x-7/z-3.prbm",
+    "/maps/world/tiles/0/x-7/z-4.prbm",
+    "/maps/world/tiles/0/x-7/z-5.prbm",
+    "/maps/world/tiles/0/x-7/z-6.prbm",
+    "/maps/world/tiles/0/x-7/z-7.prbm",
+    "/maps/world/tiles/0/x-7/z-8.prbm",
+    "/maps/world/tiles/0/x-7/z-9.prbm",
+    "/maps/world/tiles/0/x-8/z-1/0.prbm",
+    "/maps/world/tiles/0/x-8/z-1/1.prbm",
+    "/maps/world/tiles/0/x-8/z-1/2.prbm",
+    "/maps/world/tiles/0/x-8/z-3.prbm",
+    "/maps/world/tiles/0/x-8/z-4.prbm",
+    "/maps/world/tiles/0/x-8/z-5.prbm",
+    "/maps/world/tiles/0/x-8/z-6.prbm",
+    "/maps/world/tiles/0/x-8/z-7.prbm",
+    "/maps/world/tiles/0/x-8/z-8.prbm",
+    "/maps/world/tiles/0/x-8/z-9.prbm",
+    "/maps/world/tiles/0/x-9/z-1/0.prbm",
+    "/maps/world/tiles/0/x-9/z-1/1.prbm",
+    "/maps/world/tiles/0/x-9/z-1/2.prbm",
+    "/maps/world/tiles/0/x-9/z-3.prbm",
+    "/maps/world/tiles/0/x-9/z-4.prbm",
+    "/maps/world/tiles/0/x-9/z-5.prbm",
+    "/maps/world/tiles/0/x-9/z-6.prbm",
+    "/maps/world/tiles/0/x-9/z-7.prbm",
+    "/maps/world/tiles/0/x-9/z-8.prbm",
+    "/maps/world/tiles/0/x-9/z-9.prbm",
+    "/maps/world/tiles/0/x0/z-1/0.prbm",
+    "/maps/world/tiles/0/x0/z-1/1.prbm",
+    "/maps/world/tiles/0/x0/z-2.prbm",
+    "/maps/world/tiles/0/x0/z-3.prbm",
+    "/maps/world/tiles/0/x0/z-4.prbm",
+    "/maps/world/tiles/0/x0/z-5.prbm",
+    "/maps/world/tiles/0/x0/z-6.prbm",
+    "/maps/world/tiles/0/x0/z-7.prbm",
+    "/maps/world/tiles/0/x0/z-8.prbm",
+    "/maps/world/tiles/0/x0/z-9.prbm",
+    "/maps/world/tiles/0/x1/z-1/0.prbm",
+    "/maps/world/tiles/0/x1/z-1/1.prbm",
+    "/maps/world/tiles/0/x1/z-2.prbm",
+    "/maps/world/tiles/0/x1/z-3.prbm",
+    "/maps/world/tiles/0/x1/z-4.prbm",
+    "/maps/world/tiles/0/x1/z-5.prbm",
+    "/maps/world/tiles/0/x1/z-6.prbm",
+    "/maps/world/tiles/0/x1/z-7.prbm",
+    "/maps/world/tiles/0/x1/z-8.prbm",
+    "/maps/world/tiles/0/x1/z-9.prbm",
+    "/maps/world/tiles/0/x2/z-1/0.prbm",
+    "/maps/world/tiles/0/x2/z-1/1.prbm",
+    "/maps/world/tiles/0/x2/z-2.prbm",
+    "/maps/world/tiles/0/x2/z-3.prbm",
+    "/maps/world/tiles/0/x2/z-4.prbm",
+    "/maps/world/tiles/0/x2/z-5.prbm",
+    "/maps/world/tiles/0/x2/z-6.prbm",
+    "/maps/world/tiles/0/x2/z-7.prbm",
+    "/maps/world/tiles/0/x2/z-8.prbm",
+    "/maps/world/tiles/0/x2/z-9.prbm",
+    "/maps/world/tiles/1/x-1/z-1.png",
+    "/maps/world/tiles/1/x-1/z-2.png",
+    "/maps/world/tiles/1/x-1/z-3.png",
+    "/maps/world/tiles/1/x-1/z0.png",
+    "/maps/world/tiles/1/x-1/z1.png",
+    "/maps/world/tiles/1/x-2/z-1.png",
+    "/maps/world/tiles/1/x-2/z-2.png",
+    "/maps/world/tiles/1/x-2/z-3.png",
+    "/maps/world/tiles/1/x-2/z0.png",
+    "/maps/world/tiles/1/x-2/z1.png",
+    "/maps/world/tiles/1/x0/z-1.png",
+    "/maps/world/tiles/1/x0/z-2.png",
+    "/maps/world/tiles/1/x0/z-3.png",
+    "/maps/world/tiles/1/x0/z0.png",
+    "/maps/world/tiles/1/x0/z1.png",
+    "/maps/world/tiles/1/x1/z-1.png",
+    "/maps/world/tiles/1/x1/z-2.png",
+    "/maps/world/tiles/1/x1/z-3.png",
+    "/maps/world/tiles/1/x1/z0.png",
+    "/maps/world/tiles/1/x1/z1.png",
+    "/maps/world/tiles/2/x-1/z-1.png",
+    "/maps/world/tiles/2/x-1/z0.png",
+    "/maps/world/tiles/2/x0/z-1.png",
+    "/maps/world/tiles/2/x0/z0.png",
+    "/maps/world/tiles/3/x-1/z-1.png",
+    "/maps/world/tiles/3/x-1/z0.png",
+    "/maps/world/tiles/3/x0/z-1.png",
+    "/maps/world/tiles/3/x0/z0.png"
+  ]
+}

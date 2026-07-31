@@ -1,0 +1,37 @@
+{
+  "benchmarkGitRevision": "7ab367f44fa79f6ee7a5667c4e6507fd6d022aa6",
+  "formatVersion": 1,
+  "podSpecIdentityVersion": 1,
+  "variants": [
+    {
+      "expectedAdmissionPodSpecSha256": "8aaee1db8289fc9bf7926746d9051f445c2a1ee8e8d8848ce4ec2240442bb277",
+      "replicaCount": 1,
+      "variantId": "php-postgresql"
+    },
+    {
+      "expectedAdmissionPodSpecSha256": "232501ffb4cd4d4b1bd57439b6dc728d13826a17b8121776b92c0d735d73c42f",
+      "replicaCount": 1,
+      "variantId": "java-old-postgresql"
+    },
+    {
+      "expectedAdmissionPodSpecSha256": "0b32963d61eadbebabe301dbf190384726a23b5e4eac1eee6004961a37fe885b",
+      "replicaCount": 1,
+      "variantId": "java-new-postgresql"
+    },
+    {
+      "expectedAdmissionPodSpecSha256": "a33326fd1d704405cf81d5236cef97731960178459d91af44e231b7e97199d3b",
+      "replicaCount": 1,
+      "variantId": "rust-postgresql"
+    },
+    {
+      "expectedAdmissionPodSpecSha256": "97214d0f6a3facd4542b302e8157a0204ce81c5238953d72e4cb86bde6a93bdd",
+      "replicaCount": 3,
+      "variantId": "java-new-postgresql-r3"
+    },
+    {
+      "expectedAdmissionPodSpecSha256": "1207e8ded6265bc9c2fc2977bc4cb00c878fb186cf1f9109babd17babfeed6bb",
+      "replicaCount": 3,
+      "variantId": "rust-postgresql-r3"
+    }
+  ]
+}

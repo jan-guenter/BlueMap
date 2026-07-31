@@ -1,0 +1,213 @@
+{
+  "benchmarkGitRevision": "7ab367f44fa79f6ee7a5667c4e6507fd6d022aa6",
+  "cases": [
+    {
+      "acceptEncoding": "zstd",
+      "id": "map-mixed-r15",
+      "latencyP95Milliseconds": 10000,
+      "latencyP99Milliseconds": 20000,
+      "markerIntervalSeconds": 10,
+      "profile": "map-data-mixed",
+      "rate": 15,
+      "storedEncoding": "zstd",
+      "variants": [
+        "php-postgresql",
+        "java-old-postgresql",
+        "java-new-postgresql",
+        "rust-postgresql"
+      ],
+      "viewers": 15
+    },
+    {
+      "acceptEncoding": "zstd",
+      "id": "map-mixed-horizontal-r40",
+      "latencyP95Milliseconds": 5000,
+      "latencyP99Milliseconds": 10000,
+      "markerIntervalSeconds": 10,
+      "profile": "map-data-mixed",
+      "rate": 40,
+      "storedEncoding": "zstd",
+      "variants": [
+        "java-new-postgresql",
+        "rust-postgresql",
+        "java-new-postgresql-r3",
+        "rust-postgresql-r3"
+      ],
+      "viewers": 40
+    },
+    {
+      "acceptEncoding": "zstd",
+      "id": "live-viewers-r15",
+      "latencyP95Milliseconds": 10000,
+      "latencyP99Milliseconds": 20000,
+      "markerIntervalSeconds": 10,
+      "profile": "live-viewers",
+      "rate": 15,
+      "storedEncoding": "zstd",
+      "variants": [
+        "php-postgresql",
+        "java-old-postgresql",
+        "java-new-postgresql",
+        "rust-postgresql"
+      ],
+      "viewers": 15
+    },
+    {
+      "acceptEncoding": "zstd",
+      "id": "large-object-r1",
+      "latencyP95Milliseconds": 10000,
+      "latencyP99Milliseconds": 20000,
+      "markerIntervalSeconds": 10,
+      "profile": "large-object",
+      "rate": 1,
+      "storedEncoding": "zstd",
+      "variants": [
+        "php-postgresql",
+        "java-old-postgresql",
+        "java-new-postgresql",
+        "rust-postgresql"
+      ],
+      "viewers": 15
+    }
+  ],
+  "controls": {
+    "cooldownSeconds": 60,
+    "maxVUs": 512,
+    "measurementDuration": "5m",
+    "minimumAchievedRateRatio": 0.99,
+    "preAllocatedVUs": 256,
+    "warmupDuration": "2m"
+  },
+  "formatVersion": 3,
+  "manifestSha256": "31fd3eb6ceb5426d2b27bb385153ef79d7d6793478d82c419be3fdecb39c5d2c",
+  "mapIds": [
+    "world"
+  ],
+  "repetitions": 5,
+  "scheduleSeed": "bluemap-web-performance-schedule-v1",
+  "traceSeed": "bluemap-web-performance-v1",
+  "variants": [
+    {
+      "contractMode": "legacy",
+      "databaseBackend": "postgresql",
+      "expectedImages": [
+        {
+          "digest": "sha256:59ccf0943b0b8e8d9e6ea9039a39555730f544701a655c596f7df7d096c593f5",
+          "kind": "container",
+          "name": "nginx"
+        },
+        {
+          "digest": "sha256:cffc848e57a4df867a455ec8e81cc9b5a3bdb8897a258cd8d8b86e7d112c6d73",
+          "kind": "container",
+          "name": "php-fpm"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "f47b891603a9661eb70a0c7d73d2565db87223c53124cba6d7168c2495413f17",
+      "expectedSanitizedRuntimeSpecSha256": "c660c232380c7b2db674e6af0bc93eb4ca30531001096793561056def4a10d95",
+      "id": "php-postgresql",
+      "implementation": "php",
+      "replicaCount": 1,
+      "storageType": "sql"
+    },
+    {
+      "contractMode": "legacy",
+      "databaseBackend": "postgresql",
+      "expectedImages": [
+        {
+          "digest": "sha256:a3f079ec2da83bd7e3abe73f6b0e02c63a3788b5c6f7fcbd8c7f53689fe7727e",
+          "kind": "container",
+          "name": "bluemap-web"
+        },
+        {
+          "digest": "sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13",
+          "kind": "initContainer",
+          "name": "download-jdbc-driver"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "84c2b710a73ebd78f2a8ba8eb392f763df3542a75c506d42ac3a472341570dde",
+      "expectedSanitizedRuntimeSpecSha256": "93a4441b71a1638f91747ae55c3e6901534d587825cd4c6a2abd945364e517f7",
+      "id": "java-old-postgresql",
+      "implementation": "java",
+      "replicaCount": 1,
+      "storageType": "sql"
+    },
+    {
+      "contractMode": "enhanced",
+      "databaseBackend": "postgresql",
+      "expectedImages": [
+        {
+          "digest": "sha256:c62e8bc68190728e4ea2c95347e97787c5e01d8d563315f71955d8aacf7d30fe",
+          "kind": "container",
+          "name": "bluemap-web"
+        },
+        {
+          "digest": "sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13",
+          "kind": "initContainer",
+          "name": "download-jdbc-driver"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "c4c48741b679ee71c7f4b700ee4577481af36902d2841d42cf16d1f9c5cd1e43",
+      "expectedSanitizedRuntimeSpecSha256": "dc64db43f13c350cf012f009ca85ef4c557738739e17a93da46893916e396478",
+      "id": "java-new-postgresql",
+      "implementation": "java",
+      "replicaCount": 1,
+      "storageType": "sql"
+    },
+    {
+      "contractMode": "enhanced",
+      "databaseBackend": "postgresql",
+      "expectedImages": [
+        {
+          "digest": "sha256:6a612b95804966d74f32a272ef50625a025ed31137ca579b0d26a1a23265aacc",
+          "kind": "container",
+          "name": "bluemap-web"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "c4677b669513e48903cb9961a10f1886b9853358a4581b3f334712121e2c31f7",
+      "expectedSanitizedRuntimeSpecSha256": "b7ffb199a56d21ebb6f3a893534a1b5679e2d832afa675083952610ebdbd72cb",
+      "id": "rust-postgresql",
+      "implementation": "rust",
+      "replicaCount": 1,
+      "storageType": "sql"
+    },
+    {
+      "contractMode": "enhanced",
+      "databaseBackend": "postgresql",
+      "expectedImages": [
+        {
+          "digest": "sha256:c62e8bc68190728e4ea2c95347e97787c5e01d8d563315f71955d8aacf7d30fe",
+          "kind": "container",
+          "name": "bluemap-web"
+        },
+        {
+          "digest": "sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13",
+          "kind": "initContainer",
+          "name": "download-jdbc-driver"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "73033c52e21d2c02762f396f712075172b31cda7cab5785eed219ffc85bd6a2c",
+      "expectedSanitizedRuntimeSpecSha256": "7b3609f7ce00e6f82548c33aac4b2df03c0f365f4ad674e570020d07fe2f3cc9",
+      "id": "java-new-postgresql-r3",
+      "implementation": "java",
+      "replicaCount": 3,
+      "storageType": "sql"
+    },
+    {
+      "contractMode": "enhanced",
+      "databaseBackend": "postgresql",
+      "expectedImages": [
+        {
+          "digest": "sha256:6a612b95804966d74f32a272ef50625a025ed31137ca579b0d26a1a23265aacc",
+          "kind": "container",
+          "name": "bluemap-web"
+        }
+      ],
+      "expectedSanitizedConfigSha256": "b17846891ec4cb2edddcfe342deaadca84bc09d97d689bd8e0d9aa0e0df68b9b",
+      "expectedSanitizedRuntimeSpecSha256": "cdea19561b69f693fbfe7beba45708674ed559232348a5108cee0cf815c7cadc",
+      "id": "rust-postgresql-r3",
+      "implementation": "rust",
+      "replicaCount": 3,
+      "storageType": "sql"
+    }
+  ]
+}
