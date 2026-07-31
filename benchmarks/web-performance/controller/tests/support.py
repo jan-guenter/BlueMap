@@ -34,6 +34,7 @@ analyze = load_module("formal_analyze_under_test", FORMAL_DIR / "analyze.py")
 
 RUN_ID = "formal-controller-tests"
 START_EPOCH = 1_775_088_000.0
+SOURCE_REVISION = "1" * 40
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -42,6 +43,29 @@ def write_json(path: Path, value: Any) -> None:
         json.dumps(value, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def formal_matrix() -> dict[str, Any]:
+    """Return a complete source-only formal matrix fixture.
+
+    The tracked frozen bundle is intentionally absent while source revision S
+    is prepared, so controller unit tests must never import it as test data.
+    """
+    matrix = orchestrate.load_json(freeze.MATRIX_EXAMPLE)
+    matrix["benchmarkGitRevision"] = SOURCE_REVISION
+    matrix["manifestSha256"] = "2" * 64
+    for variant_index, variant in enumerate(matrix["variants"], start=1):
+        digit = format((variant_index % 14) + 1, "x")
+        for image_index, image in enumerate(variant["expectedImages"], start=1):
+            image_digit = format(
+                ((variant_index + image_index) % 14) + 1,
+                "x",
+            )
+            image["digest"] = "sha256:" + image_digit * 64
+        variant["expectedSanitizedConfigSha256"] = digit * 64
+        runtime_digit = format(((variant_index + 7) % 14) + 1, "x")
+        variant["expectedSanitizedRuntimeSpecSha256"] = runtime_digit * 64
+    return matrix
 
 
 def iso(offset_seconds: float = 0.0) -> str:
@@ -61,6 +85,7 @@ def runpod_identity(run_id: str = RUN_ID) -> dict[str, Any]:
         "backend": "runpod-ssh",
         "capturedAt": iso(),
         "runId": run_id,
+        "sourceRevision": SOURCE_REVISION,
         "remoteRoot": "/artifacts",
         "runpod": {
             "costPerHour": 0.12,
@@ -101,6 +126,7 @@ def runpod_runtime_identity(run_id: str = RUN_ID) -> dict[str, Any]:
         "capturedAt": iso(1),
         "startedAt": iso(-60),
         "runId": run_id,
+        "sourceRevision": SOURCE_REVISION,
         "imageDigest": "sha256:" + "a" * 64,
         "runpod": {
             "configuredVcpuCount": 8,

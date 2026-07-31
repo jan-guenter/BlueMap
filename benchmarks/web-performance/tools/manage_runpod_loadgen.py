@@ -38,9 +38,10 @@ ALLOWED_DATA_CENTERS = frozenset(
     {"EU-NL-1", "EU-FR-1", "EU-CZ-1", "EU-SE-1", "EU-RO-1"}
 )
 RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+SOURCE_REVISION_RE = re.compile(r"^[a-f0-9]{40}$")
 POD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,191}$")
 IMAGE_RE = re.compile(
-    r"^ghcr\.io/[a-z0-9][a-z0-9._-]*/"
+    r"^ghcr\.io/jan-guenter/"
     r"bluemap-perf-loadgen@(?P<digest>sha256:[a-f0-9]{64})$"
 )
 PUBLIC_KEY_RE = re.compile(
@@ -133,12 +134,29 @@ def validate_run_id(value: str) -> str:
     return value
 
 
+def validate_source_revision(value: str) -> str:
+    if (
+        len(value) != 40
+        or SOURCE_REVISION_RE.fullmatch(value) is None
+        or set(value) == {"0"}
+    ):
+        raise ProvisioningError(
+            "source revision must be a nonzero, full lowercase "
+            "40-character Git SHA"
+        )
+    return value
+
+
 def validate_image(value: str) -> tuple[str, str]:
     match = IMAGE_RE.fullmatch(value)
-    if match is None:
+    if (
+        match is None
+        or len(value) != 112
+        or set(match.group("digest").removeprefix("sha256:")) == {"0"}
+    ):
         raise ProvisioningError(
             "image must be an immutable "
-            "ghcr.io/<owner>/bluemap-perf-loadgen@sha256:<digest> reference"
+            "ghcr.io/jan-guenter/bluemap-perf-loadgen@sha256:<digest> reference"
         )
     return value, match.group("digest")
 
@@ -406,6 +424,10 @@ def assert_expected_pod(
     string_field(pod.get("machineId"), "machineId")
     if not isinstance(environment, dict):
         raise ProvisioningError("RunPod environment identity is unavailable")
+    if "BLUEMAP_SOURCE_REVISION" in environment:
+        raise ProvisioningError(
+            "RunPod source revision must come from the baked image, not runtime"
+        )
     expected_environment = {
         "BLUEMAP_RUNPOD_CPU_FLAVOR": CPU_FLAVOR,
         "BLUEMAP_RUNPOD_IMAGE_DIGEST": validate_image(image)[1],
@@ -519,6 +541,7 @@ def identity_from_pod(
     run_id: str,
     image: str,
     image_digest: str,
+    source_revision: str,
     data_center: str,
     host_key: str,
     host_key_fingerprint: str,
@@ -532,6 +555,7 @@ def identity_from_pod(
         "formatVersion": 1,
         "remoteRoot": "/artifacts",
         "runId": run_id,
+        "sourceRevision": validate_source_revision(source_revision),
         "runpod": {
             "costPerHour": float(cost) if cost is not None else None,
             "cpuFlavorId": CPU_FLAVOR,
@@ -607,6 +631,7 @@ def capture_ready_identity(
     run_id: str,
     image: str,
     image_digest: str,
+    source_revision: str,
     data_center: str,
     private_key: Path,
     output_dir: Path,
@@ -642,6 +667,7 @@ def capture_ready_identity(
         run_id=run_id,
         image=image,
         image_digest=image_digest,
+        source_revision=source_revision,
         data_center=data_center,
         host_key=host_key,
         host_key_fingerprint=host_key_fingerprint,
@@ -674,6 +700,7 @@ def capture_ready_identity(
 
 def command_plan(args: argparse.Namespace) -> int:
     run_id = validate_run_id(args.run_id)
+    validate_source_revision(args.source_revision)
     image, _ = validate_image(args.image)
     data_center = validate_data_center(args.data_center)
     private_key = validate_private_key(args.ssh_private_key)
@@ -692,6 +719,7 @@ def command_create(args: argparse.Namespace) -> int:
     run_id = validate_run_id(args.run_id)
     if args.confirm_create != run_id:
         raise ProvisioningError("--confirm-create must exactly equal --run-id")
+    source_revision = validate_source_revision(args.source_revision)
     image, image_digest = validate_image(args.image)
     data_center = validate_data_center(args.data_center)
     private_key = validate_private_key(args.ssh_private_key)
@@ -719,6 +747,7 @@ def command_create(args: argparse.Namespace) -> int:
             "podId": created_pod_id,
             "requestedDataCenterId": data_center,
             "runId": run_id,
+            "sourceRevision": source_revision,
             "status": "provisioning",
         }
         write_json_atomic(state_path, state)
@@ -733,6 +762,7 @@ def command_create(args: argparse.Namespace) -> int:
             run_id=run_id,
             image=image,
             image_digest=image_digest,
+            source_revision=source_revision,
             data_center=data_center,
             private_key=private_key,
             output_dir=output_dir,
@@ -781,6 +811,9 @@ def command_recover(args: argparse.Namespace) -> int:
     image, image_digest = validate_image(
         string_field(state.get("image"), "pod-state.image")
     )
+    source_revision = validate_source_revision(
+        string_field(state.get("sourceRevision"), "pod-state.sourceRevision")
+    )
     data_center = validate_data_center(
         string_field(
             state.get("requestedDataCenterId"),
@@ -799,6 +832,7 @@ def command_recover(args: argparse.Namespace) -> int:
             run_id=run_id,
             image=image,
             image_digest=image_digest,
+            source_revision=source_revision,
             data_center=data_center,
             private_key=private_key,
             output_dir=output_dir,
@@ -828,6 +862,9 @@ def command_recover(args: argparse.Namespace) -> int:
 def load_ready_identity(output_dir: Path) -> tuple[dict[str, Any], Path]:
     identity_path = output_dir / "frozen-identity.json"
     identity = read_json(identity_path)
+    validate_source_revision(
+        string_field(identity.get("sourceRevision"), "sourceRevision")
+    )
     if (
         identity.get("formatVersion") != 1
         or identity.get("backend") != "runpod-ssh"
@@ -994,6 +1031,11 @@ def command_delete(args: argparse.Namespace) -> int:
 def common_launch_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--image", required=True)
+    parser.add_argument(
+        "--source-revision",
+        required=True,
+        help="full lowercase Git SHA baked into the requested image",
+    )
     parser.add_argument(
         "--data-center",
         default="EU-NL-1",

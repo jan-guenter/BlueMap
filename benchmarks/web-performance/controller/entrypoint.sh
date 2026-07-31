@@ -18,6 +18,8 @@ readonly RUNPOD_IDENTITY=/runpod-identity/identity.json
 readonly RUNPOD_IDENTITY_KEY=/opt/bluemap-runtime/credentials/id_ed25519
 readonly PUBLIC_SERVICE=bluemap-perf-public
 readonly PUBLIC_SERVICE_PORT=8100
+readonly DEFAULT_TRAFFIC_MODE=ssh-l4-traefik
+readonly TRAFFIC_MODE="${BLUEMAP_TRAFFIC_MODE:-$DEFAULT_TRAFFIC_MODE}"
 
 child_pid=""
 termination_requested=false
@@ -62,8 +64,11 @@ trap forward_termination TERM INT
     fail "BLUEMAP_BENCHMARK_REVISION must be a full lowercase Git SHA"
 [[ "${BLUEMAP_FORMAL_RUN_ID:-}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] ||
     fail "BLUEMAP_FORMAL_RUN_ID is invalid"
-[[ "${BLUEMAP_TRAFFIC_BASE_URL:-}" == "https://bluemap-test.guenter.cloud" ]] ||
-    fail "BLUEMAP_TRAFFIC_BASE_URL must be https://bluemap-test.guenter.cloud"
+[[ "$TRAFFIC_MODE" == "ssh-l4-traefik" ]] ||
+    fail "the canonical preflight and formal run require ssh-l4-traefik"
+[[ "${BLUEMAP_TRAFFIC_BASE_URL:-}" == \
+    "http://bluemap-test.guenter.cloud" ]] ||
+    fail "ssh-l4-traefik requires BLUEMAP_TRAFFIC_BASE_URL=http://bluemap-test.guenter.cloud"
 [[ "${BLUEMAP_CONTROLLER_IMAGE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     fail "BLUEMAP_CONTROLLER_IMAGE_DIGEST must be an immutable digest"
 [[ "${BLUEMAP_CONTROLLER_POD_NAME:-}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
@@ -239,7 +244,11 @@ identity_run_id="$(jq -er '.runId' "$RUNPOD_IDENTITY")" ||
     fail "RunPod identity and formal run ID differ"
 
 readonly RUN_ROOT="$FORMAL_ROOT/formal-runs/$BLUEMAP_FORMAL_RUN_ID"
-[[ ! -e "$RUN_ROOT" ]] ||
+readonly PREFLIGHT_ROOT="${RUN_ROOT}-preflight"
+readonly PREFLIGHT_REPORT="$PREFLIGHT_ROOT/preflight-report.json"
+[[ ! -e "$PREFLIGHT_ROOT" && ! -L "$PREFLIGHT_ROOT" ]] ||
+    fail "preflight root already exists; preflight is non-resumable"
+[[ ! -e "$RUN_ROOT" && ! -L "$RUN_ROOT" ]] ||
     fail "formal run root already exists; automatic resume is forbidden"
 mkdir -p -- "$(dirname -- "$RUN_ROOT")"
 test_file="$(dirname -- "$RUN_ROOT")/.controller-write-test-$$"
@@ -257,9 +266,44 @@ python "$ORCHESTRATOR" validate
     --identity-key "$RUNPOD_IDENTITY_KEY" \
     validate > /tmp/runpod-live-identity.json
 
+preflight_command=(
+    python "$ORCHESTRATOR" preflight
+    --run-root "$PREFLIGHT_ROOT"
+    --controller-pod "$BLUEMAP_CONTROLLER_POD_NAME"
+    --confirm RUN-FROZEN-SSH-L4-PREFLIGHT
+    --benchmark-python /usr/local/bin/python
+    --kubeconfig /etc/bluemap-controller/kubeconfig
+    --prometheus-url "$BLUEMAP_PROMETHEUS_URL"
+    --load-generator-backend runpod-ssh
+    --load-generator-identity "$RUNPOD_IDENTITY"
+    --load-generator-identity-key "$RUNPOD_IDENTITY_KEY"
+    --traffic-mode ssh-l4-traefik
+    --traffic-base-url http://bluemap-test.guenter.cloud
+    --traffic-service "$PUBLIC_SERVICE"
+    --traffic-service-port "$PUBLIC_SERVICE_PORT"
+    --formal-run-id "$BLUEMAP_FORMAL_RUN_ID"
+)
+
+[[ "$termination_requested" == false ]] || exit 143
+set +e
+run_child "${preflight_command[@]}"
+preflight_status=$?
+set -e
+if ((preflight_status != 0)); then
+    if [[ "$termination_requested" == true ]]; then
+        exit 143
+    fi
+    exit "$preflight_status"
+fi
+[[ "$termination_requested" == false ]] || exit 143
+[[ -f "$PREFLIGHT_REPORT" && ! -L "$PREFLIGHT_REPORT" ]] ||
+    fail "passed preflight did not preserve its report"
+
 orchestrator_command=(
     python "$ORCHESTRATOR" run
     --run-root "$RUN_ROOT"
+    --preflight-report "$PREFLIGHT_REPORT"
+    --controller-pod "$BLUEMAP_CONTROLLER_POD_NAME"
     --confirm RUN-FROZEN-80-ENTRY-MATRIX
     --benchmark-python /usr/local/bin/python
     --kubeconfig /etc/bluemap-controller/kubeconfig
@@ -267,11 +311,11 @@ orchestrator_command=(
     --load-generator-backend runpod-ssh
     --load-generator-identity "$RUNPOD_IDENTITY"
     --load-generator-identity-key "$RUNPOD_IDENTITY_KEY"
+    --traffic-mode "$TRAFFIC_MODE"
     --traffic-base-url "$BLUEMAP_TRAFFIC_BASE_URL"
     --traffic-service "$PUBLIC_SERVICE"
     --traffic-service-port "$PUBLIC_SERVICE_PORT"
     --formal-run-id "$BLUEMAP_FORMAL_RUN_ID"
-    --require-edge-bypass
 )
 
 [[ "$termination_requested" == false ]] || exit 143

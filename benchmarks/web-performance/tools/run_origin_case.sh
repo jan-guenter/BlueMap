@@ -13,6 +13,7 @@ LOADGEN_IDENTITY=""
 LOADGEN_IDENTITY_KEY=""
 RUNPOD_LOADGEN_HELPER="$BENCHMARK_ROOT/tools/runpod_loadgen.sh"
 TRAFFIC_BASE_URL=""
+TRAFFIC_MODE=""
 ORIGIN_BASE_URL=""
 DIRECT_ORIGIN_BASE_URL=""
 CLUSTER_SERVICE_TRANSPORT="port-forward"
@@ -157,7 +158,8 @@ Path/cluster options:
   --load-generator-identity FILE frozen non-secret RunPod identity
   --load-generator-identity-key FILE
                                   private Ed25519 identity for RunPod SSH
-  --traffic-base-url URL          public HTTPS request target for RunPod
+  --traffic-base-url URL          mode-specific request URL for RunPod
+  --traffic-mode MODE             cloudflare-https (default) or ssh-l4-traefik
   --traffic-service NAME          public routing Service for RunPod
   --traffic-service-port PORT     public routing Service port for RunPod
   --origin-base-url URL           exact cluster-DNS origin URL for direct access
@@ -300,6 +302,10 @@ while (($# > 0)); do
             ;;
         --traffic-base-url)
             TRAFFIC_BASE_URL="${2:-}"
+            shift 2
+            ;;
+        --traffic-mode)
+            TRAFFIC_MODE="${2:-}"
             shift 2
             ;;
         --traffic-service)
@@ -497,21 +503,39 @@ if [[ "$LOADGEN_BACKEND" == "kubernetes" ]]; then
         die "Kubernetes load generation does not accept RunPod identity files"
     [[ -z "$TRAFFIC_BASE_URL" ]] ||
         die "Kubernetes load generation does not accept --traffic-base-url"
+    [[ -z "$TRAFFIC_MODE" ]] ||
+        die "Kubernetes load generation does not accept --traffic-mode"
     [[ -z "$TRAFFIC_SERVICE" && -z "$TRAFFIC_SERVICE_PORT" ]] ||
         die "Kubernetes load generation does not accept a traffic Service"
     [[ "$REQUIRE_EDGE_BYPASS" == "false" ]] ||
         die "Kubernetes load generation cannot require an edge bypass"
 else
+    [[ -n "$TRAFFIC_MODE" ]] || TRAFFIC_MODE="cloudflare-https"
     [[ -f "$LOADGEN_IDENTITY" && ! -L "$LOADGEN_IDENTITY" ]] ||
         die "RunPod load generation requires a regular --load-generator-identity"
     [[ -f "$LOADGEN_IDENTITY_KEY" && ! -L "$LOADGEN_IDENTITY_KEY" ]] ||
         die "RunPod load generation requires a regular --load-generator-identity-key"
-    [[ "$TRAFFIC_BASE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]] ||
-        die "RunPod load generation requires an absolute HTTPS --traffic-base-url"
+    [[ "$TRAFFIC_BASE_URL" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]] ||
+        die "RunPod load generation requires an absolute HTTP(S) --traffic-base-url"
     [[ "$TRAFFIC_BASE_URL" != *"?"* && "$TRAFFIC_BASE_URL" != *"#"* ]] ||
         die "RunPod traffic URLs must not contain a query or fragment"
-    [[ "${TRAFFIC_BASE_URL%/}" == "https://$TRAFFIC_HOST" ]] ||
-        die "RunPod traffic must use the exact public benchmark hostname"
+    case "$TRAFFIC_MODE" in
+        cloudflare-https)
+            [[ "${TRAFFIC_BASE_URL%/}" == "https://$TRAFFIC_HOST" ]] ||
+                die "cloudflare-https traffic must use the exact HTTPS benchmark URL"
+            [[ "$REQUIRE_EDGE_BYPASS" == "true" ]] ||
+                die "cloudflare-https traffic requires --require-edge-bypass"
+            ;;
+        ssh-l4-traefik)
+            [[ "${TRAFFIC_BASE_URL%/}" == "http://$TRAFFIC_HOST" ]] ||
+                die "ssh-l4-traefik traffic must use the exact HTTP benchmark URL"
+            [[ "$REQUIRE_EDGE_BYPASS" == "false" ]] ||
+                die "ssh-l4-traefik traffic forbids --require-edge-bypass"
+            ;;
+        *)
+            die "--traffic-mode must be cloudflare-https or ssh-l4-traefik"
+            ;;
+    esac
     [[ "$TRAFFIC_SERVICE" == "bluemap-perf-public" ]] ||
         die "RunPod load generation requires --traffic-service bluemap-perf-public"
     [[ "$TRAFFIC_SERVICE_PORT" == "8100" ]] ||
@@ -520,8 +544,6 @@ else
         die "RunPod traffic and candidate Services must be distinct"
     [[ "$FORMAL_RUN_ID" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] ||
         die "RunPod load generation requires a valid --formal-run-id"
-    [[ "$REQUIRE_EDGE_BYPASS" == "true" ]] ||
-        die "RunPod load generation requires --require-edge-bypass"
     [[ "$(jq -r '.runId // empty' "$LOADGEN_IDENTITY")" == "$FORMAL_RUN_ID" ]] ||
         die "RunPod identity runId differs from --formal-run-id"
 fi
@@ -1035,6 +1057,18 @@ loadgen_exec() {
             --identity "$LOADGEN_IDENTITY" \
             --identity-key "$LOADGEN_IDENTITY_KEY" \
             exec "$@"
+    fi
+}
+
+loadgen_k6_exec() {
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" &&
+        "$TRAFFIC_MODE" == "ssh-l4-traefik" ]]; then
+        "$RUNPOD_LOADGEN_HELPER" \
+            --identity "$LOADGEN_IDENTITY" \
+            --identity-key "$LOADGEN_IDENTITY_KEY" \
+            exec-traefik-forward "$@"
+    else
+        loadgen_exec "$@"
     fi
 }
 
@@ -2258,8 +2292,10 @@ print(math.ceil(value * factor) + 90)
         -e "ENFORCE_LATENCY_GATES=$enforce_latency_gates"
         -e "FORMAL_RUN_ID=$FORMAL_RUN_ID"
         -e "REQUIRE_EDGE_BYPASS=$REQUIRE_EDGE_BYPASS"
+        -e "TRAFFIC_MODE=$TRAFFIC_MODE"
         -e "EXPERIMENT_ID=$CASE_ID-r$repetition_name-$phase"
         -e "ACCEPT_ENCODING=$ACCEPT_ENCODING"
+        -e "STORED_ENCODING=$STORED_ENCODING"
         -e "CONTRACT_MODE=$CONTRACT_MODE"
         "/artifacts/$CASE_ID/inputs/bluemap.js"
     )
@@ -2274,7 +2310,7 @@ print(math.ceil(value * factor) + 90)
     fi
 
     set +e
-    loadgen_exec "${phase_command[@]}" \
+    loadgen_k6_exec "${phase_command[@]}" \
         2>&1 | tee "$local_dir/console.log"
     local status="${PIPESTATUS[0]}"
     set -e
@@ -2412,6 +2448,7 @@ write_workload_metadata() {
         --argjson servicePort "$SERVICE_PORT" \
         --arg originBaseUrl "$ORIGIN_BASE_URL" \
         --arg trafficBaseUrl "$BASE_URL" \
+        --arg trafficMode "$TRAFFIC_MODE" \
         --arg trafficService "$TRAFFIC_SERVICE" \
         --arg trafficServicePort "$TRAFFIC_SERVICE_PORT" \
         --arg clusterServiceTransport "$CLUSTER_SERVICE_TRANSPORT" \
@@ -2492,6 +2529,9 @@ write_workload_metadata() {
                 correctnessTransport: $clusterServiceTransport
             },
             traffic: {
+                mode: (
+                    if $trafficMode == "" then null else $trafficMode end
+                ),
                 baseUrl: $trafficBaseUrl,
                 service: (
                     if $trafficService == "" then null else $trafficService end
@@ -2505,7 +2545,18 @@ write_workload_metadata() {
                 formalRunId: (
                     if $formalRunId == "" then null else $formalRunId end
                 ),
-                requiresEdgeBypass: $requireEdgeBypass
+                requiresEdgeBypass: $requireEdgeBypass,
+                tunnel: (
+                    if $trafficMode == "ssh-l4-traefik"
+                    then {
+                        listenHost: "127.0.0.1",
+                        listenPort: 18080,
+                        targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                        targetPort: 80
+                    }
+                    else null
+                    end
+                )
             },
             loadGenerator: {
                 backend: $loadGeneratorBackend,

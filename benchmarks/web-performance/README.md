@@ -9,12 +9,13 @@ This directory defines reproducible, comparative tests for:
 
 The benchmark is deliberately split into server-comparison and delivery-cache
 tests. Formal server-comparison traffic originates from one fixed RunPod CPU
-Pod and reaches every candidate through the same public Cloudflare and
-Traefik route. Cloudflare caching must remain bypassed for every measured
-request, so the result compares the server/database path while also including
-the common public-network path. Correctness probes still use the selected
-candidate's exact cluster-DNS Service URL. Delivery-cache tests separately
-exercise the intended browser-cache behavior through the public route.
+Pod and reaches every candidate through the same SSH L4 tunnel directly to
+the cluster's Traefik HTTP entry point. The fixed Host header still exercises
+the `bluemap-test.guenter.cloud` Ingress and `bluemap-perf-public` mux, but
+Cloudflare and the workstation are not in the measured path. Correctness
+probes still use the selected candidate's exact cluster-DNS Service URL.
+Delivery-cache and Cloudflare diagnostic tests separately exercise the public
+route.
 
 ## Safety boundary
 
@@ -340,14 +341,16 @@ For a valid comparison, every variant in a matrix run uses:
 - the same HTTP protocol and keep-alive behavior;
 - the same warm-up, measurement duration, and workload order;
 - the same request `TRACE_SEED`, offered-rate gate, and p95/p99 gates;
-- the same frozen RunPod Pod, machine, CPU, image, SSH host-key, and public
-  traffic route;
+- the same frozen RunPod Pod, machine, CPU, immutable image, baked source-S
+  revision, SSH host-key, and direct SSH-L4/Traefik traffic identity; the
+  four-key bundle `loadGenerator` binding must match both frozen and live
+  RunPod identities before any measurement;
 - an independently verified eight-vCPU cgroup quota/cpuset/affinity identity
   and a per-phase load-generator CPU, memory, throttling, and network-capacity
   gate;
-- a unique formal-run User-Agent and proof that Cloudflare neither cached nor
-  challenged measured requests; only the known origin-served `BYPASS`,
-  `DYNAMIC`, `EXPIRED`, and `MISS` cache states are accepted;
+- a unique formal-run User-Agent, proof that the direct path returned no
+  Cloudflare edge headers, and exact stored `Content-Encoding` proof for
+  applicable enhanced-contract tile/texture responses;
 - no server-side response cache unless that cache is the feature being tested.
 
 The runtime resource envelope is one CPU and 1 GiB memory per web replica.
@@ -535,20 +538,20 @@ selects the same endpoint class and path even if k6 schedules another VU.
 
 ### Profiles
 
-| Profile | Purpose |
-| --- | --- |
-| `static` | Root HTML and fingerprinted web assets |
-| `hot-tile` | Repeated access to one representative tile |
-| `random-tiles` | Broad tile set to reduce application/DB page-cache locality |
-| `large-tile` | Large hires payload and slow-client sensitivity |
-| `settings` | Settings objects only |
-| `textures` | Texture manifests only, isolated from small settings objects |
-| `large-object` | Largest non-tile map object, normally the texture manifest |
-| `missing-tile` | Known-absent tile; every request must be exactly `204` |
-| `conditional` | One pre-seeded `200`, then workload requests exactly `304` |
-| `live-viewers` | Separate evenly scheduled player and marker polling |
-| `map-data-mixed` | SQL-comparable map data only; no static web assets |
-| `browser-mixed` | Static UI plus the weighted map-data workload |
+| Profile          | Purpose                                                      |
+| ---------------- | ------------------------------------------------------------ |
+| `static`         | Root HTML and fingerprinted web assets                       |
+| `hot-tile`       | Repeated access to one representative tile                   |
+| `random-tiles`   | Broad tile set to reduce application/DB page-cache locality  |
+| `large-tile`     | Large hires payload and slow-client sensitivity              |
+| `settings`       | Settings objects only                                        |
+| `textures`       | Texture manifests only, isolated from small settings objects |
+| `large-object`   | Largest non-tile map object, normally the texture manifest   |
+| `missing-tile`   | Known-absent tile; every request must be exactly `204`       |
+| `conditional`    | One pre-seeded `200`, then workload requests exactly `304`   |
+| `live-viewers`   | Separate evenly scheduled player and marker polling          |
+| `map-data-mixed` | SQL-comparable map data only; no static web assets           |
+| `browser-mixed`  | Static UI plus the weighted map-data workload                |
 
 The harness uses an open-model constant-arrival-rate executor for throughput
 profiles so a slow server does not silently reduce offered load. The
@@ -580,12 +583,14 @@ Every measured run records:
 - p50, p90, p95, p99, p99.9, maximum, and time to first byte;
 - bytes received and sent;
 - the frozen and independently rechecked RunPod Pod, machine, data-center,
-  CPU, image, SSH host-key, and runtime identities;
+  CPU, immutable image, baked source-S revision, SSH host-key, and runtime
+  identities, joined to the canonical bundle load-generator digest;
 - the live cgroup-v1 or cgroup-v2 CPU quota, effective cpuset, process
   affinity, and derived exact eight-vCPU capacity, plus per-phase RunPod CPU,
   throttling, memory, and network samples and the resulting capacity gate;
-- Cloudflare reachability, mitigation, and edge-cache-bypass metrics for the
-  public measured requests;
+- direct-path edge-header and applicable stored-content-encoding proof for
+  both warm-up and measurement; Cloudflare reachability, mitigation, and
+  cache-state metrics remain limited to separate diagnostic/delivery runs;
 - selected Pod CPU/memory from `metrics.k8s.io`, restarts, image digests, and
   exact ready EndpointSlice membership;
 - optional Prometheus target-Pod and selected-node cAdvisor/node-exporter
@@ -608,12 +613,27 @@ directory. Do not commit credentials or unredacted cluster Secrets.
 
 `tools/run_origin_case.sh` runs one complete formal case against an exact
 `bluemap-perf-*` Service. Formal use selects `runpod-ssh`, a frozen RunPod
-identity, and its dedicated Ed25519 private key. Measured k6 requests use
-`https://bluemap-test.guenter.cloud`; direct HTTP correctness requests use the
-selected candidate's exact cluster-DNS URL. The two URLs are recorded
-separately and cannot be substituted for each other. The legacy Kubernetes
-load-generator mode remains available only for local exploratory work and is
-not valid for the formal comparison.
+identity, and its dedicated Ed25519 private key. The standalone runner's
+default `cloudflare-https` traffic mode sends measured k6 requests to
+`https://bluemap-test.guenter.cloud` and requires edge-bypass proof. The
+`ssh-l4-traefik` mode instead uses the fixed
+`http://bluemap-test.guenter.cloud` identity through an SSH L4 tunnel from
+`127.0.0.1:18080` to
+`rke2-traefik.kube-system.svc.cluster.local:80`; it does not claim to exercise
+or bypass Cloudflare. Direct HTTP correctness requests use the selected
+candidate's exact cluster-DNS URL. These identities are recorded separately
+and cannot be substituted for each other. The legacy Kubernetes load-generator
+mode remains available only for local exploratory work and is not valid for
+the formal comparison.
+
+The durable formal controller always selects `ssh-l4-traefik`. Before its
+80-entry schedule it runs a fixed, non-resumable six-entry preflight from the
+same RunPod source: enhanced Java/Rust at one replica for `large-object` rate
+1 and `map-data-mixed` rate 15, then enhanced Java/Rust at three replicas for
+`map-data-mixed` rate 40. The derived inputs and all results are preserved,
+and both the formal orchestrator and offline analyzer require the hash-bound
+passed report. See `controller/README.md` for its exact durations, relay
+headroom gate, and observability limitations.
 
 The runner requires explicit names for every web Deployment, web Pod, and,
 for SQL cases, database Pod. File-storage cases omit `--database-pod`; it does
@@ -663,6 +683,7 @@ benchmarks/web-performance/tools/run_origin_case.sh \
   --load-generator-backend runpod-ssh \
   --load-generator-identity /runpod-identity/identity.json \
   --load-generator-identity-key /credentials/id_ed25519 \
+  --traffic-mode cloudflare-https \
   --traffic-base-url https://bluemap-test.guenter.cloud \
   --traffic-service bluemap-perf-public \
   --traffic-service-port 8100 \
@@ -768,8 +789,9 @@ The local `artifacts/<case-id>/` directory contains:
 - resolved container image IDs/digests and per-repetition restart counts;
 - timestamped CPU and memory samples for every selected web/database Pod,
   read directly from `metrics.k8s.io`;
-- the frozen RunPod identity, before/after live identity checks, remote
-  per-phase cgroup/network samples, and load-generator capacity reports;
+- the source-S-bound frozen RunPod identity, before/after live identity
+  checks, remote per-phase cgroup/network samples, canonical bundle
+  load-generator digest, and load-generator capacity reports;
 - when enabled, one bounded Prometheus `query_range` bundle for the exact case
   start/end timestamps, containing selected-pod cAdvisor CPU, working set,
   throttling and network series, selected-node/background series, and
