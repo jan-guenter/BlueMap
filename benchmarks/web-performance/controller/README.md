@@ -167,18 +167,22 @@ run reject it. The direct mode, URL, tunnel object, and absence of an
 edge-bypass claim are persisted in both execution and workload identities.
 
 Before the 80-entry schedule, the same Job runs a non-resumable six-entry
-preflight. It derives a one-block matrix from the validated formal matrix,
-copying the exact immutable Java/Rust image, sanitized-config, and runtime
-identities. The fixed cases are:
+preflight. It derives a fixed one-block two-phase matrix from the validated
+formal identities, copying the exact immutable Java/Rust image,
+sanitized-config, and runtime identities. The fixed cases are:
 
-- `large-object` at rate 1 for the enhanced single-replica Java and Rust
+- `settings` at rate 1 for the enhanced single-replica Java and Rust
   candidates;
-- `map-data-mixed` at rate 15 for those same candidates;
-- `map-data-mixed` at rate 40 for the three-replica Java and Rust candidates.
+- `conditional` at rate 1 for the three-replica Java and Rust candidates;
+- `map-data-mixed` at rate 40 for those same three-replica candidates.
 
-Each entry uses a 30-second warm-up, two-minute measurement, 15-second
-cool-down, zstd storage/accept encoding, and an exact 100% scheduled-iteration
-completion gate. The derived matrix, generated
+The four low-load entries use `overloadPolicy: forbid`; the two rate-40 stress
+entries use `allow-explicit`. Every entry has 5,000/10,000 ms p95/p99 ceilings,
+a 30-second warm-up, two-minute measurement, 15-second cool-down, zstd
+storage/accept encoding, and an exact 100% scheduled-iteration completion
+gate. This preserves strict zero-overload correctness checks and exercises
+overload-aware accounting before the formal stress cases measure explicitly
+attributed overload as availability and goodput. The derived matrix, generated
 six-entry schedule, provenance, checksums, per-case evidence, and final report
 are preserved under the sibling `<run-id>-preflight` artifact directory. The
 formal `run` subcommand independently reloads and validates that exact passed

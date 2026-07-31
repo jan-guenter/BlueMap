@@ -54,6 +54,7 @@ import java.util.regex.Pattern;
 public class MapStorageRequestHandler implements HttpRequestHandler {
 
     private static final Pattern TILE_PATTERN = Pattern.compile("tiles/([\\d/]+)/x(-?[\\d/]+)z(-?[\\d/]+).*");
+    private static final String OVERLOAD_PROBLEM = "{\"type\":\"about:blank\",\"title\":\"Service Unavailable\",\"status\":503,\"code\":\"bluemap_overloaded\"}";
     public static final long DEFAULT_TILE_MAX_AGE_SECONDS = 60;
 
     private @NonNull MapStorage mapStorage;
@@ -187,10 +188,7 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
             throws IOException {
         MapStorage.ReadPermit permit = mapStorage.tryAcquireReadPermit();
         if (permit == null) {
-            HttpResponse response =
-                    errorResponse(HttpStatusCode.SERVICE_UNAVAILABLE);
-            response.addHeader("Retry-After", "1");
-            return response;
+            return overloadResponse();
         }
 
         boolean responseOwnsPermit = false;
@@ -329,6 +327,16 @@ public class MapStorageRequestHandler implements HttpRequestHandler {
     private static HttpResponse errorResponse(HttpStatusCode statusCode) {
         HttpResponse response = new HttpResponse(statusCode);
         response.addHeader("Cache-Control", "no-store,no-transform");
+        return response;
+    }
+
+    private static HttpResponse overloadResponse() {
+        HttpResponse response = new HttpResponse(HttpStatusCode.SERVICE_UNAVAILABLE);
+        response.addHeader("Retry-After", "1");
+        response.addHeader("Cache-Control", "private,no-store,no-transform");
+        response.addHeader("Content-Type", "application/problem+json");
+        response.addHeader("X-BlueMap-Overload", "capacity");
+        response.setBody(OVERLOAD_PROBLEM);
         return response;
     }
 

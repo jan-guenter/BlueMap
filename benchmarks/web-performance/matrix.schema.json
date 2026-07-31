@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:bluemap:web-performance-matrix:3",
+  "$id": "urn:bluemap:web-performance-matrix:4",
   "title": "BlueMap formal web-performance matrix",
   "type": "object",
   "additionalProperties": false,
@@ -18,7 +18,7 @@
   ],
   "properties": {
     "formatVersion": {
-      "const": 3
+      "const": 4
     },
     "repetitions": {
       "type": "integer",
@@ -262,6 +262,7 @@
         "markerIntervalSeconds",
         "acceptEncoding",
         "storedEncoding",
+        "overloadPolicy",
         "latencyP95Milliseconds",
         "latencyP99Milliseconds",
         "variants"
@@ -303,6 +304,12 @@
         },
         "storedEncoding": {
           "$ref": "#/$defs/encoding"
+        },
+        "overloadPolicy": {
+          "enum": [
+            "forbid",
+            "allow-explicit"
+          ]
         },
         "latencyP95Milliseconds": {
           "type": "number",

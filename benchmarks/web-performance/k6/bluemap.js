@@ -54,6 +54,7 @@ const EXPERIMENT_ID = requiredEnv("EXPERIMENT_ID");
 const ACCEPT_ENCODING = __ENV.ACCEPT_ENCODING || "zstd";
 const STORED_ENCODING = __ENV.STORED_ENCODING || "zstd";
 const CONTRACT_MODE = __ENV.CONTRACT_MODE || "enhanced";
+const OVERLOAD_POLICY = __ENV.OVERLOAD_POLICY || "forbid";
 
 if (TRACE_SEED.length > 128 || /[\r\n\0]/.test(TRACE_SEED)) {
   throw new Error(
@@ -96,6 +97,14 @@ if (TRAFFIC_MODE === "ssh-l4-traefik") {
 }
 if (!["enhanced", "legacy"].includes(CONTRACT_MODE)) {
   throw new Error("CONTRACT_MODE must be 'enhanced' or 'legacy'");
+}
+if (!["forbid", "allow-explicit"].includes(OVERLOAD_POLICY)) {
+  throw new Error("OVERLOAD_POLICY must be 'forbid' or 'allow-explicit'");
+}
+if (OVERLOAD_POLICY === "allow-explicit" && TRAFFIC_MODE !== "ssh-l4-traefik") {
+  throw new Error(
+    "OVERLOAD_POLICY=allow-explicit requires TRAFFIC_MODE=ssh-l4-traefik",
+  );
 }
 if (!["gzip", "zstd", "deflate", "identity"].includes(STORED_ENCODING)) {
   throw new Error(
@@ -140,11 +149,20 @@ const manifest = new SharedArray("bluemap-request-manifest", () => {
 
 requireProfileInputs();
 
-const unexpectedStatus = new Rate("bluemap_unexpected_status");
 const status200 = new Counter("bluemap_status_200");
 const status204 = new Counter("bluemap_status_204");
 const status304 = new Counter("bluemap_status_304");
 const status406 = new Counter("bluemap_status_406");
+const workloadRequests = new Counter("bluemap_workload_requests");
+const availableResponses = new Counter("bluemap_available_responses");
+const overloadResponses = new Counter("bluemap_overload_responses");
+const malformedOverloadResponses = new Counter(
+  "bluemap_malformed_overload_responses",
+);
+const transportErrors = new Counter("bluemap_transport_errors");
+const unexpectedResponses = new Counter("bluemap_unexpected_responses");
+const availableDuration = new Trend("bluemap_available_duration", true);
+const availableTtfb = new Trend("bluemap_available_ttfb", true);
 const requestTtfb = new Trend("bluemap_ttfb", true);
 const edgeCacheViolation = new Rate("bluemap_edge_cache_violation");
 const edgeMitigation = new Rate("bluemap_edge_mitigation");
@@ -256,10 +274,18 @@ function buildOptions() {
     "max",
   ];
   const commonThresholds = {
-    bluemap_unexpected_status: ["rate==0"],
-    "http_req_failed{traffic:workload}": ["rate<0.001"],
+    bluemap_workload_requests: ["count>0"],
+    "http_reqs{traffic:workload}": ["count>0"],
+    iterations: ["count>0"],
+    bluemap_malformed_overload_responses: ["count==0"],
+    bluemap_transport_errors: ["count==0"],
+    bluemap_unexpected_responses: ["count==0"],
     dropped_iterations: ["count==0"],
   };
+  if (OVERLOAD_POLICY === "forbid") {
+    commonThresholds.bluemap_available_responses = ["count>0"];
+    commonThresholds.bluemap_overload_responses = ["count==0"];
+  }
   const networkOptions =
     TRAFFIC_MODE === "ssh-l4-traefik"
       ? {
@@ -279,9 +305,9 @@ function buildOptions() {
       commonThresholds.bluemap_stored_content_encoding_violation = ["rate==0"];
     }
   }
-  if (ENFORCE_LATENCY_GATES) {
+  if (ENFORCE_LATENCY_GATES && OVERLOAD_POLICY === "forbid") {
     const latency = effectiveLatencyGates();
-    commonThresholds["http_req_duration{traffic:workload}"] = [
+    commonThresholds.bluemap_available_duration = [
       `p(95)<${latency.p95}`,
       `p(99)<${latency.p99}`,
     ];
@@ -404,12 +430,12 @@ function conditionalRequest(path, etag) {
     throw new Error("Conditional workload did not receive its pre-seeded ETag");
   const headers = { ...requestParams.headers, "If-None-Match": etag };
   const response = timedGet(path, "conditional", { ...requestParams, headers });
-  recordStatus(response, [304]);
+  recordStatus(response, [304], "conditional");
 }
 
 function request(path, endpointClass, expectedStatuses) {
   const response = timedGet(path, endpointClass, requestParams);
-  recordStatus(response, expectedStatuses);
+  recordStatus(response, expectedStatuses, endpointClass);
 }
 
 function timedGet(path, endpointClass, params, traffic = "workload") {
@@ -424,16 +450,6 @@ function timedGet(path, endpointClass, params, traffic = "workload") {
       traffic,
     },
   });
-  if (
-    traffic === "workload" &&
-    response.timings &&
-    Number.isFinite(response.timings.waiting)
-  ) {
-    requestTtfb.add(response.timings.waiting, {
-      endpoint_class: endpointClass,
-      profile: PROFILE,
-    });
-  }
   if (traffic === "workload" && REQUIRE_EDGE_BYPASS) {
     recordEdgeState(response, endpointClass);
   }
@@ -505,9 +521,7 @@ function storedCompressionProofApplicable() {
 }
 
 function recordProhibitedEdgeHeaders(response, endpointClass, traffic) {
-  const present = ["cf-ray", "cf-cache-status", "cf-mitigated"].filter(
-    (name) => responseHeader(response, name).length > 0,
-  );
+  const present = prohibitedEdgeHeaderNames(response);
   const violation = present.length > 0;
   const tags = {
     endpoint_class: endpointClass,
@@ -549,13 +563,122 @@ function responseHeader(response, name) {
   return "";
 }
 
-function recordStatus(response, expectedStatuses) {
-  const accepted = expectedStatuses.includes(response.status);
-  unexpectedStatus.add(!accepted, {
+function hasResponseHeader(response, name) {
+  const expected = name.toLowerCase();
+  return Object.keys(response.headers || {}).some(
+    (key) => key.toLowerCase() === expected,
+  );
+}
+
+function prohibitedEdgeHeaderNames(response) {
+  return ["cf-ray", "cf-cache-status", "cf-mitigated"].filter((name) =>
+    hasResponseHeader(response, name),
+  );
+}
+
+function cacheControlHasBareDirective(value, expectedName) {
+  const directives = [];
+  let start = 0;
+  let quoted = false;
+  let escaped = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (quoted) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        quoted = false;
+      }
+    } else if (character === '"') {
+      quoted = true;
+    } else if (character === ",") {
+      directives.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+
+  if (quoted) return false;
+  directives.push(value.slice(start));
+  const normalizedExpectedName = expectedName.toLowerCase();
+  return directives.some((directive) => {
+    const normalized = directive.trim();
+    return (
+      normalized.length > 0 &&
+      !normalized.includes("=") &&
+      normalized.toLowerCase() === normalizedExpectedName
+    );
+  });
+}
+
+function classifyOverloadResponse(response) {
+  const markerPresent = hasResponseHeader(response, "x-bluemap-overload");
+  const signaled = response.status === 503 || markerPresent;
+  const valid =
+    response.status === 503 &&
+    responseHeader(response, "x-bluemap-overload").trim() === "capacity" &&
+    /^[1-9][0-9]*$/.test(responseHeader(response, "retry-after").trim()) &&
+    responseHeader(response, "content-type").trim().toLowerCase() ===
+      "application/problem+json" &&
+    cacheControlHasBareDirective(
+      responseHeader(response, "cache-control"),
+      "no-store",
+    );
+  return { signaled, valid, malformed: signaled && !valid };
+}
+
+function responseHasTransportError(response) {
+  return (
+    response.status === 0 ||
+    !response.timings ||
+    !Number.isFinite(response.timings.duration) ||
+    !Number.isFinite(response.timings.waiting)
+  );
+}
+
+function recordStatus(response, expectedStatuses, endpointClass) {
+  const overload = classifyOverloadResponse(response);
+  const failedTransport = responseHasTransportError(response);
+  const edgeHeadersPresent = prohibitedEdgeHeaderNames(response).length > 0;
+  const successful =
+    !failedTransport &&
+    !overload.signaled &&
+    expectedStatuses.includes(response.status);
+  const classifiedOverload = !failedTransport && overload.valid;
+  const classifiedMalformedOverload =
+    !failedTransport && !classifiedOverload && overload.malformed;
+  const classifiedUnexpected =
+    !failedTransport &&
+    !classifiedOverload &&
+    !classifiedMalformedOverload &&
+    !successful;
+  const acceptedOverload =
+    OVERLOAD_POLICY === "allow-explicit" &&
+    classifiedOverload &&
+    !edgeHeadersPresent;
+  const accepted = successful || acceptedOverload;
+  const tags = {
+    endpoint_class: endpointClass,
     status: String(response.status),
     profile: PROFILE,
     contract_mode: CONTRACT_MODE,
-  });
+    overload_policy: OVERLOAD_POLICY,
+  };
+
+  workloadRequests.add(1, tags);
+  availableResponses.add(successful ? 1 : 0, tags);
+  overloadResponses.add(classifiedOverload ? 1 : 0, tags);
+  malformedOverloadResponses.add(classifiedMalformedOverload ? 1 : 0, tags);
+  transportErrors.add(failedTransport ? 1 : 0, tags);
+  unexpectedResponses.add(classifiedUnexpected ? 1 : 0, tags);
+
+  if (successful) {
+    availableDuration.add(response.timings.duration, tags);
+    availableTtfb.add(response.timings.waiting, tags);
+    requestTtfb.add(response.timings.waiting, tags);
+  }
 
   switch (response.status) {
     case 200:
@@ -572,9 +695,11 @@ function recordStatus(response, expectedStatuses) {
       break;
   }
 
-  check(response, {
-    "status is exactly expected": () => accepted,
-  });
+  const statusCheck =
+    OVERLOAD_POLICY === "allow-explicit"
+      ? "status is expected or a correctly attributed capacity overload"
+      : "status is exactly expected";
+  check(response, { [statusCheck]: () => accepted });
 }
 
 function requireProfileInputs() {

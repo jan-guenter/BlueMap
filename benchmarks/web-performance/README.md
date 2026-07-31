@@ -360,11 +360,37 @@ limits. Database resources and placement are recorded with every run rather
 than silently assumed.
 
 The calibrated common baseline and live-viewer cases use 15 requests or
-viewers per second. The optimized horizontal-scaling case uses 40 requests per
-second: a preflight at that rate completed without shedding after the bounded
-Rust HTTP admission ceiling was separated from its smaller database pool,
-while higher exploratory rates crossed the predeclared no-error gate. The
-large-object case uses one 19 MiB response per second.
+viewers per second. The horizontal-scaling case uses 40 requests per second,
+and the large-object case uses one 19 MiB response per second. These are
+deliberate stress loads, so a correctly attributed admission-limit response is
+a measured availability result rather than a transport failure. The fixed
+preflight first establishes zero-overload behavior at low load, then exercises
+that explicit overload contract with the horizontal stress workload before
+formal execution is allowed.
+
+Every matrix case declares one of two overload policies. `forbid` requires
+every workload response to have its normal expected status.
+`allow-explicit` additionally recognizes only this explicit HTTP signature:
+
+- status `503 Service Unavailable`;
+- `X-BlueMap-Overload: capacity`;
+- a positive decimal `Retry-After` value;
+- `Cache-Control` containing the bare `no-store` directive;
+- `Content-Type: application/problem+json`.
+
+Enhanced Java and Rust also return a small problem document with the stable
+code `bluemap_overloaded`. Their unit tests bind that body contract; the load
+test deliberately discards response bodies and uses the unambiguous HTTP
+metadata above to classify capacity overload.
+
+An unmarked `503`, a partial or malformed overload contract, an unexpected
+status, transport failure, Cloudflare header, wrong stored encoding, dropped
+iteration, or saturated load generator still rejects the run. This lets the
+formal stress cases report successful-response availability and goodput
+without mistaking infrastructure errors for intentional server backpressure.
+The `map-mixed-r15`, `map-mixed-horizontal-r40`, and `large-object-r1` cases
+use `allow-explicit`; `live-viewers-r15` uses `forbid` because player and marker
+polling must remain strictly available.
 
 ## Workload phases
 
@@ -391,7 +417,7 @@ both hashes before the first run. `matrix.example.json` deliberately contains
 invalid `REPLACE_WITH_...` values and cannot generate a schedule as checked
 in. This prevents an unresolved example from being mistaken for a formal
 matrix. `matrix.schema.json` and `schedule.schema.json` describe format
-version 3; `generate_schedule.py` additionally enforces ordering,
+version 4; `generate_schedule.py` additionally enforces ordering,
 cross-reference, balance, and placeholder rules.
 
 First deploy each frozen candidate and collect its expected runtime identity
@@ -646,12 +672,24 @@ the controller and cannot become an ordinary failed case followed by more load.
 
 The durable formal controller always selects `ssh-l4-traefik`. Before its
 80-entry schedule it runs a fixed, non-resumable six-entry preflight from the
-same RunPod source: enhanced Java/Rust at one replica for `large-object` rate
-1 and `map-data-mixed` rate 15, then enhanced Java/Rust at three replicas for
-`map-data-mixed` rate 40. The derived inputs and all results are preserved,
-and both the formal orchestrator and offline analyzer require the hash-bound
-passed report. See `controller/README.md` for its exact durations, relay
-headroom gate, and observability limitations.
+same RunPod source in two phases:
+
+1. Strict low-load validation runs enhanced Java and Rust at one replica with
+   `settings` rate 1, then enhanced Java and Rust at three replicas with
+   `conditional` rate 1. These four entries use `overloadPolicy: forbid`.
+2. Explicit-overload stress validation runs enhanced Java and Rust at three
+   replicas with `map-data-mixed` rate 40 and viewers 40. These two entries use
+   `overloadPolicy: allow-explicit`, so intentional capacity shedding is
+   measured while malformed or unmarked failures remain fatal.
+
+All six entries use p95/p99 ceilings of 5,000/10,000 ms, a 30-second warm-up,
+two-minute measurement, 15-second cool-down, exact offered-rate ratio 1.0, 256
+preallocated VUs, and 512 maximum VUs. The formal run begins only after both
+the strict and overload-aware phases pass on the same load generator. The
+derived inputs and all results are preserved, and both the formal orchestrator
+and offline analyzer require the hash-bound passed report. See
+`controller/README.md` for the relay headroom gate and observability
+limitations.
 
 The runner requires explicit names for every web Deployment, web Pod, and,
 for SQL cases, database Pod. File-storage cases omit `--database-pod`; it does
@@ -726,6 +764,7 @@ benchmarks/web-performance/tools/run_origin_case.sh \
   --accept-encoding zstd \
   --stored-encoding zstd \
   --contract-mode enhanced \
+  --overload-policy allow-explicit \
   --warmup 2m \
   --measurement 5m \
   --cooldown-seconds 60 \
@@ -749,6 +788,14 @@ the pre-enhancement Java server, that intentionally lacks the enhanced
 validator contract. Variant ordering comes from the pre-recorded interleaved
 schedule outside this single-case runner.
 
+`--overload-policy` is also bound to the frozen schedule. `forbid` is the
+default and is used by the strict preflight phase. `allow-explicit` is limited
+to the declared preflight and formal stress cases and records a valid capacity
+response separately from successful responses. Legacy candidates have no
+explicit overload contract, so any `503` from them remains an unrecognized
+failure; the policy does not turn arbitrary server or proxy errors into
+accepted load shedding.
+
 The command defaults remain strict `p(95) < 500 ms` and `p(99) < 1000 ms`,
 but the formal matrix uses deliberately broad, predeclared latency ceilings.
 Those ceilings detect a wedged server or invalid run; they are harness-integrity
@@ -756,7 +803,10 @@ guardrails, not ranking SLOs. Results that exceed a ceiling remain reportable
 and must not be selectively discarded or rerun based on which implementation
 was slower. k6 enforces the configured ceilings only on workload-tagged
 measurement traffic; the runner independently writes and checks
-`latency-gate.json`. Warm-up does not enforce latency. For `large-object` only,
+`latency-gate.json`. In `allow-explicit` cases, k6 records the success-only
+`bluemap_available_duration` metric and the runner applies the ceilings to it,
+so fast `503` responses cannot make a slow implementation appear more
+responsive. Warm-up does not enforce latency. For `large-object` only,
 explicit
 `--large-object-latency-p95-ms` and
 `--large-object-latency-p99-ms` overrides are allowed and recorded.
@@ -824,15 +874,16 @@ Literal sensitive environment values and credential-like command arguments are
 redacted while Secret references remain visible. Secrets are refused by the
 general snapshot helper; explicitly selected ConfigMaps use the stricter
 non-secret configuration sanitizer. A result is failed if the HTTP contract
-fails, k6 reports a failed check or threshold, an expected artifact is missing,
-a metrics sample fails, a configured Prometheus capture fails, the achieved
-iteration rate is below the configured fraction of offered load, k6 drops an
-iteration, measured p95/p99 exceeds its gate, selected-node background noise
-exceeds its gates, a selected container restarts, a ConfigMap changes, an
-EndpointSlice target differs at a boundary/sample, or fewer than the requested
-repetitions complete. An empty PostgreSQL series is retained as a valid result
-because exporter metric names vary; it is not silently substituted with a
-broader query.
+fails, a response is neither successful nor a valid policy-allowed overload,
+an overload response is malformed, k6 reports another failed check or
+threshold, an expected artifact is missing, a metrics sample fails, a
+configured Prometheus capture fails, the achieved iteration rate is below the
+configured fraction of offered load, k6 drops an iteration, success-only
+p95/p99 exceeds its gate, selected-node background noise exceeds its gates, a
+selected container restarts, a ConfigMap changes, an EndpointSlice target
+differs at a boundary/sample, or fewer than the requested repetitions complete.
+An empty PostgreSQL series is retained as a valid result because exporter
+metric names vary; it is not silently substituted with a broader query.
 
 ## Correctness gates
 
@@ -893,6 +944,7 @@ k6 run \
   -e RATE=15 \
   -e DURATION=5m \
   -e CONTRACT_MODE=enhanced \
+  -e OVERLOAD_POLICY=allow-explicit \
   -e MIN_ACHIEVED_RATE_RATIO=0.99 \
   -e TRACE_SEED=bluemap-web-performance-v1 \
   -e LATENCY_P95_MS=10000 \
@@ -918,9 +970,21 @@ polls per second because markers are requested once per viewer every ten
 seconds. Player and marker polling are checked independently, and
 their completed counts must sum exactly to k6's overall iteration count. A
 well-performing scenario therefore cannot hide an under-delivering peer.
-Measurement runs also enforce p95/p99 on
-`http_req_duration{traffic:workload}`. Conditional setup traffic is separately
-tagged and excluded from the workload latency and status metrics.
+Measurement runs with `OVERLOAD_POLICY=forbid` enforce p95/p99 on
+`bluemap_available_duration`. `allow-explicit` runs use the same success-only
+metric for the runner's latency gate; accepted overload responses are
+counted for availability but excluded from latency. Conditional setup traffic
+is separately tagged and excluded from workload latency, availability, and
+status metrics.
+
+The offline analyzer derives availability as successful responses divided by
+successful plus valid explicit-overload responses, and goodput as successful
+responses divided by the fixed measurement duration. It preserves the
+overload count/rate next to those values. The analyzer recomputes all
+fail-closed gates from raw metrics; malformed or unmarked `503` responses,
+transport errors, prohibited Cloudflare headers, encoding violations, dropped
+iterations, and load-generator saturation invalidate the case instead of
+reducing its reported availability.
 
 ## Delivery/cache probe
 

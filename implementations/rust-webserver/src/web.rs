@@ -43,6 +43,8 @@ use crate::{
     storage_operation,
 };
 
+const OVERLOAD_PROBLEM: &str = "{\"type\":\"about:blank\",\"title\":\"Service Unavailable\",\"status\":503,\"code\":\"bluemap_overloaded\"}";
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
@@ -272,13 +274,22 @@ fn missing_tile_response() -> Response {
 }
 
 fn overload_response() -> Response {
-    let mut response = error_response(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "too many in-flight map requests",
+    let mut response = Response::new(Body::from(OVERLOAD_PROBLEM));
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    let headers = response.headers_mut();
+    headers.insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("private,no-store,no-transform"),
     );
-    response
-        .headers_mut()
-        .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/problem+json"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-bluemap-overload"),
+        HeaderValue::from_static("capacity"),
+    );
     response
 }
 

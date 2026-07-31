@@ -38,6 +38,7 @@ MAX_VUS="512"
 ACCEPT_ENCODING="zstd"
 STORED_ENCODING="zstd"
 CONTRACT_MODE="enhanced"
+OVERLOAD_POLICY="forbid"
 WARMUP_DURATION="2m"
 MEASUREMENT_DURATION="5m"
 COOLDOWN_SECONDS="60"
@@ -137,6 +138,8 @@ Workload options:
   --accept-encoding NAME          request encoding (default: zstd)
   --stored-encoding NAME          contract expectation (default: zstd)
   --contract-mode enhanced|legacy HTTP contract gate (default: enhanced)
+  --overload-policy forbid|allow-explicit
+                                  overload handling (default: forbid)
   --warmup DURATION               k6 warmup duration (default: 2m)
   --measurement DURATION          measured duration (default: 5m)
   --cooldown-seconds N            no-request cooldown (default: 60)
@@ -408,6 +411,10 @@ while (($# > 0)); do
             CONTRACT_MODE="${2:-}"
             shift 2
             ;;
+        --overload-policy)
+            OVERLOAD_POLICY="${2:-}"
+            shift 2
+            ;;
         --warmup)
             WARMUP_DURATION="${2:-}"
             shift 2
@@ -621,6 +628,14 @@ validate_k6_duration "measurement" "$MEASUREMENT_DURATION"
     die "--trace-seed must be 1-128 characters without line breaks"
 [[ "$CONTRACT_MODE" == "enhanced" || "$CONTRACT_MODE" == "legacy" ]] ||
     die "--contract-mode must be enhanced or legacy"
+[[ "$OVERLOAD_POLICY" == "forbid" ||
+    "$OVERLOAD_POLICY" == "allow-explicit" ]] ||
+    die "--overload-policy must be forbid or allow-explicit"
+if [[ "$OVERLOAD_POLICY" == "allow-explicit" ]]; then
+    [[ "$LOADGEN_BACKEND" == "runpod-ssh" &&
+        "$TRAFFIC_MODE" == "ssh-l4-traefik" ]] ||
+        die "--overload-policy allow-explicit requires RunPod ssh-l4-traefik traffic"
+fi
 [[ "$PROFILE" =~ ^(static|hot-tile|random-tiles|large-tile|settings|textures|large-object|missing-tile|conditional|live-viewers|map-data-mixed|browser-mixed)$ ]] ||
     die "--profile is not a supported benchmark profile"
 [[ "$PROFILE" != "conditional" || "$CONTRACT_MODE" == "enhanced" ]] ||
@@ -794,6 +809,7 @@ if ((schedule_option_count == 3)); then
         --argjson markerIntervalSeconds "$MARKER_INTERVAL_SECONDS" \
         --arg traceSeed "$TRACE_SEED" \
         --arg contractMode "$CONTRACT_MODE" \
+        --arg overloadPolicy "$OVERLOAD_POLICY" \
         --arg acceptEncoding "$ACCEPT_ENCODING" \
         --arg storedEncoding "$STORED_ENCODING" \
         --arg manifestSha256 "$(sha256sum "$MANIFEST" | awk '{print $1}')" \
@@ -817,6 +833,7 @@ if ((schedule_option_count == 3)); then
          and .markerIntervalSeconds == $markerIntervalSeconds
          and .traceSeed == $traceSeed
          and .contractMode == $contractMode
+         and .overloadPolicy == $overloadPolicy
          and .acceptEncoding == $acceptEncoding
          and .storedEncoding == $storedEncoding
          and .manifestSha256 == $manifestSha256
@@ -2201,29 +2218,166 @@ validate_arrival_gate() {
     "$PYTHON_BIN" "$SCRIPT_DIR/check_arrival_gate.py" "${arguments[@]}"
 }
 
-validate_latency_gate() {
+validate_response_policy_gate() {
     local summary="$1"
     local destination="$2"
 
     jq \
-        --argjson maximumP95Milliseconds "$EFFECTIVE_LATENCY_P95_MS" \
-        --argjson maximumP99Milliseconds "$EFFECTIVE_LATENCY_P99_MS" \
-        '(.metrics["http_req_duration{traffic:workload}"] // {}) as $metric
-        | ($metric.values // $metric) as $values
+        --arg overloadPolicy "$OVERLOAD_POLICY" \
+        '
+        def counter($name; $field):
+            (.metrics[$name] // null) as $metric
+            | if $metric == null
+              then null
+              else (($metric.values // $metric)[$field] // null)
+              end;
+        counter("bluemap_workload_requests"; "count") as $workload
+        | counter("http_reqs{traffic:workload}"; "count") as $httpWorkload
+        | counter("iterations"; "count") as $iterations
+        | counter("bluemap_available_responses"; "count") as $available
+        | counter("bluemap_overload_responses"; "count") as $overload
+        | counter("bluemap_malformed_overload_responses"; "count") as $malformed
+        | counter("bluemap_transport_errors"; "count") as $transport
+        | counter("bluemap_unexpected_responses"; "count") as $unexpected
+        | counter("bluemap_workload_requests"; "rate") as $workloadRate
+        | counter("bluemap_available_responses"; "rate") as $availableRate
+        | counter("bluemap_overload_responses"; "rate") as $overloadRate
+        | [
+            $workload,
+            $httpWorkload,
+            $iterations,
+            $available,
+            $overload,
+            $malformed,
+            $transport,
+            $unexpected
+          ]
+            as $counts
+        | ($counts | all(
+            type == "number" and . >= 0 and floor == .
+          )) as $validCounts
+        | ([$workloadRate, $availableRate, $overloadRate] | all(
+            type == "number" and . >= 0
+          )) as $validRates
+        | (if $validCounts
+           then $available + $overload + $malformed + $transport + $unexpected
+           else null
+           end) as $classified
+        | (
+            $validCounts
+            and $classified == $workload
+          )
+            as $partitionValid
+        | (
+            $validCounts
+            and $workload > 0
+            and $httpWorkload == $workload
+            and $iterations == $workload
+          ) as $requestIterationIdentityValid
+        | ($overloadPolicy == "allow-explicit" or $overload == 0)
+            as $policyAllowsOverload
+        | ($overloadPolicy == "allow-explicit" or $available > 0)
+            as $availabilitySatisfied
         | {
-            maximumP95Milliseconds: $maximumP95Milliseconds,
-            maximumP99Milliseconds: $maximumP99Milliseconds,
-            observedP95Milliseconds: $values["p(95)"],
-            observedP99Milliseconds: $values["p(99)"],
+            formatVersion: 1,
+            overloadPolicy: $overloadPolicy,
+            counts: {
+                workloadRequests: $workload,
+                httpWorkloadRequests: $httpWorkload,
+                completedIterations: $iterations,
+                availableResponses: $available,
+                overloadResponses: $overload,
+                malformedOverloadResponses: $malformed,
+                transportErrors: $transport,
+                unexpectedResponses: $unexpected
+            },
+            ratesPerSecond: {
+                workloadRequests: $workloadRate,
+                availableResponses: $availableRate,
+                overloadResponses: $overloadRate
+            },
+            ratios: {
+                available: (
+                    if $validCounts and $workload > 0
+                    then $available / $workload
+                    else null
+                    end
+                ),
+                overload: (
+                    if $validCounts and $workload > 0
+                    then $overload / $workload
+                    else null
+                    end
+                )
+            },
+            classifiedResponses: $classified,
+            partitionValid: $partitionValid,
+            requestIterationIdentityValid: $requestIterationIdentityValid,
+            policyAllowsOverload: $policyAllowsOverload,
+            availabilitySatisfied: $availabilitySatisfied,
             passed: (
-                ($values["p(95)"] | type) == "number"
-                and ($values["p(99)"] | type) == "number"
-                and $values["p(95)"] < $maximumP95Milliseconds
-                and $values["p(99)"] < $maximumP99Milliseconds
+                $partitionValid
+                and $requestIterationIdentityValid
+                and $validRates
+                and $malformed == 0
+                and $transport == 0
+                and $unexpected == 0
+                and $policyAllowsOverload
+                and $availabilitySatisfied
             )
         }' "$summary" > "$destination" || return 1
 
     jq -e '.passed == true' "$destination" >/dev/null
+}
+
+validate_latency_gate() {
+    local summary="$1"
+    local destination="$2"
+    local latency_metric="bluemap_available_duration"
+
+    jq \
+        --arg latencyMetric "$latency_metric" \
+        --arg overloadPolicy "$OVERLOAD_POLICY" \
+        --argjson maximumP95Milliseconds "$EFFECTIVE_LATENCY_P95_MS" \
+        --argjson maximumP99Milliseconds "$EFFECTIVE_LATENCY_P99_MS" \
+        '(.metrics[$latencyMetric] // {}) as $metric
+        | ($metric.values // $metric) as $values
+        | (.metrics["bluemap_available_responses"] // {}) as $availableMetric
+        | (($availableMetric.values // $availableMetric).count // null)
+            as $availableResponses
+        | ($availableResponses == 0) as $notApplicable
+        | {
+            metric: $latencyMetric,
+            overloadPolicy: $overloadPolicy,
+            applicable: ($notApplicable | not),
+            availableResponses: $availableResponses,
+            maximumP95Milliseconds: $maximumP95Milliseconds,
+            maximumP99Milliseconds: $maximumP99Milliseconds,
+            observedP95Milliseconds: (
+                if $notApplicable then null else $values["p(95)"] end
+            ),
+            observedP99Milliseconds: (
+                if $notApplicable then null else $values["p(99)"] end
+            ),
+            passed: (
+                if $notApplicable
+                then null
+                else (
+                    ($availableResponses | type) == "number"
+                    and $availableResponses > 0
+                    and ($values["p(95)"] | type) == "number"
+                    and ($values["p(99)"] | type) == "number"
+                    and $values["p(95)"] < $maximumP95Milliseconds
+                    and $values["p(99)"] < $maximumP99Milliseconds
+                )
+                end
+            )
+        }' "$summary" > "$destination" || return 1
+
+    jq -e '
+        .passed == true
+        or (.applicable == false and .passed == null)
+    ' "$destination" >/dev/null
 }
 
 validate_ssh_l4_transport_evidence() {
@@ -2595,6 +2749,7 @@ print(math.ceil(value * factor) + 90)
         -e "ACCEPT_ENCODING=$ACCEPT_ENCODING"
         -e "STORED_ENCODING=$STORED_ENCODING"
         -e "CONTRACT_MODE=$CONTRACT_MODE"
+        -e "OVERLOAD_POLICY=$OVERLOAD_POLICY"
         "/artifacts/$CASE_ID/inputs/bluemap.js"
     )
     if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
@@ -2671,6 +2826,14 @@ print(math.ceil(value * factor) + 90)
             "$duration"; then
         record_failure \
             "Repetition $repetition $phase: scheduled/completed or dropped-iteration gate failed"
+        artifact_failure=1
+    fi
+    if [[ -s "$local_dir/summary.json" ]] &&
+        ! validate_response_policy_gate \
+            "$local_dir/summary.json" \
+            "$local_dir/response-policy-gate.json"; then
+        record_failure \
+            "Repetition $repetition $phase: response classification or overload-policy gate failed"
         artifact_failure=1
     fi
     if [[ "$phase" == "measurement" &&
@@ -2794,6 +2957,7 @@ write_workload_metadata() {
         --arg acceptEncoding "$ACCEPT_ENCODING" \
         --arg storedEncoding "$STORED_ENCODING" \
         --arg contractMode "$CONTRACT_MODE" \
+        --arg overloadPolicy "$OVERLOAD_POLICY" \
         --arg warmup "$WARMUP_DURATION" \
         --arg measurement "$MEASUREMENT_DURATION" \
         --argjson cooldownSeconds "$COOLDOWN_SECONDS" \
@@ -2974,6 +3138,7 @@ write_workload_metadata() {
                 acceptEncoding: $acceptEncoding,
                 storedEncoding: $storedEncoding,
                 contractMode: $contractMode,
+                overloadPolicy: $overloadPolicy,
                 warmup: $warmup,
                 measurement: $measurement,
                 cooldownSeconds: $cooldownSeconds,

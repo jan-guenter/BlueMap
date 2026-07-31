@@ -981,6 +981,7 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("--origin-base-url", result.stdout)
         self.assertIn("--formal-run-id", result.stdout)
         self.assertIn("--require-edge-bypass", result.stdout)
+        self.assertIn("--overload-policy forbid|allow-explicit", result.stdout)
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
         self.assertIn("configmap_references.py", runner)
         self.assertIn("check_arrival_gate.py", runner)
@@ -1020,13 +1021,21 @@ class OriginRunnerStaticTests(unittest.TestCase):
         matrix = self.resolved_matrix()
         incompatible = json.loads(json.dumps(matrix))
         incompatible["formatVersion"] = 2
-        with self.assertRaisesRegex(ValueError, "formatVersion must be 3"):
+        with self.assertRaisesRegex(ValueError, "formatVersion must be 4"):
             generate_schedule.validate_matrix(incompatible)
+        missing_policy = json.loads(json.dumps(matrix))
+        del missing_policy["cases"][0]["overloadPolicy"]
+        with self.assertRaisesRegex(ValueError, "invalid overloadPolicy"):
+            generate_schedule.validate_matrix(missing_policy)
+        invalid_policy = json.loads(json.dumps(matrix))
+        invalid_policy["cases"][0]["overloadPolicy"] = "ignore"
+        with self.assertRaisesRegex(ValueError, "invalid overloadPolicy"):
+            generate_schedule.validate_matrix(invalid_policy)
         first = generate_schedule.build_schedule(matrix, digest)
         second = generate_schedule.build_schedule(matrix, digest)
 
         self.assertEqual(first, second)
-        self.assertEqual(first["formatVersion"], 3)
+        self.assertEqual(first["formatVersion"], 4)
         self.assertEqual(
             first["benchmarkGitRevision"],
             matrix["benchmarkGitRevision"],
@@ -1052,6 +1061,12 @@ class OriginRunnerStaticTests(unittest.TestCase):
                 variant["databaseBackend"],
             )
             self.assertEqual(entry["replicaCount"], variant["replicaCount"])
+            case = next(
+                item
+                for item in matrix["cases"]
+                if item["id"] == entry["matrixCaseId"]
+            )
+            self.assertEqual(entry["overloadPolicy"], case["overloadPolicy"])
             self.assertEqual(
                 entry["benchmarkGitRevision"],
                 matrix["benchmarkGitRevision"],
@@ -1086,6 +1101,15 @@ class OriginRunnerStaticTests(unittest.TestCase):
 
         tampered = json.loads(json.dumps(first))
         tampered["entries"][0]["variantId"] = "tampered"
+        with self.assertRaisesRegex(ValueError, "does not exactly match"):
+            generate_schedule.validate_schedule(matrix, digest, tampered)
+
+        tampered = json.loads(json.dumps(first))
+        next(
+            entry
+            for entry in tampered["entries"]
+            if entry["overloadPolicy"] == "allow-explicit"
+        )["overloadPolicy"] = "forbid"
         with self.assertRaisesRegex(ValueError, "does not exactly match"):
             generate_schedule.validate_schedule(matrix, digest, tampered)
 
@@ -1157,8 +1181,32 @@ class OriginRunnerStaticTests(unittest.TestCase):
             (BENCHMARK_ROOT / "schedule.schema.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(matrix_schema["properties"]["formatVersion"]["const"], 3)
-        self.assertEqual(schedule_schema["properties"]["formatVersion"]["const"], 3)
+        self.assertEqual(matrix_schema["properties"]["formatVersion"]["const"], 4)
+        self.assertEqual(schedule_schema["properties"]["formatVersion"]["const"], 4)
+        self.assertIn(
+            "overloadPolicy",
+            matrix_schema["$defs"]["case"]["required"],
+        )
+        self.assertIn(
+            "overloadPolicy",
+            schedule_schema["$defs"]["entry"]["required"],
+        )
+        self.assertEqual(
+            set(
+                matrix_schema["$defs"]["case"]["properties"][
+                    "overloadPolicy"
+                ]["enum"]
+            ),
+            {"forbid", "allow-explicit"},
+        )
+        self.assertEqual(
+            set(
+                schedule_schema["$defs"]["entry"]["properties"][
+                    "overloadPolicy"
+                ]["enum"]
+            ),
+            {"forbid", "allow-explicit"},
+        )
         self.assertIn(
             "benchmarkGitRevision",
             matrix_schema["required"],
@@ -1188,12 +1236,12 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn('case "missing-tile":', script)
         self.assertIn('request(manifest.missingTile, "tile-missing", [204])', script)
         self.assertIn("conditional-seed", script)
-        self.assertIn('recordStatus(response, [304])', script)
+        self.assertIn('recordStatus(response, [304], "conditional")', script)
         self.assertIn("playerPolling", script)
         self.assertIn("markerPolling", script)
         self.assertIn("exec.scenario.iterationInTest", script)
         self.assertIn("TRACE_SEED", script)
-        self.assertIn("http_req_duration", script)
+        self.assertIn("bluemap_available_duration", script)
         self.assertIn('"iterations{scenario:workload}"', script)
         self.assertIn('"iterations{scenario:playerPolling}"', script)
         self.assertIn('"iterations{scenario:markerPolling}"', script)
@@ -1209,6 +1257,49 @@ class OriginRunnerStaticTests(unittest.TestCase):
             self.assertIn(f'"{status}"', script)
         self.assertIn("!originServedCacheStatuses.has(cacheStatus)", script)
         self.assertIn("FORMAL_RUN_ID.length > 0", script)
+
+    def test_overload_policy_is_fail_closed_and_uses_success_only_latency(
+        self,
+    ) -> None:
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+        script = (BENCHMARK_ROOT / "k6" / "bluemap.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('"$OVERLOAD_POLICY" == "forbid"', runner)
+        self.assertIn('"$OVERLOAD_POLICY" == "allow-explicit"', runner)
+        self.assertIn('.overloadPolicy == $overloadPolicy', runner)
+        self.assertIn('-e "OVERLOAD_POLICY=$OVERLOAD_POLICY"', runner)
+        self.assertIn('latency_metric="bluemap_available_duration"', runner)
+        self.assertIn("validate_response_policy_gate", runner)
+        self.assertIn("partitionValid", runner)
+
+        self.assertIn(
+            '["forbid", "allow-explicit"].includes(OVERLOAD_POLICY)',
+            script,
+        )
+        self.assertIn("response.status === 503", script)
+        self.assertIn('responseHeader(response, "x-bluemap-overload")', script)
+        self.assertIn('=== "capacity"', script)
+        self.assertIn('responseHeader(response, "retry-after")', script)
+        self.assertIn('responseHeader(response, "cache-control")', script)
+        self.assertIn('responseHeader(response, "content-type")', script)
+        self.assertIn('"application/problem+json"', script)
+        self.assertIn('"no-store"', script)
+        self.assertIn("bluemap_workload_requests", script)
+        self.assertIn("bluemap_available_responses", script)
+        self.assertIn("bluemap_overload_responses", script)
+        self.assertIn("bluemap_malformed_overload_responses", script)
+        self.assertIn("bluemap_transport_errors", script)
+        self.assertIn("bluemap_unexpected_responses", script)
+        self.assertIn("bluemap_available_duration", script)
+        self.assertIn('dropped_iterations: ["count==0"]', script)
+        self.assertNotIn('http_req_failed{traffic:workload}', script)
+        self.assertIn(
+            'commonThresholds.bluemap_overload_responses = ["count==0"]',
+            script,
+        )
+        self.assertIn('OVERLOAD_POLICY === "allow-explicit"', script)
 
     def test_runpod_transport_keeps_origin_and_public_urls_distinct(self) -> None:
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
@@ -1677,6 +1768,15 @@ class OriginRunnerStaticTests(unittest.TestCase):
         )
         self.assertEqual(cases["live-viewers-r15"]["viewers"], 15)
         self.assertEqual(cases["large-object-r1"]["rate"], 1)
+        self.assertEqual(
+            {case_id: case["overloadPolicy"] for case_id, case in cases.items()},
+            {
+                "map-mixed-r15": "allow-explicit",
+                "map-mixed-horizontal-r40": "allow-explicit",
+                "live-viewers-r15": "forbid",
+                "large-object-r1": "allow-explicit",
+            },
+        )
 
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
         script = (BENCHMARK_ROOT / "k6" / "bluemap.js").read_text(

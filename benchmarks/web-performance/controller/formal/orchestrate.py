@@ -99,28 +99,30 @@ PREFLIGHT_CONTROLS = {
 }
 PREFLIGHT_CASES = (
     {
-        "id": "preflight-large-r1",
-        "profile": "large-object",
+        "id": "preflight-settings-r1",
+        "profile": "settings",
         "rate": 1,
-        "viewers": 15,
+        "viewers": 1,
         "markerIntervalSeconds": 10,
-        "latencyP95Milliseconds": 10000,
-        "latencyP99Milliseconds": 20000,
+        "latencyP95Milliseconds": 5000,
+        "latencyP99Milliseconds": 10000,
         "acceptEncoding": "zstd",
         "storedEncoding": "zstd",
+        "overloadPolicy": "forbid",
         "variants": ["java-new-postgresql", "rust-postgresql"],
     },
     {
-        "id": "preflight-map-r15",
-        "profile": "map-data-mixed",
-        "rate": 15,
-        "viewers": 15,
+        "id": "preflight-conditional-horizontal-r1",
+        "profile": "conditional",
+        "rate": 1,
+        "viewers": 1,
         "markerIntervalSeconds": 10,
-        "latencyP95Milliseconds": 10000,
-        "latencyP99Milliseconds": 20000,
+        "latencyP95Milliseconds": 5000,
+        "latencyP99Milliseconds": 10000,
         "acceptEncoding": "zstd",
         "storedEncoding": "zstd",
-        "variants": ["java-new-postgresql", "rust-postgresql"],
+        "overloadPolicy": "forbid",
+        "variants": ["java-new-postgresql-r3", "rust-postgresql-r3"],
     },
     {
         "id": "preflight-horizontal-r40",
@@ -132,14 +134,16 @@ PREFLIGHT_CASES = (
         "latencyP99Milliseconds": 10000,
         "acceptEncoding": "zstd",
         "storedEncoding": "zstd",
+        "overloadPolicy": "allow-explicit",
         "variants": ["java-new-postgresql-r3", "rust-postgresql-r3"],
     },
 )
-PREFLIGHT_SOURCE_CASE_IDS = (
-    "large-object-r1",
-    "map-mixed-r15",
-    "map-mixed-horizontal-r40",
-)
+FORMAL_OVERLOAD_POLICIES = {
+    "map-mixed-r15": "allow-explicit",
+    "map-mixed-horizontal-r40": "allow-explicit",
+    "live-viewers-r15": "forbid",
+    "large-object-r1": "allow-explicit",
+}
 PREFLIGHT_RELAY_THRESHOLDS = {
     "p95CpuLimitRatio": 0.70,
     "maximumCpuLimitRatio": 0.90,
@@ -753,8 +757,8 @@ def validate_formal_documents(
     matrix = load_json(matrix_path)
     schedule = load_json(schedule_path)
     manifest = load_json(manifest_path)
-    if matrix.get("formatVersion") != 3 or schedule.get("formatVersion") != 3:
-        raise SafetyError("Formal matrix and schedule must both use formatVersion 3")
+    if matrix.get("formatVersion") != 4 or schedule.get("formatVersion") != 4:
+        raise SafetyError("Formal matrix and schedule must both use formatVersion 4")
     if matrix.get("repetitions") != 5 or schedule.get("repetitions") != 5:
         raise SafetyError("The formal matrix must contain exactly five blocks")
     variants = matrix.get("variants")
@@ -824,6 +828,9 @@ def validate_formal_documents(
             "databaseBackend": "postgresql",
             "replicaCount": target.replica_count,
             "contractMode": target.contract_mode,
+            "overloadPolicy": FORMAL_OVERLOAD_POLICIES.get(
+                entry.get("matrixCaseId")
+            ),
             "benchmarkGitRevision": benchmark_revision,
             "mapIds": matrix.get("mapIds"),
         }
@@ -852,42 +859,8 @@ def derive_preflight_matrix(formal_matrix: dict[str, Any]) -> dict[str, Any]:
     selected = [copy.deepcopy(by_id[variant_id]) for variant_id in PREFLIGHT_VARIANTS]
     if any(variant.get("contractMode") != "enhanced" for variant in selected):
         raise SafetyError("Every preflight variant must use the enhanced contract")
-    formal_cases = formal_matrix.get("cases")
-    if not isinstance(formal_cases, list):
-        raise SafetyError("Formal cases are unavailable for preflight derivation")
-    formal_cases_by_id = {
-        item.get("id"): item
-        for item in formal_cases
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    cases: list[dict[str, Any]] = []
-    for source_id, required in zip(PREFLIGHT_SOURCE_CASE_IDS, PREFLIGHT_CASES):
-        source = formal_cases_by_id.get(source_id)
-        if not isinstance(source, dict):
-            raise SafetyError(f"Formal inputs omit preflight source case {source_id}")
-        source_controls = {
-            key: copy.deepcopy(value)
-            for key, value in source.items()
-            if key not in {"id", "variants"}
-        }
-        required_controls = {
-            key: copy.deepcopy(value)
-            for key, value in required.items()
-            if key not in {"id", "variants"}
-        }
-        if source_controls != required_controls:
-            raise SafetyError(
-                f"Formal source case {source_id} differs from preflight controls"
-            )
-        cases.append(
-            {
-                "id": required["id"],
-                **source_controls,
-                "variants": copy.deepcopy(required["variants"]),
-            }
-        )
     return {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "benchmarkGitRevision": formal_matrix["benchmarkGitRevision"],
         "manifestSha256": formal_matrix["manifestSha256"],
         "mapIds": copy.deepcopy(formal_matrix["mapIds"]),
@@ -895,7 +868,7 @@ def derive_preflight_matrix(formal_matrix: dict[str, Any]) -> dict[str, Any]:
         "traceSeed": formal_matrix["traceSeed"],
         "repetitions": 1,
         "controls": copy.deepcopy(PREFLIGHT_CONTROLS),
-        "cases": cases,
+        "cases": [copy.deepcopy(case) for case in PREFLIGHT_CASES],
         "variants": selected,
     }
 
@@ -927,7 +900,7 @@ def validate_preflight_documents(
         )
     entries = schedule.get("entries")
     if (
-        schedule.get("formatVersion") != 3
+        schedule.get("formatVersion") != 4
         or schedule.get("repetitions") != 1
         or schedule.get("matrixSha256") != file_sha256(matrix_path)
         or not isinstance(entries, list)
@@ -955,6 +928,12 @@ def validate_preflight_documents(
         or entry.get("measurementDuration") != "2m"
         or entry.get("cooldownSeconds") != 15
         or entry.get("minimumAchievedRateRatio") != 1.0
+        or entry.get("overloadPolicy")
+        != (
+            "allow-explicit"
+            if entry.get("matrixCaseId") == "preflight-horizontal-r40"
+            else "forbid"
+        )
         for entry in entries
     ):
         raise SafetyError("Preflight schedule controls differ from the fixed contract")
@@ -2314,6 +2293,8 @@ def build_runner_command(
         str(entry["storedEncoding"]),
         "--contract-mode",
         str(entry["contractMode"]),
+        "--overload-policy",
+        str(entry["overloadPolicy"]),
         "--warmup",
         str(entry["warmupDuration"]),
         "--measurement",
@@ -3933,7 +3914,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     json.dumps(
                         {
                             "valid": True,
-                            "formatVersion": 3,
+                            "formatVersion": 4,
                             "entries": len(schedule["entries"]),
                             "blocks": 5,
                             "benchmarkGitRevision": matrix["benchmarkGitRevision"],

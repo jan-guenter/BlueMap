@@ -70,7 +70,7 @@ class RunPodOrchestratorTests(unittest.TestCase):
         second = orchestrate.derive_preflight_matrix(formal)
         self.assertEqual(first, second)
         self.assertEqual(formal, original)
-        self.assertEqual(first["formatVersion"], 3)
+        self.assertEqual(first["formatVersion"], 4)
         self.assertEqual(first["repetitions"], 1)
         self.assertEqual(
             first["scheduleSeed"],
@@ -86,6 +86,15 @@ class RunPodOrchestratorTests(unittest.TestCase):
         )
         self.assertEqual(first["controls"], orchestrate.PREFLIGHT_CONTROLS)
         self.assertEqual(
+            orchestrate.FORMAL_OVERLOAD_POLICIES,
+            {
+                "map-mixed-r15": "allow-explicit",
+                "map-mixed-horizontal-r40": "allow-explicit",
+                "live-viewers-r15": "forbid",
+                "large-object-r1": "allow-explicit",
+            },
+        )
+        self.assertEqual(
             [variant["id"] for variant in first["variants"]],
             list(orchestrate.PREFLIGHT_VARIANTS),
         )
@@ -93,16 +102,72 @@ class RunPodOrchestratorTests(unittest.TestCase):
         for variant in first["variants"]:
             self.assertEqual(variant, formal_variants[variant["id"]])
         self.assertEqual(first["cases"], list(orchestrate.PREFLIGHT_CASES))
+        self.assertEqual(
+            [
+                {
+                    "id": case["id"],
+                    "profile": case["profile"],
+                    "rate": case["rate"],
+                    "variants": case["variants"],
+                    "overloadPolicy": case["overloadPolicy"],
+                    "latencyP95Milliseconds": case[
+                        "latencyP95Milliseconds"
+                    ],
+                    "latencyP99Milliseconds": case[
+                        "latencyP99Milliseconds"
+                    ],
+                }
+                for case in first["cases"]
+            ],
+            [
+                {
+                    "id": "preflight-settings-r1",
+                    "profile": "settings",
+                    "rate": 1,
+                    "variants": [
+                        "java-new-postgresql",
+                        "rust-postgresql",
+                    ],
+                    "overloadPolicy": "forbid",
+                    "latencyP95Milliseconds": 5000,
+                    "latencyP99Milliseconds": 10000,
+                },
+                {
+                    "id": "preflight-conditional-horizontal-r1",
+                    "profile": "conditional",
+                    "rate": 1,
+                    "variants": [
+                        "java-new-postgresql-r3",
+                        "rust-postgresql-r3",
+                    ],
+                    "overloadPolicy": "forbid",
+                    "latencyP95Milliseconds": 5000,
+                    "latencyP99Milliseconds": 10000,
+                },
+                {
+                    "id": "preflight-horizontal-r40",
+                    "profile": "map-data-mixed",
+                    "rate": 40,
+                    "variants": [
+                        "java-new-postgresql-r3",
+                        "rust-postgresql-r3",
+                    ],
+                    "overloadPolicy": "allow-explicit",
+                    "latencyP95Milliseconds": 5000,
+                    "latencyP99Milliseconds": 10000,
+                },
+            ],
+        )
 
         tampered = copy.deepcopy(formal)
         next(
-            case
-            for case in tampered["cases"]
-            if case["id"] == "large-object-r1"
-        )["rate"] = 2
+            variant
+            for variant in tampered["variants"]
+            if variant["id"] == "java-new-postgresql"
+        )["contractMode"] = "legacy"
         with self.assertRaisesRegex(
             orchestrate.SafetyError,
-            "differs from preflight controls",
+            "Every preflight variant must use the enhanced contract",
         ):
             orchestrate.derive_preflight_matrix(tampered)
 
@@ -152,11 +217,51 @@ class RunPodOrchestratorTests(unittest.TestCase):
                 [
                     ("preflight-horizontal-r40", "rust-postgresql-r3"),
                     ("preflight-horizontal-r40", "java-new-postgresql-r3"),
-                    ("preflight-large-r1", "java-new-postgresql"),
-                    ("preflight-large-r1", "rust-postgresql"),
-                    ("preflight-map-r15", "rust-postgresql"),
-                    ("preflight-map-r15", "java-new-postgresql"),
+                    ("preflight-conditional-horizontal-r1", "rust-postgresql-r3"),
+                    ("preflight-conditional-horizontal-r1", "java-new-postgresql-r3"),
+                    ("preflight-settings-r1", "java-new-postgresql"),
+                    ("preflight-settings-r1", "rust-postgresql"),
                 ],
+            )
+            self.assertEqual(
+                [entry["overloadPolicy"] for entry in schedule["entries"]],
+                [
+                    "allow-explicit",
+                    "allow-explicit",
+                    "forbid",
+                    "forbid",
+                    "forbid",
+                    "forbid",
+                ],
+            )
+            self.assertTrue(
+                all(entry["contractMode"] == "enhanced" for entry in schedule["entries"])
+            )
+            self.assertEqual(
+                [entry["rate"] for entry in schedule["entries"]],
+                [40, 40, 1, 1, 1, 1],
+            )
+            self.assertEqual(
+                [entry["viewers"] for entry in schedule["entries"]],
+                [40, 40, 1, 1, 1, 1],
+            )
+            self.assertTrue(
+                all(
+                    entry["latencyP95Milliseconds"] == 5000
+                    and entry["latencyP99Milliseconds"] == 10000
+                    for entry in schedule["entries"]
+                )
+            )
+            self.assertTrue(
+                all(
+                    entry["warmupDuration"] == "30s"
+                    and entry["measurementDuration"] == "2m"
+                    and entry["cooldownSeconds"] == 15
+                    and entry["minimumAchievedRateRatio"] == 1.0
+                    and entry["preAllocatedVUs"] == 256
+                    and entry["maxVUs"] == 512
+                    for entry in schedule["entries"]
+                )
             )
 
     def test_preflight_cli_is_non_resumable_and_has_a_distinct_confirmation(
@@ -1123,6 +1228,7 @@ class RunPodOrchestratorTests(unittest.TestCase):
         self,
     ) -> None:
         entry = schedule_entry()
+        entry["overloadPolicy"] = "allow-explicit"
         target = orchestrate.TARGETS[entry["variantId"]]
         web_pods = [
             f"{target.deployment}-resolved-pod-{index}"
@@ -1174,6 +1280,10 @@ class RunPodOrchestratorTests(unittest.TestCase):
         self.assertEqual(option(command, "--traffic-service"), "bluemap-perf-public")
         self.assertEqual(option(command, "--traffic-service-port"), "8100")
         self.assertEqual(option(command, "--formal-run-id"), RUN_ID)
+        self.assertEqual(
+            option(command, "--overload-policy"),
+            "allow-explicit",
+        )
         self.assertIn("--require-edge-bypass", command)
         self.assertEqual(
             [

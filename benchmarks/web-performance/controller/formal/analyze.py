@@ -116,6 +116,22 @@ PROFILES = {
     "browser-mixed",
 }
 
+OVERLOAD_POLICIES = {"forbid", "allow-explicit"}
+FORMAL_OVERLOAD_POLICIES = {
+    "map-mixed-r15": "allow-explicit",
+    "map-mixed-horizontal-r40": "allow-explicit",
+    "live-viewers-r15": "forbid",
+    "large-object-r1": "allow-explicit",
+}
+RESPONSE_CLASSIFICATION_METRICS = {
+    "workloadRequests": "bluemap_workload_requests",
+    "availableResponses": "bluemap_available_responses",
+    "overloadResponses": "bluemap_overload_responses",
+    "malformedOverloadResponses": "bluemap_malformed_overload_responses",
+    "transportErrors": "bluemap_transport_errors",
+    "unexpectedResponses": "bluemap_unexpected_responses",
+}
+
 AGGREGATE_METRICS = {
     "offeredThroughput": ("metrics", "throughput", "offeredIterationsPerSecond"),
     "achievedThroughput": (
@@ -124,6 +140,15 @@ AGGREGATE_METRICS = {
         "achievedIterationsPerSecond",
     ),
     "achievedRateRatio": ("metrics", "throughput", "achievedRateRatio"),
+    "goodput": ("metrics", "throughput", "goodputResponsesPerSecond"),
+    "goodputOfferedRatio": (
+        "metrics",
+        "throughput",
+        "goodputOfferedRatio",
+    ),
+    "availability": ("metrics", "requests", "availability"),
+    "overloadCount": ("metrics", "requests", "overloadCount"),
+    "overloadRate": ("metrics", "requests", "overloadRate"),
     "failureRate": ("metrics", "requests", "failureRate"),
     "droppedRate": ("metrics", "throughput", "droppedRate"),
     "latencyP50Milliseconds": ("metrics", "latencyMilliseconds", "p50"),
@@ -449,8 +474,8 @@ def validate_digest(value: Any, label: str, *, prefix: bool = False) -> None:
 def validate_matrix_constraints(
     matrix: dict[str, Any], *, expected_repetitions: int = EXPECTED_BLOCKS
 ) -> None:
-    if matrix.get("formatVersion") != 3:
-        raise AnalysisFailure("matrix formatVersion must be 3")
+    if matrix.get("formatVersion") != 4:
+        raise AnalysisFailure("matrix formatVersion must be 4")
     if matrix.get("repetitions") != expected_repetitions:
         raise AnalysisFailure(
             f"matrix must have exactly {expected_repetitions} repetitions"
@@ -593,6 +618,8 @@ def validate_matrix_constraints(
         for key in ("acceptEncoding", "storedEncoding"):
             if case.get(key) not in {"gzip", "zstd", "deflate", "identity"}:
                 raise AnalysisFailure(f"case {case['id']} {key} is invalid")
+        if case.get("overloadPolicy") not in OVERLOAD_POLICIES:
+            raise AnalysisFailure(f"case {case['id']} overloadPolicy is invalid")
         selected = case.get("variants")
         if (
             not isinstance(selected, list)
@@ -603,6 +630,15 @@ def validate_matrix_constraints(
             raise AnalysisFailure(f"case {case['id']} variants are invalid")
     if len(set(case_ids)) != len(case_ids):
         raise AnalysisFailure("matrix case IDs are not unique")
+    if expected_repetitions == EXPECTED_BLOCKS:
+        if set(case_ids) != set(FORMAL_OVERLOAD_POLICIES):
+            raise AnalysisFailure("formal matrix case identity is invalid")
+        for case in cases:
+            expected_policy = FORMAL_OVERLOAD_POLICIES[case["id"]]
+            if case["overloadPolicy"] != expected_policy:
+                raise AnalysisFailure(
+                    f"case {case['id']} overloadPolicy must be {expected_policy}"
+                )
 
 
 def build_expected_schedule(
@@ -624,7 +660,7 @@ def build_expected_schedule(
         or not isinstance(controls, dict)
     ):
         raise AnalysisFailure(
-            "matrix must be the format-v3 deterministic benchmark design"
+            "matrix must be the format-v4 deterministic benchmark design"
         )
     if (
         not isinstance(expected_repetitions, int)
@@ -701,6 +737,7 @@ def build_expected_schedule(
                         ],
                         "acceptEncoding": case["acceptEncoding"],
                         "storedEncoding": case["storedEncoding"],
+                        "overloadPolicy": case["overloadPolicy"],
                         "traceSeed": matrix["traceSeed"],
                         "manifestSha256": matrix["manifestSha256"],
                         "mapIds": matrix["mapIds"],
@@ -721,7 +758,7 @@ def build_expected_schedule(
                     }
                 )
     return {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "matrixSha256": matrix_digest,
         "scheduleSeed": schedule_seed,
         "traceSeed": matrix["traceSeed"],
@@ -1756,80 +1793,49 @@ def validate_preflight_attestation(
         ]
     except KeyError as error:
         raise AnalysisFailure("formal preflight variant is missing") from error
-    formal_cases = {
-        case["id"]: case
-        for case in matrix["cases"]
-        if case["id"]
-        in {
-            "large-object-r1",
-            "map-mixed-r15",
-            "map-mixed-horizontal-r40",
-        }
-    }
-    expected_preflight_cases: list[dict[str, Any]] = []
-    for source_id, expected_case in (
-        (
-            "large-object-r1",
-            {
-                "id": "preflight-large-r1",
-                "profile": "large-object",
-                "rate": 1,
-                "viewers": 15,
-                "markerIntervalSeconds": 10,
-                "latencyP95Milliseconds": 10000,
-                "latencyP99Milliseconds": 20000,
-                "acceptEncoding": "zstd",
-                "storedEncoding": "zstd",
-                "variants": ["java-new-postgresql", "rust-postgresql"],
-            },
-        ),
-        (
-            "map-mixed-r15",
-            {
-                "id": "preflight-map-r15",
-                "profile": "map-data-mixed",
-                "rate": 15,
-                "viewers": 15,
-                "markerIntervalSeconds": 10,
-                "latencyP95Milliseconds": 10000,
-                "latencyP99Milliseconds": 20000,
-                "acceptEncoding": "zstd",
-                "storedEncoding": "zstd",
-                "variants": ["java-new-postgresql", "rust-postgresql"],
-            },
-        ),
-        (
-            "map-mixed-horizontal-r40",
-            {
-                "id": "preflight-horizontal-r40",
-                "profile": "map-data-mixed",
-                "rate": 40,
-                "viewers": 40,
-                "markerIntervalSeconds": 10,
-                "latencyP95Milliseconds": 5000,
-                "latencyP99Milliseconds": 10000,
-                "acceptEncoding": "zstd",
-                "storedEncoding": "zstd",
-                "variants": ["java-new-postgresql-r3", "rust-postgresql-r3"],
-            },
-        ),
-    ):
-        source = formal_cases.get(source_id)
-        if not isinstance(source, dict):
-            raise AnalysisFailure("formal preflight source case is missing")
-        source_controls = {
-            key: item for key, item in source.items() if key not in {"id", "variants"}
-        }
-        expected_controls = {
-            key: item
-            for key, item in expected_case.items()
-            if key not in {"id", "variants"}
-        }
-        if source_controls != expected_controls:
-            raise AnalysisFailure("formal preflight source case controls differ")
-        expected_preflight_cases.append(expected_case)
+    expected_preflight_cases = [
+        {
+            "id": "preflight-settings-r1",
+            "profile": "settings",
+            "rate": 1,
+            "viewers": 1,
+            "markerIntervalSeconds": 10,
+            "latencyP95Milliseconds": 5000,
+            "latencyP99Milliseconds": 10000,
+            "acceptEncoding": "zstd",
+            "storedEncoding": "zstd",
+            "overloadPolicy": "forbid",
+            "variants": ["java-new-postgresql", "rust-postgresql"],
+        },
+        {
+            "id": "preflight-conditional-horizontal-r1",
+            "profile": "conditional",
+            "rate": 1,
+            "viewers": 1,
+            "markerIntervalSeconds": 10,
+            "latencyP95Milliseconds": 5000,
+            "latencyP99Milliseconds": 10000,
+            "acceptEncoding": "zstd",
+            "storedEncoding": "zstd",
+            "overloadPolicy": "forbid",
+            "variants": ["java-new-postgresql-r3", "rust-postgresql-r3"],
+        },
+        {
+            "id": "preflight-horizontal-r40",
+            "profile": "map-data-mixed",
+            "rate": 40,
+            "viewers": 40,
+            "markerIntervalSeconds": 10,
+            "latencyP95Milliseconds": 5000,
+            "latencyP99Milliseconds": 10000,
+            "acceptEncoding": "zstd",
+            "storedEncoding": "zstd",
+            "overloadPolicy": "allow-explicit",
+            "variants": ["java-new-postgresql-r3", "rust-postgresql-r3"],
+        },
+    ]
     expected_preflight_matrix = {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "benchmarkGitRevision": matrix["benchmarkGitRevision"],
         "manifestSha256": matrix["manifestSha256"],
         "mapIds": matrix["mapIds"],
@@ -2215,6 +2221,7 @@ def compare_workload_identity(
         "acceptEncoding": entry["acceptEncoding"],
         "storedEncoding": entry["storedEncoding"],
         "contractMode": entry["contractMode"],
+        "overloadPolicy": entry["overloadPolicy"],
         "warmup": entry["warmupDuration"],
         "measurement": entry["measurementDuration"],
         "cooldownSeconds": entry["cooldownSeconds"],
@@ -3768,26 +3775,279 @@ def validate_arrival_identity(
             raise AnalysisFailure(f"{entry_id}: arrival total {key} mismatch")
 
 
+def require_nonnegative_integer_metric(
+    summary: dict[str, Any], metric: str, entry_id: str
+) -> int:
+    value = require_summary_metric(summary, metric, "count", entry_id)
+    if not value.is_integer():
+        raise AnalysisFailure(
+            f"{entry_id}: measurement summary {metric}.count is not an integer"
+        )
+    return int(value)
+
+
+def workload_response_classification(
+    summary: dict[str, Any], entry: dict[str, Any]
+) -> dict[str, Any]:
+    entry_id = entry["entryId"]
+    policy = entry.get("overloadPolicy")
+    if policy not in OVERLOAD_POLICIES:
+        raise AnalysisFailure(f"{entry_id}: overloadPolicy is invalid")
+    counts = {
+        name: require_nonnegative_integer_metric(summary, metric, entry_id)
+        for name, metric in RESPONSE_CLASSIFICATION_METRICS.items()
+    }
+    http_requests = require_nonnegative_integer_metric(
+        summary, "http_reqs{traffic:workload}", entry_id
+    )
+    completed_iterations = require_nonnegative_integer_metric(
+        summary, "iterations", entry_id
+    )
+    classified = sum(
+        counts[name]
+        for name in (
+            "availableResponses",
+            "overloadResponses",
+            "malformedOverloadResponses",
+            "transportErrors",
+            "unexpectedResponses",
+        )
+    )
+    workload_requests = counts["workloadRequests"]
+    if classified != workload_requests:
+        raise AnalysisFailure(
+            f"{entry_id}: workload response classification does not partition "
+            "the workload request count"
+        )
+    if (
+        http_requests != workload_requests
+        or completed_iterations != workload_requests
+    ):
+        raise AnalysisFailure(
+            f"{entry_id}: workload request, workload HTTP request, and "
+            "completed iteration "
+            "counts differ"
+        )
+    available = counts["availableResponses"]
+    overload = counts["overloadResponses"]
+    adverse = {
+        name: counts[name]
+        for name in (
+            "malformedOverloadResponses",
+            "transportErrors",
+            "unexpectedResponses",
+        )
+    }
+    policy_passed = policy == "allow-explicit" or overload == 0
+    availability_satisfied = policy == "allow-explicit" or available > 0
+    trustworthy = bool(
+        workload_requests > 0
+        and all(value == 0 for value in adverse.values())
+    )
+    passed = bool(
+        trustworthy
+        and policy_passed
+        and availability_satisfied
+    )
+    return {
+        "available": True,
+        "policy": policy,
+        **counts,
+        "httpRequests": http_requests,
+        "completedIterations": completed_iterations,
+        "classifiedResponses": classified,
+        "partitionValid": True,
+        "requestIterationIdentityValid": workload_requests > 0,
+        "availability": (
+            available / workload_requests if workload_requests > 0 else None
+        ),
+        "overloadRate": (
+            overload / workload_requests if workload_requests > 0 else None
+        ),
+        "policyPassed": policy_passed,
+        "availabilitySatisfied": availability_satisfied,
+        "trustworthy": trustworthy,
+        "passed": passed,
+    }
+
+
+def unavailable_response_classification(policy: Any) -> dict[str, Any]:
+    return {
+        "available": False,
+        "policy": policy,
+        **{name: None for name in RESPONSE_CLASSIFICATION_METRICS},
+        "httpRequests": None,
+        "completedIterations": None,
+        "classifiedResponses": None,
+        "partitionValid": None,
+        "requestIterationIdentityValid": None,
+        "availability": None,
+        "overloadRate": None,
+        "policyPassed": None,
+        "availabilitySatisfied": None,
+        "trustworthy": False,
+        "passed": False,
+    }
+
+
+def response_performance_metrics(
+    classification: dict[str, Any],
+    measurement_duration: str,
+    offered_iterations_per_second: float | None,
+    entry_id: str,
+) -> dict[str, float | int | None]:
+    seconds = duration_seconds(
+        measurement_duration, f"{entry_id} measurement duration"
+    )
+    available = classification.get("availableResponses")
+    overload = classification.get("overloadResponses")
+    if not isinstance(available, int) or not isinstance(overload, int):
+        return {
+            "availability": None,
+            "goodputResponsesPerSecond": None,
+            "goodputOfferedRatio": None,
+            "overloadCount": None,
+            "overloadRate": None,
+        }
+    goodput = available / seconds
+    return {
+        "availability": classification["availability"],
+        "goodputResponsesPerSecond": goodput,
+        "goodputOfferedRatio": (
+            goodput / offered_iterations_per_second
+            if offered_iterations_per_second not in {None, 0}
+            else None
+        ),
+        "overloadCount": overload,
+        "overloadRate": classification["overloadRate"],
+    }
+
+
+def validate_response_policy_identity(
+    artifact: dict[str, Any],
+    summary: dict[str, Any],
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    entry_id = entry["entryId"]
+    proof = workload_response_classification(summary, entry)
+    rates = {
+        name: metric_value(summary, RESPONSE_CLASSIFICATION_METRICS[name], "rate")
+        for name in (
+            "workloadRequests",
+            "availableResponses",
+            "overloadResponses",
+        )
+    }
+    if any(value is None for value in rates.values()):
+        raise AnalysisFailure(
+            f"{entry_id}: response classification counter rate is missing"
+        )
+    expected = {
+        "formatVersion": 1,
+        "overloadPolicy": proof["policy"],
+        "counts": {
+            "workloadRequests": proof["workloadRequests"],
+            "httpWorkloadRequests": proof["httpRequests"],
+            "completedIterations": proof["completedIterations"],
+            "availableResponses": proof["availableResponses"],
+            "overloadResponses": proof["overloadResponses"],
+            "malformedOverloadResponses": proof[
+                "malformedOverloadResponses"
+            ],
+            "transportErrors": proof["transportErrors"],
+            "unexpectedResponses": proof["unexpectedResponses"],
+        },
+        "ratesPerSecond": rates,
+        "ratios": {
+            "available": proof["availability"],
+            "overload": proof["overloadRate"],
+        },
+        "classifiedResponses": proof["classifiedResponses"],
+        "partitionValid": proof["partitionValid"],
+        "requestIterationIdentityValid": proof[
+            "requestIterationIdentityValid"
+        ],
+        "policyAllowsOverload": proof["policyPassed"],
+        "availabilitySatisfied": proof["availabilitySatisfied"],
+        "passed": proof["passed"],
+    }
+
+    def equal(left: Any, right: Any) -> bool:
+        if (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+        ):
+            return close_number(left, right)
+        if isinstance(left, dict) and isinstance(right, dict):
+            return set(left) == set(right) and all(
+                equal(left[key], right[key]) for key in left
+            )
+        return left == right
+
+    if not isinstance(artifact, dict) or not equal(artifact, expected):
+        raise AnalysisFailure(f"{entry_id}: response-policy gate identity mismatch")
+    return proof
+
+
+def validate_available_latency_metrics(
+    summary: dict[str, Any], entry: dict[str, Any]
+) -> bool:
+    classification = workload_response_classification(summary, entry)
+    entry_id = entry["entryId"]
+    available = classification["availableResponses"]
+    fields = ("med", "p(90)", "p(95)", "p(99)")
+    values = {
+        metric: [metric_value(summary, metric, field) for field in fields]
+        for metric in ("bluemap_available_duration", "bluemap_available_ttfb")
+    }
+    if available == 0:
+        if any(value is not None for metric in values.values() for value in metric):
+            raise AnalysisFailure(
+                f"{entry_id}: available-response latency exists with zero "
+                "available responses"
+            )
+        return False
+    for metric, observed in values.items():
+        if any(value is None for value in observed):
+            raise AnalysisFailure(
+                f"{entry_id}: measurement summary is missing {metric} trend values"
+            )
+    return True
+
+
 def validate_latency_identity(
     artifact: dict[str, Any],
     summary: dict[str, Any],
     entry: dict[str, Any],
 ) -> None:
     entry_id = entry["entryId"]
-    observed_p95 = require_summary_metric(
-        summary, "http_req_duration{traffic:workload}", "p(95)", entry_id
-    )
-    observed_p99 = require_summary_metric(
-        summary, "http_req_duration{traffic:workload}", "p(99)", entry_id
-    )
+    applicable = validate_available_latency_metrics(summary, entry)
+    observed_p95 = metric_value(summary, "bluemap_available_duration", "p(95)")
+    observed_p99 = metric_value(summary, "bluemap_available_duration", "p(99)")
     maximum_p95 = float(entry["latencyP95Milliseconds"])
     maximum_p99 = float(entry["latencyP99Milliseconds"])
+    classification = workload_response_classification(summary, entry)
     expected = {
+        "metric": "bluemap_available_duration",
+        "overloadPolicy": entry["overloadPolicy"],
+        "applicable": applicable,
+        "availableResponses": classification["availableResponses"],
         "maximumP95Milliseconds": maximum_p95,
         "maximumP99Milliseconds": maximum_p99,
         "observedP95Milliseconds": observed_p95,
         "observedP99Milliseconds": observed_p99,
-        "passed": observed_p95 < maximum_p95 and observed_p99 < maximum_p99,
+        "passed": (
+            None
+            if not applicable
+            else bool(
+                observed_p95 is not None
+                and observed_p99 is not None
+                and observed_p95 < maximum_p95
+                and observed_p99 < maximum_p99
+            )
+        ),
     }
     if set(artifact) != set(expected):
         raise AnalysisFailure(f"{entry_id}: latency gate is malformed")
@@ -3961,24 +4221,17 @@ def validate_required_measurement_metrics(
 ) -> None:
     entry_id = entry["entryId"]
     required = {
-        "http_req_failed{traffic:workload}": ("rate",),
-        "bluemap_unexpected_status": ("rate",),
         "iterations": ("count", "rate"),
         "dropped_iterations": ("count",),
-        "http_reqs": ("count",),
+        "http_reqs{traffic:workload}": ("count",),
         "data_received": ("count",),
         "data_sent": ("count",),
-        "http_req_duration{traffic:workload}": (
-            "med",
-            "p(90)",
-            "p(95)",
-            "p(99)",
-        ),
-        "bluemap_ttfb": ("med", "p(90)", "p(95)", "p(99)"),
     }
     for metric_name, fields in required.items():
         for field in fields:
             require_summary_metric(summary, metric_name, field, entry_id)
+    workload_response_classification(summary, entry)
+    validate_available_latency_metrics(summary, entry)
     require_transport_phase_proof(
         transport_phase_proof(summary, entry, traffic_mode, manifest),
         entry_id,
@@ -4011,15 +4264,11 @@ def validate_status_metrics(
     manifest: dict[str, Any],
 ) -> None:
     entry_id = entry["entryId"]
-    unexpected = require_summary_metric(
-        summary, "bluemap_unexpected_status", "rate", entry_id
-    )
-    failures = require_summary_metric(
-        summary, "http_req_failed{traffic:workload}", "rate", entry_id
-    )
-    if unexpected != 0 or failures >= 0.001:
+    classification = workload_response_classification(summary, entry)
+    if classification["passed"] is not True:
         raise AnalysisFailure(
-            f"{entry_id}: {phase} status/failure metrics violate the gate"
+            f"{entry_id}: {phase} workload response classification violates "
+            "the overload/error policy"
         )
     require_transport_phase_proof(
         transport_phase_proof(summary, entry, traffic_mode, manifest),
@@ -5103,7 +5352,13 @@ def analyze_case(
     measurement = repetition / "measurement"
     warmup_summary = load_optional_object(warmup / "summary.json")
     warmup_arrival_artifact = load_optional_object(warmup / "arrival-gate.json")
+    warmup_response_policy_artifact = load_optional_object(
+        warmup / "response-policy-gate.json"
+    )
     arrival = load_optional_object(measurement / "arrival-gate.json")
+    response_policy_artifact = load_optional_object(
+        measurement / "response-policy-gate.json"
+    )
     latency_artifact = load_optional_object(measurement / "latency-gate.json")
     warmup_arrival = (
         warmup_arrival_artifact.get("passed") is True
@@ -5113,10 +5368,18 @@ def analyze_case(
     measurement_arrival = (
         arrival.get("passed") is True if arrival is not None else None
     )
-    latency = (
-        latency_artifact.get("passed") is True
+    latency_applicable = (
+        latency_artifact.get("applicable")
         if latency_artifact is not None
         else None
+    )
+    latency = (
+        latency_artifact.get("passed")
+        if latency_artifact is not None
+        else None
+    )
+    latency_gate_satisfied = bool(
+        latency is True or latency_applicable is False
     )
     warmup_exit = read_exit_status(warmup / "exit-status.txt")
     measurement_exit = read_exit_status(measurement / "exit-status.txt")
@@ -5131,6 +5394,30 @@ def analyze_case(
         result["result"],
     )
     summary = load_optional_object(measurement / "summary.json")
+    if warmup_summary is not None:
+        if warmup_response_policy_artifact is None:
+            raise AnalysisFailure(
+                f"{entry['entryId']}: warmup response-policy gate is missing"
+            )
+        warmup_classification = validate_response_policy_identity(
+            warmup_response_policy_artifact, warmup_summary, entry
+        )
+    else:
+        warmup_classification = unavailable_response_classification(
+            entry.get("overloadPolicy")
+        )
+    if summary is not None:
+        if response_policy_artifact is None:
+            raise AnalysisFailure(
+                f"{entry['entryId']}: measurement response-policy gate is missing"
+            )
+        measurement_classification = validate_response_policy_identity(
+            response_policy_artifact, summary, entry
+        )
+    else:
+        measurement_classification = unavailable_response_classification(
+            entry.get("overloadPolicy")
+        )
     warmup_transport_proof = transport_phase_proof(
         warmup_summary, entry, traffic_mode, manifest
     )
@@ -5290,7 +5577,17 @@ def analyze_case(
         "warmupRawOutput": warmup_raw_present,
         "measurementExit": measurement_exit == 0,
         "measurementArrival": measurement_arrival is True,
-        "latency": latency is True,
+        "warmupResponsePolicy": warmup_classification["passed"] is True,
+        "measurementResponsePolicy": (
+            measurement_classification["passed"] is True
+        ),
+        "warmupClassificationTrustworthy": (
+            warmup_classification["trustworthy"] is True
+        ),
+        "measurementClassificationTrustworthy": (
+            measurement_classification["trustworthy"] is True
+        ),
+        "latency": latency_gate_satisfied,
         "measurementSummary": summary is not None,
         "measurementRawOutput": raw_present,
         "warmupTransportProof": (
@@ -5366,6 +5663,12 @@ def analyze_case(
         and warmup_arrival_valid
         and measurement_arrival_valid
         and latency_identity_valid
+        and warmup_classification["available"] is True
+        and measurement_classification["available"] is True
+        and gates["warmupClassificationTrustworthy"]
+        and gates["measurementClassificationTrustworthy"]
+        and gates["warmupArrival"]
+        and gates["measurementArrival"]
         and gates["warmupTransportProof"]
         and gates["measurementTransportProof"]
         and gates["warmupSshL4Transport"]
@@ -5375,6 +5678,7 @@ def analyze_case(
         and metrics_complete
         and not endpoint_failed
         and stable_diffs
+        and gates["nodeNoise"]
     )
     web_resource_evidence = bool(
         http_evidence
@@ -5421,10 +5725,16 @@ def analyze_case(
         if expected_iterations is not None
         else None
     )
-    failure_rate = metric_value(
-        summary, "http_req_failed{traffic:workload}", "rate"
+    response_performance = response_performance_metrics(
+        measurement_classification,
+        entry["measurementDuration"],
+        offered,
+        entry["entryId"],
     )
-    request_count = metric_value(summary, "http_reqs", "count")
+    availability = response_performance["availability"]
+    failure_rate = 1.0 - availability if availability is not None else None
+    request_count = measurement_classification["workloadRequests"]
+    available_count = measurement_classification["availableResponses"]
     received = metric_value(summary, "data_received", "count")
     sent = metric_value(summary, "data_sent", "count")
     metrics = {
@@ -5436,6 +5746,12 @@ def analyze_case(
                 if achieved is not None and offered not in {None, 0}
                 else None
             ),
+            "goodputResponsesPerSecond": response_performance[
+                "goodputResponsesPerSecond"
+            ],
+            "goodputOfferedRatio": response_performance[
+                "goodputOfferedRatio"
+            ],
             "completedIterations": completed_iterations,
             "expectedScheduledIterations": expected_iterations,
             "droppedIterations": dropped,
@@ -5447,11 +5763,18 @@ def analyze_case(
         },
         "requests": {
             "count": request_count,
+            "httpCount": measurement_classification["httpRequests"],
+            "availability": availability,
+            "availableCount": available_count,
+            "overloadCount": response_performance["overloadCount"],
+            "overloadRate": response_performance["overloadRate"],
             "failureRate": failure_rate,
-            "unexpectedStatusRate": metric_value(
-                summary, "bluemap_unexpected_status", "rate"
+            "rawHttpFailureRate": metric_value(
+                summary, "http_req_failed{traffic:workload}", "rate"
             ),
+            "classification": measurement_classification,
         },
+        "warmupResponseClassification": warmup_classification,
         "transportProof": {
             "mode": traffic_mode,
             "passed": (
@@ -5466,10 +5789,12 @@ def analyze_case(
             "measurement": measurement_transport_proof,
             "sshL4TunnelHealth": ssh_l4_transport,
         },
-        "latencyMilliseconds": trend(
-            summary, "http_req_duration{traffic:workload}"
-        ),
-        "ttfbMilliseconds": trend(summary, "bluemap_ttfb"),
+        "latencyMilliseconds": trend(summary, "bluemap_available_duration"),
+        "ttfbMilliseconds": trend(summary, "bluemap_available_ttfb"),
+        "latencyAssessment": {
+            "applicable": latency_applicable,
+            "passed": latency,
+        },
         "bytes": {
             "received": received,
             "sent": sent,
@@ -6299,9 +6624,10 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "## Failed gates",
                 "",
                 "These entries remain in the raw table. Eligibility is "
-                "metric-specific: complete adverse HTTP outcomes remain in "
-                "HTTP aggregates, while unusable telemetry is excluded only "
-                "from its affected metric family.",
+                "metric-specific: correctly attributed capacity overloads "
+                "remain in HTTP aggregates, while transport, classification, "
+                "arrival, and unusable telemetry failures are excluded from "
+                "their affected metric families.",
                 "",
             ]
         )
@@ -6319,11 +6645,13 @@ def render_markdown(report: dict[str, Any]) -> str:
         [
             "## Per case and variant",
             "",
-            "| Case | Variant | Eligible | Offered/s | Achieved/s | Failure | "
-            "Dropped | Latency p50/p95/p99 ms | TTFB p95 ms | KiB/iteration | "
+            "| Case | Variant | Eligible | Offered/s | Achieved/s | Goodput/s | "
+            "Availability | Overload | Dropped | Latency p50/p95/p99 ms | "
+            "TTFB p95 ms | KiB/iteration | "
             "Web CPU p95 | Web memory p95 MiB | Throttle p95 | "
             "DB k8s/exporter blocks | Noise pass/available |",
-            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+            "---:|---:|---:|---:|---:|---:|",
         ]
     )
     for group in report["caseVariantSummaries"]:
@@ -6343,7 +6671,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{group['eligibleRepetitions']}/5 | "
             f"{fmt(median_metric(group, 'offeredThroughput'))} | "
             f"{fmt(median_metric(group, 'achievedThroughput'))} | "
-            f"{fmt_percent(median_metric(group, 'failureRate'))} | "
+            f"{fmt(median_metric(group, 'goodput'))} | "
+            f"{fmt_percent(median_metric(group, 'availability'))} | "
+            f"{fmt_percent(median_metric(group, 'overloadRate'))} | "
             f"{fmt_percent(median_metric(group, 'droppedRate'))} | "
             f"{latency} | "
             f"{fmt(median_metric(group, 'ttfbP95Milliseconds'), 1)} | "
@@ -6371,7 +6701,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "Paired counts are shown separately for throughput/latency/CPU "
             "(T/L/C).",
             "",
-            "| Case | Reference → candidate | Paired blocks T/L/C | Achieved ratio | "
+            "| Case | Reference → candidate | Paired blocks G/L/C | Goodput ratio | "
             "p95 latency ratio | CPU p95 ratio |",
             "|---|---|---:|---:|---:|---:|",
         ]
@@ -6384,7 +6714,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 ratio.get("median") if isinstance(ratio, dict) else None
             )
 
-        throughput_n, throughput = paired_ratio("achievedThroughput")
+        throughput_n, throughput = paired_ratio("goodput")
         latency_n, latency = paired_ratio("latencyP95Milliseconds")
         cpu_n, cpu = paired_ratio("webCpuP95Cores")
         lines.append(
@@ -6401,11 +6731,12 @@ def render_markdown(report: dict[str, Any]) -> str:
             "## Raw repetition table",
             "",
             "| Seq | Block | Case | Variant | Result | Eligible | Offered/s | "
-            "Achieved/s | Failure | Dropped | p50/p90/p95/p99 ms | "
+            "Achieved/s | Goodput/s | Availability | Overload | Dropped | "
+            "p50/p90/p95/p99 ms | "
             "TTFB p50/p90/p95/p99 ms | Received MiB | Web CPU source | "
             "DB metrics | Node noise |",
-            "|---:|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
-            "---|---|---|",
+            "|---:|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|"
+            "---:|---:|---:|---|---|---|",
         ]
     )
     for row in report["rawRepetitions"]:
@@ -6427,7 +6758,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{'yes' if row['eligibleForFormalComparison'] else 'no'} | "
             f"{fmt(metrics['throughput']['offeredIterationsPerSecond'])} | "
             f"{fmt(metrics['throughput']['achievedIterationsPerSecond'])} | "
-            f"{fmt_percent(metrics['requests']['failureRate'])} | "
+            f"{fmt(metrics['throughput']['goodputResponsesPerSecond'])} | "
+            f"{fmt_percent(metrics['requests']['availability'])} | "
+            f"{fmt_percent(metrics['requests']['overloadRate'])} | "
             f"{fmt_percent(metrics['throughput']['droppedRate'])} | "
             f"{latency} | {ttfb} | "
             f"{fmt(metrics['bytes']['received'] / 1024**2 if metrics['bytes']['received'] is not None else None, 2)} | "
@@ -6654,10 +6987,11 @@ def analyze(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "No statistical-significance claim is made from five blocks."
             ),
             "failedMeasurements": (
-                "Adverse HTTP, arrival, and latency outcomes remain in HTTP "
-                "aggregates when their measurement artifacts are complete. "
-                "Structurally unusable or telemetry-specific values are "
-                "excluded only from the affected metric family."
+                "Correctly attributed capacity overload and latency-ceiling "
+                "outcomes remain in HTTP aggregates. Transport, malformed or "
+                "unexpected responses, arrival failure, load-generator "
+                "saturation, runtime instability, and telemetry-specific "
+                "failures are excluded from affected metric families."
             ),
         },
         "failedEntries": failed,

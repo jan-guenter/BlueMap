@@ -1,5 +1,5 @@
 {
-  "formatVersion": 3,
+  "formatVersion": 4,
   "repetitions": 5,
   "scheduleSeed": "bluemap-web-performance-schedule-v1",
   "traceSeed": "bluemap-web-performance-v1",
@@ -147,6 +147,7 @@
       "markerIntervalSeconds": 10,
       "acceptEncoding": "zstd",
       "storedEncoding": "zstd",
+      "overloadPolicy": "allow-explicit",
       "latencyP95Milliseconds": 10000,
       "latencyP99Milliseconds": 20000,
       "variants": [
@@ -164,6 +165,7 @@
       "markerIntervalSeconds": 10,
       "acceptEncoding": "zstd",
       "storedEncoding": "zstd",
+      "overloadPolicy": "allow-explicit",
       "latencyP95Milliseconds": 5000,
       "latencyP99Milliseconds": 10000,
       "variants": [
@@ -181,6 +183,7 @@
       "markerIntervalSeconds": 10,
       "acceptEncoding": "zstd",
       "storedEncoding": "zstd",
+      "overloadPolicy": "forbid",
       "latencyP95Milliseconds": 10000,
       "latencyP99Milliseconds": 20000,
       "variants": [
@@ -198,6 +201,7 @@
       "markerIntervalSeconds": 10,
       "acceptEncoding": "zstd",
       "storedEncoding": "zstd",
+      "overloadPolicy": "allow-explicit",
       "latencyP95Milliseconds": 10000,
       "latencyP99Milliseconds": 20000,
       "variants": [

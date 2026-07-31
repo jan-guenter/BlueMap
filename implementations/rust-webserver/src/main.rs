@@ -1146,6 +1146,28 @@ mod tests {
             .unwrap();
         assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(overloaded.headers().get(header::RETRY_AFTER).unwrap(), "1");
+        assert_eq!(
+            overloaded.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private,no-store,no-transform"
+        );
+        assert_eq!(
+            overloaded.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/problem+json"
+        );
+        assert_eq!(
+            overloaded.headers().get("x-bluemap-overload").unwrap(),
+            "capacity"
+        );
+        let problem = overloaded.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&problem).unwrap(),
+            serde_json::json!({
+                "type": "about:blank",
+                "title": "Service Unavailable",
+                "status": 503,
+                "code": "bluemap_overloaded",
+            })
+        );
 
         drop(held_response);
         let recovered = app

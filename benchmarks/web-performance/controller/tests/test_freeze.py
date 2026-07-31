@@ -224,6 +224,19 @@ class TrackedFreezerTests(unittest.TestCase):
         )
         self.assertEqual(matrix["benchmarkGitRevision"], freeze.REQUIRED_REVISION)
         self.assertEqual(matrix["mapIds"], ["world"])
+        self.assertEqual(matrix["formatVersion"], 4)
+        self.assertEqual(
+            {
+                case["id"]: case["overloadPolicy"]
+                for case in matrix["cases"]
+            },
+            {
+                "map-mixed-r15": "allow-explicit",
+                "map-mixed-horizontal-r40": "allow-explicit",
+                "live-viewers-r15": "forbid",
+                "large-object-r1": "allow-explicit",
+            },
+        )
         self.assertEqual(freeze.placeholders(matrix), [])
         self.assertEqual(
             [variant["id"] for variant in matrix["variants"]],

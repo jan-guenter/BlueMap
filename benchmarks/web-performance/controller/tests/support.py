@@ -240,6 +240,7 @@ def schedule_entry(variant_id: str = "rust-postgresql-r3") -> dict[str, Any]:
         "acceptEncoding": "zstd",
         "storedEncoding": "zstd",
         "contractMode": "enhanced",
+        "overloadPolicy": "forbid",
         "warmupDuration": "10s",
         "measurementDuration": "30s",
         "cooldownSeconds": 5,

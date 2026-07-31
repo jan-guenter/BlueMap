@@ -65,8 +65,8 @@ def matrix_sha256(path: Path) -> str:
 
 
 def validate_matrix(matrix: dict[str, Any]) -> None:
-    if matrix.get("formatVersion") != 3:
-        raise ValueError("matrix formatVersion must be 3")
+    if matrix.get("formatVersion") != 4:
+        raise ValueError("matrix formatVersion must be 4")
     if not isinstance(matrix.get("repetitions"), int) or matrix["repetitions"] < 1:
         raise ValueError("matrix repetitions must be a positive integer")
     validate_git_revision(
@@ -177,6 +177,8 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
             raise ValueError(f"case {case['id']} has invalid acceptEncoding")
         if case.get("storedEncoding") not in {"gzip", "zstd", "deflate", "identity"}:
             raise ValueError(f"case {case['id']} has invalid storedEncoding")
+        if case.get("overloadPolicy") not in {"forbid", "allow-explicit"}:
+            raise ValueError(f"case {case['id']} has invalid overloadPolicy")
         selected = case.get("variants")
         if not isinstance(selected, list) or len(selected) < 2:
             raise ValueError(f"case {case['id']} needs at least two variants")
@@ -257,6 +259,7 @@ def build_schedule(
                         ],
                         "acceptEncoding": case["acceptEncoding"],
                         "storedEncoding": case["storedEncoding"],
+                        "overloadPolicy": case["overloadPolicy"],
                         "traceSeed": matrix["traceSeed"],
                         "manifestSha256": matrix["manifestSha256"],
                         "mapIds": matrix["mapIds"],
@@ -279,7 +282,7 @@ def build_schedule(
                     }
                 )
     return {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "matrixSha256": matrix_digest,
         "scheduleSeed": schedule_seed,
         "traceSeed": matrix["traceSeed"],

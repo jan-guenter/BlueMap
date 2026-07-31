@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Freeze the six formal BlueMap candidates into a v3 matrix and schedule.
+"""Freeze the six formal BlueMap candidates into a v4 matrix and schedule.
 
 The tracked helper is revision-agnostic: a controller lock initialized for
 the current clean commit binds the reviewed controller sources, then this
@@ -221,9 +221,9 @@ def validate_template(
     manifest: dict[str, Any],
 ) -> None:
     orchestrate.validate_target_constants()
-    if template.get("formatVersion") != 3 or template.get("repetitions") != 5:
+    if template.get("formatVersion") != 4 or template.get("repetitions") != 5:
         raise orchestrate.SafetyError(
-            "matrix.example.json must be the five-block v3 template"
+            "matrix.example.json must be the five-block v4 template"
         )
     variants = template.get("variants")
     if not isinstance(variants, list) or len(variants) != 6:

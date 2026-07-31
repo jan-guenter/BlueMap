@@ -127,8 +127,26 @@ class SshL4TraefikModeTests(unittest.TestCase):
         # unexpected-status rate must still make the combined phase gate fail.
         summary = {
             "metrics": {
-                "bluemap_unexpected_status": {"value": 1},
-                "http_req_failed{traffic:workload}": {"value": 0},
+                "bluemap_workload_requests": {
+                    "values": {"count": 1, "rate": 1}
+                },
+                "bluemap_available_responses": {
+                    "values": {"count": 0, "rate": 0}
+                },
+                "bluemap_overload_responses": {
+                    "values": {"count": 0, "rate": 0}
+                },
+                "bluemap_malformed_overload_responses": {
+                    "values": {"count": 0, "rate": 0}
+                },
+                "bluemap_transport_errors": {
+                    "values": {"count": 0, "rate": 0}
+                },
+                "bluemap_unexpected_responses": {
+                    "values": {"count": 1, "rate": 1}
+                },
+                "http_reqs{traffic:workload}": {"values": {"count": 1}},
+                "iterations": {"values": {"count": 1}},
                 "bluemap_prohibited_edge_header": {
                     "value": 0,
                     "passes": 0,
@@ -140,6 +158,7 @@ class SshL4TraefikModeTests(unittest.TestCase):
             "entryId": "redirect-must-fail",
             "profile": "static",
             "contractMode": "enhanced",
+            "overloadPolicy": "forbid",
         }
 
         proof = analyze.transport_phase_proof(
@@ -151,7 +170,7 @@ class SshL4TraefikModeTests(unittest.TestCase):
         self.assertIs(proof["passed"], True)
         with self.assertRaisesRegex(
             analyze.AnalysisFailure,
-            "status/failure metrics violate the gate",
+            "overload/error policy",
         ):
             analyze.validate_status_metrics(
                 summary,

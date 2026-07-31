@@ -25,7 +25,9 @@
 package de.bluecolored.bluemap.common.web;
 
 import de.bluecolored.bluemap.common.web.http.HttpRequest;
+import de.bluecolored.bluemap.common.web.http.HttpRequestHandler;
 import de.bluecolored.bluemap.common.web.http.HttpResponse;
+import de.bluecolored.bluemap.common.web.http.HttpResponseOutputStream;
 import de.bluecolored.bluemap.common.web.http.HttpStatusCode;
 import de.bluecolored.bluemap.core.storage.CacheMetadata;
 import de.bluecolored.bluemap.core.storage.GridStorage;
@@ -40,6 +42,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.function.DoublePredicate;
 import java.util.stream.Stream;
 
@@ -311,8 +314,17 @@ class MapStorageRequestHandlerTest {
             );
             assertEquals("1", header(saturated, "Retry-After"));
             assertEquals(
-                    "no-store,no-transform",
+                    "private,no-store,no-transform",
                     header(saturated, "Cache-Control")
+            );
+            assertEquals(
+                    "application/problem+json",
+                    header(saturated, "Content-Type")
+            );
+            assertEquals("capacity", header(saturated, "X-BlueMap-Overload"));
+            assertEquals(
+                    "{\"type\":\"about:blank\",\"title\":\"Service Unavailable\",\"status\":503,\"code\":\"bluemap_overloaded\"}",
+                    new String(saturated.getBody().readAllBytes(), StandardCharsets.UTF_8)
             );
         }
 
@@ -326,6 +338,46 @@ class MapStorageRequestHandlerTest {
                 request("GET", "/settings.json")
         )) {
             assertEquals(HttpStatusCode.OK, recoveredAgain.getStatusCode());
+        }
+    }
+
+    @Test
+    void writesTheOverloadContractOnTheWire() throws Exception {
+        CountingItem item = new CountingItem(Compression.NONE);
+        TestMapStorage storage = new TestMapStorage(item);
+        storage.availableReadPermits = 1;
+        HttpRequestHandler handler = new BlueMapResponseModifier(
+                new MapStorageRequestHandler(storage)
+        );
+
+        try (HttpResponse first = handler.handle(
+                request("GET", "/settings.json")
+        )) {
+            assertEquals(HttpStatusCode.OK, first.getStatusCode());
+
+            try (HttpResponse overloaded = handler.handle(
+                    request("GET", "/settings.json")
+            )) {
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                new HttpResponseOutputStream(output).write(overloaded);
+                String wire = output.toString(StandardCharsets.UTF_8);
+
+                assertTrue(wire.startsWith(
+                        "HTTP/1.1 503 Service Unavailable\r\n"
+                ));
+                assertTrue(wire.contains("Retry-After: 1\r\n"));
+                assertTrue(wire.contains(
+                        "Cache-Control: private,no-store,no-transform\r\n"
+                ));
+                assertTrue(wire.contains(
+                        "Content-Type: application/problem+json\r\n"
+                ));
+                assertTrue(wire.contains("X-BlueMap-Overload: capacity\r\n"));
+                assertTrue(wire.contains("Server: BlueMap/"));
+                assertTrue(wire.contains(
+                        "{\"type\":\"about:blank\",\"title\":\"Service Unavailable\",\"status\":503,\"code\":\"bluemap_overloaded\"}"
+                ));
+            }
         }
     }
 

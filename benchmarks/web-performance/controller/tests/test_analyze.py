@@ -135,7 +135,24 @@ class RunPodAnalyzerTests(unittest.TestCase):
         return {
             "metrics": {
                 "http_req_failed{traffic:workload}": {"value": 0},
-                "bluemap_unexpected_status": {"value": 0},
+                "bluemap_workload_requests": {
+                    "values": {"count": 100, "rate": 10}
+                },
+                "bluemap_available_responses": {
+                    "values": {"count": 100, "rate": 10}
+                },
+                "bluemap_overload_responses": {
+                    "values": {"count": 0, "rate": 0}
+                },
+                "bluemap_malformed_overload_responses": {
+                    "values": {"count": 0, "rate": 0}
+                },
+                "bluemap_transport_errors": {
+                    "values": {"count": 0, "rate": 0}
+                },
+                "bluemap_unexpected_responses": {
+                    "values": {"count": 0, "rate": 0}
+                },
                 "bluemap_prohibited_edge_header": {
                     "value": 0,
                     "passes": 0,
@@ -149,9 +166,10 @@ class RunPodAnalyzerTests(unittest.TestCase):
                 "iterations": {"values": {"count": 100, "rate": 10}},
                 "dropped_iterations": {"values": {"count": 0}},
                 "http_reqs": {"values": {"count": 100}},
+                "http_reqs{traffic:workload}": {"values": {"count": 100}},
                 "data_received": {"values": {"count": 1_000}},
                 "data_sent": {"values": {"count": 500}},
-                "http_req_duration{traffic:workload}": {
+                "bluemap_available_duration": {
                     "values": {
                         "med": 1,
                         "p(90)": 2,
@@ -159,7 +177,7 @@ class RunPodAnalyzerTests(unittest.TestCase):
                         "p(99)": 4,
                     }
                 },
-                "bluemap_ttfb": {
+                "bluemap_available_ttfb": {
                     "values": {
                         "med": 1,
                         "p(90)": 2,
@@ -169,6 +187,217 @@ class RunPodAnalyzerTests(unittest.TestCase):
                 },
             }
         }
+
+    @staticmethod
+    def response_policy_artifact(
+        summary: dict[str, object], entry: dict[str, object]
+    ) -> dict[str, object]:
+        proof = analyze.workload_response_classification(summary, entry)
+        metric_names = analyze.RESPONSE_CLASSIFICATION_METRICS
+        return {
+            "formatVersion": 1,
+            "overloadPolicy": proof["policy"],
+            "counts": {
+                "workloadRequests": proof["workloadRequests"],
+                "httpWorkloadRequests": proof["httpRequests"],
+                "completedIterations": proof["completedIterations"],
+                "availableResponses": proof["availableResponses"],
+                "overloadResponses": proof["overloadResponses"],
+                "malformedOverloadResponses": proof[
+                    "malformedOverloadResponses"
+                ],
+                "transportErrors": proof["transportErrors"],
+                "unexpectedResponses": proof["unexpectedResponses"],
+            },
+            "ratesPerSecond": {
+                name: analyze.metric_value(summary, metric_names[name], "rate")
+                for name in (
+                    "workloadRequests",
+                    "availableResponses",
+                    "overloadResponses",
+                )
+            },
+            "ratios": {
+                "available": proof["availability"],
+                "overload": proof["overloadRate"],
+            },
+            "classifiedResponses": proof["classifiedResponses"],
+            "partitionValid": proof["partitionValid"],
+            "requestIterationIdentityValid": proof[
+                "requestIterationIdentityValid"
+            ],
+            "policyAllowsOverload": proof["policyPassed"],
+            "availabilitySatisfied": proof["availabilitySatisfied"],
+            "passed": proof["passed"],
+        }
+
+    def test_response_classification_is_an_exact_integer_partition(self) -> None:
+        entry = schedule_entry()
+        summary = self.complete_summary()
+        proof = analyze.workload_response_classification(summary, entry)
+        self.assertTrue(proof["passed"])
+        self.assertEqual(proof["availability"], 1.0)
+        self.assertEqual(proof["overloadRate"], 0.0)
+        artifact = self.response_policy_artifact(summary, entry)
+        self.assertEqual(
+            analyze.validate_response_policy_identity(artifact, summary, entry),
+            proof,
+        )
+
+        for metric in (
+            "bluemap_workload_requests",
+            "bluemap_available_responses",
+            "http_reqs{traffic:workload}",
+            "iterations",
+        ):
+            invalid = copy.deepcopy(summary)
+            invalid["metrics"][metric]["values"]["count"] = 99.5
+            with self.assertRaisesRegex(
+                analyze.AnalysisFailure, "is not an integer"
+            ):
+                analyze.workload_response_classification(invalid, entry)
+
+        partition_mismatch = copy.deepcopy(summary)
+        partition_mismatch["metrics"]["bluemap_available_responses"]["values"][
+            "count"
+        ] = 99
+        with self.assertRaisesRegex(analyze.AnalysisFailure, "does not partition"):
+            analyze.workload_response_classification(partition_mismatch, entry)
+
+        request_mismatch = copy.deepcopy(summary)
+        request_mismatch["metrics"]["http_reqs{traffic:workload}"]["values"][
+            "count"
+        ] = 101
+        with self.assertRaisesRegex(analyze.AnalysisFailure, "counts differ"):
+            analyze.workload_response_classification(request_mismatch, entry)
+
+    def test_explicit_overload_is_measured_only_when_policy_allows_it(self) -> None:
+        summary = self.complete_summary()
+        summary["metrics"]["bluemap_available_responses"]["values"].update(
+            {"count": 80, "rate": 8}
+        )
+        summary["metrics"]["bluemap_overload_responses"]["values"].update(
+            {"count": 20, "rate": 2}
+        )
+        allowed = {**schedule_entry(), "overloadPolicy": "allow-explicit"}
+        proof = analyze.workload_response_classification(summary, allowed)
+        self.assertTrue(proof["passed"])
+        self.assertTrue(proof["trustworthy"])
+        self.assertEqual(proof["availability"], 0.8)
+        self.assertEqual(proof["overloadRate"], 0.2)
+        performance = analyze.response_performance_metrics(
+            proof, "20s", 5.0, allowed["entryId"]
+        )
+        self.assertEqual(performance["goodputResponsesPerSecond"], 4.0)
+        self.assertEqual(performance["goodputOfferedRatio"], 0.8)
+        self.assertEqual(performance["overloadCount"], 20)
+        analyze.validate_status_metrics(
+            summary, allowed, "measurement", "cloudflare-https", {}
+        )
+
+        forbidden = {**allowed, "overloadPolicy": "forbid"}
+        forbidden_proof = analyze.workload_response_classification(
+            summary, forbidden
+        )
+        self.assertFalse(forbidden_proof["passed"])
+        self.assertTrue(forbidden_proof["trustworthy"])
+        with self.assertRaisesRegex(
+            analyze.AnalysisFailure, "overload/error policy"
+        ):
+            analyze.validate_status_metrics(
+                summary, forbidden, "measurement", "cloudflare-https", {}
+            )
+
+    def test_malformed_transport_and_unexpected_responses_always_fail(self) -> None:
+        entry = {**schedule_entry(), "overloadPolicy": "allow-explicit"}
+        for metric in (
+            "bluemap_malformed_overload_responses",
+            "bluemap_transport_errors",
+            "bluemap_unexpected_responses",
+        ):
+            summary = self.complete_summary()
+            summary["metrics"]["bluemap_available_responses"]["values"].update(
+                {"count": 99, "rate": 9.9}
+            )
+            summary["metrics"][metric]["values"].update(
+                {"count": 1, "rate": 0.1}
+            )
+            proof = analyze.workload_response_classification(summary, entry)
+            self.assertFalse(proof["passed"])
+            self.assertFalse(proof["trustworthy"])
+            with self.assertRaisesRegex(
+                analyze.AnalysisFailure, "overload/error policy"
+            ):
+                analyze.validate_status_metrics(
+                    summary, entry, "measurement", "cloudflare-https", {}
+                )
+
+    def test_zero_available_responses_have_no_forged_latency(self) -> None:
+        entry = {**schedule_entry(), "overloadPolicy": "allow-explicit"}
+        summary = self.complete_summary()
+        summary["metrics"]["bluemap_available_responses"]["values"].update(
+            {"count": 0, "rate": 0}
+        )
+        summary["metrics"]["bluemap_overload_responses"]["values"].update(
+            {"count": 100, "rate": 10}
+        )
+        del summary["metrics"]["bluemap_available_duration"]
+        del summary["metrics"]["bluemap_available_ttfb"]
+        proof = analyze.workload_response_classification(summary, entry)
+        self.assertTrue(proof["passed"])
+        self.assertTrue(proof["trustworthy"])
+        analyze.validate_required_measurement_metrics(
+            summary, entry, "cloudflare-https", self.proof_manifest()
+        )
+        latency = {
+            "metric": "bluemap_available_duration",
+            "overloadPolicy": "allow-explicit",
+            "applicable": False,
+            "availableResponses": 0,
+            "maximumP95Milliseconds": 250.0,
+            "maximumP99Milliseconds": 500.0,
+            "observedP95Milliseconds": None,
+            "observedP99Milliseconds": None,
+            "passed": None,
+        }
+        analyze.validate_latency_identity(latency, summary, entry)
+        self.assertEqual(
+            analyze.trend(summary, "bluemap_available_duration"),
+            {"p50": None, "p90": None, "p95": None, "p99": None},
+        )
+
+    def test_zero_workload_preserves_a_structurally_valid_failed_gate(self) -> None:
+        entry = {**schedule_entry(), "overloadPolicy": "allow-explicit"}
+        summary = self.complete_summary()
+        for metric in analyze.RESPONSE_CLASSIFICATION_METRICS.values():
+            summary["metrics"][metric]["values"].update(
+                {"count": 0, "rate": 0}
+            )
+        summary["metrics"]["http_reqs{traffic:workload}"]["values"][
+            "count"
+        ] = 0
+        summary["metrics"]["iterations"]["values"]["count"] = 0
+        proof = analyze.workload_response_classification(summary, entry)
+        self.assertTrue(proof["partitionValid"])
+        self.assertFalse(proof["requestIterationIdentityValid"])
+        self.assertFalse(proof["trustworthy"])
+        self.assertFalse(proof["passed"])
+        artifact = self.response_policy_artifact(summary, entry)
+        self.assertEqual(
+            analyze.validate_response_policy_identity(artifact, summary, entry),
+            proof,
+        )
+
+    def test_formal_overload_policies_are_fixed(self) -> None:
+        matrix = build_formal_matrix()
+        analyze.validate_matrix_constraints(matrix)
+        for case in matrix["cases"]:
+            if case["id"] == "live-viewers-r15":
+                case["overloadPolicy"] = "allow-explicit"
+        with self.assertRaisesRegex(
+            analyze.AnalysisFailure, "overloadPolicy must be forbid"
+        ):
+            analyze.validate_matrix_constraints(matrix)
 
     def test_analyzer_source_s_control_is_strict_and_execution_bound(self) -> None:
         identity = runpod_identity()
