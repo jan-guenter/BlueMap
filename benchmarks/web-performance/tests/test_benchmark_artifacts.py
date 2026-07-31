@@ -25,6 +25,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 import capture_prometheus
 import check_arrival_gate
+import check_load_generator_capacity
 import configmap_references
 import generate_schedule
 import probe_delivery_cache
@@ -971,12 +972,22 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("--implementation", result.stdout)
         self.assertIn("--storage-type", result.stdout)
         self.assertIn("--database-backend", result.stdout)
+        self.assertIn("--load-generator-backend", result.stdout)
+        self.assertIn("--load-generator-identity", result.stdout)
+        self.assertIn("--traffic-base-url", result.stdout)
+        self.assertIn("--traffic-service", result.stdout)
+        self.assertIn("--traffic-service-port", result.stdout)
+        self.assertIn("--origin-base-url", result.stdout)
+        self.assertIn("--formal-run-id", result.stdout)
+        self.assertIn("--require-edge-bypass", result.stdout)
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
         self.assertIn("configmap_references.py", runner)
         self.assertIn("check_arrival_gate.py", runner)
         self.assertIn("DESIRED_WEB_REPLICA_COUNT", runner)
         self.assertIn("verify_formal_runtime_identity", runner)
         self.assertIn("runtime_identity.py", runner)
+        self.assertIn("runpod_loadgen.sh", runner)
+        self.assertIn("check_load_generator_capacity.py", runner)
         self.assertNotIn("printf 'unknown'", runner)
 
     def test_documented_optimized_java_commands_target_the_optimized_release(
@@ -1190,6 +1201,144 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertNotIn("Math.random()", script)
         self.assertNotIn("data_received{traffic:workload}", script)
         self.assertNotIn("data_sent{traffic:workload}", script)
+        self.assertIn("bluemap_edge_cache_violation", script)
+        self.assertIn("bluemap_edge_mitigation", script)
+        self.assertIn("Cloudflare reached and response was origin-served", script)
+        for status in ("BYPASS", "DYNAMIC", "EXPIRED", "MISS"):
+            self.assertIn(f'"{status}"', script)
+        self.assertIn("!originServedCacheStatuses.has(cacheStatus)", script)
+        self.assertIn("FORMAL_RUN_ID.length > 0", script)
+
+    def test_runpod_transport_keeps_origin_and_public_urls_distinct(self) -> None:
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'ORIGIN_BASE_URL="http://$SERVICE.$NAMESPACE.svc.cluster.local:'
+            '$SERVICE_PORT"',
+            runner,
+        )
+        self.assertIn('BASE_URL="$ORIGIN_BASE_URL"', runner)
+        self.assertIn('BASE_URL="${TRAFFIC_BASE_URL%/}"', runner)
+        self.assertIn("--arg originBaseUrl", runner)
+        self.assertIn("--arg trafficBaseUrl", runner)
+        self.assertIn("load-generator-resources.ndjson", runner)
+        self.assertIn("--runtime-identity", runner)
+        self.assertIn(
+            '[[ "$TRAFFIC_SERVICE" == "bluemap-perf-public" ]]',
+            runner,
+        )
+        self.assertIn(
+            '[[ "$TRAFFIC_SERVICE_PORT" == "8100" ]]',
+            runner,
+        )
+        self.assertIn("validate_traffic_service", runner)
+        self.assertIn("validate_traffic_ingress", runner)
+        self.assertIn('kube get ingress "$TRAFFIC_INGRESS"', runner)
+        self.assertIn("traffic-ingress.diff", runner)
+        self.assertIn("ingress-$TRAFFIC_INGRESS.json", runner)
+        self.assertIn("verify_named_service_endpoints", runner)
+        self.assertIn("traffic-endpoint-membership.ndjson", runner)
+        self.assertIn("traffic-endpoints-$label.json", runner)
+        self.assertIn("service-$TRAFFIC_SERVICE.json", runner)
+        self.assertIn(
+            '[[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]',
+            runner,
+        )
+        self.assertIn(
+            "Formal scheduled cases require the RunPod SSH load generator",
+            runner,
+        )
+
+    def test_direct_cluster_transport_is_exact_and_records_evidence(self) -> None:
+        runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            '"http://$SERVICE.$NAMESPACE.svc.cluster.local:$SERVICE_PORT"',
+            runner,
+        )
+        self.assertIn(
+            'die "--origin-base-url must exactly match the selected Service '
+            'cluster-DNS URL"',
+            runner,
+        )
+        self.assertIn('transport="direct-cluster-dns"', runner)
+        self.assertIn("contract-transport.json", runner)
+        self.assertIn("prometheus-transport.json", runner)
+        self.assertIn(
+            '"$CLUSTER_SERVICE_TRANSPORT" == "port-forward"',
+            runner,
+        )
+
+    def test_runpod_ssh_helper_is_fail_closed(self) -> None:
+        helper = (TOOLS_DIR / "runpod_loadgen.sh").read_text(encoding="utf-8")
+        phase = (
+            BENCHMARK_ROOT / "runpod" / "run-phase.sh"
+        ).read_text(encoding="utf-8")
+
+        for required in (
+            "StrictHostKeyChecking=yes",
+            'UserKnownHostsFile="$known_hosts"',
+            "IdentitiesOnly=yes",
+            "PasswordAuthentication=no",
+            'stat -c \'%u\' "$IDENTITY_KEY"',
+            "validate_remote_identity",
+            "validate_remote_path",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, helper)
+        self.assertIn("BLUEMAP_PHASE_TIMEOUT_SECONDS", phase)
+        self.assertIn("bluemap-runpod-sample-resources", phase)
+        self.assertIn("--kill-after=30s", phase)
+        self.assertIn(".runtime.cpu.effectiveVcpuCount == $vcpuCount", helper)
+        self.assertIn(".runpod.cpuFlavorId == \"cpu5c\"", helper)
+        dockerfile = (
+            BENCHMARK_ROOT / "runpod" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        entrypoint = (
+            BENCHMARK_ROOT / "runpod" / "entrypoint.sh"
+        ).read_text(encoding="utf-8")
+        runtime_identity = (
+            BENCHMARK_ROOT / "runpod" / "identity.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("install -d -m 0755 -o root -g root /runner", dockerfile)
+        self.assertIn(
+            "install -m 0444 -o root -g root /dev/null "
+            "/runner/runpod-environment.json",
+            entrypoint,
+        )
+        for required in (
+            "/sys/fs/cgroup/cpu.max",
+            "/sys/fs/cgroup/cpuset.cpus.effective",
+            "Cpus_allowed_list",
+            "effectiveVcpuCount",
+            "effective CPU capacity is not 8 vCPU",
+        ):
+            self.assertIn(required, runtime_identity)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            identity = root / "identity.json"
+            key = root / "id_ed25519"
+            identity.write_text("{}\n", encoding="utf-8")
+            key.write_text("not-a-real-key\n", encoding="utf-8")
+            key.chmod(0o600)
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(TOOLS_DIR / "runpod_loadgen.sh"),
+                    "--identity",
+                    str(identity),
+                    "--identity-key",
+                    str(key),
+                    "validate",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("identity is malformed", result.stderr)
 
     def test_http_contract_rejects_each_alternate_representation(self) -> None:
         contract = (
@@ -1471,6 +1620,166 @@ class SlowReaderTests(unittest.TestCase):
                     output=Path("/tmp/unused-output.json"),
                 )
             )
+
+
+class LoadGeneratorCapacityTests(unittest.TestCase):
+    @staticmethod
+    def write_inputs(
+        root: Path,
+        *,
+        receive_step_bytes: int = 25_000_000,
+        memory_current_bytes: int = 400,
+    ) -> tuple[Path, Path, Path]:
+        identity = root / "identity.json"
+        runtime_identity = root / "runtime-identity.json"
+        samples = root / "samples.ndjson"
+        identity.write_text(
+            json.dumps(
+                {
+                    "runpod": {
+                        "cpuFlavorId": "cpu5c",
+                        "vcpuCount": 8,
+                        "minDownloadMbps": 500,
+                        "minUploadMbps": 100,
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        runtime_identity.write_text(
+            json.dumps(
+                {
+                    "runtime": {
+                        "cpu": {
+                            "affinityCount": 8,
+                            "cpusetEffectiveCount": 8,
+                            "effectiveVcpuCount": 8,
+                        },
+                        "memoryBytes": 100_000,
+                        "memoryCapacityBytes": 1000,
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rows = [
+            {
+                "capturedAt": "2026-07-31T00:00:00.000Z",
+                "cpuUsageUsec": 1_000_000,
+                "cpuThrottledUsec": 10_000,
+                "memoryCurrentBytes": 300,
+                "network": {"rxBytes": 1000, "txBytes": 1000},
+            },
+            {
+                "capturedAt": "2026-07-31T00:00:01.000Z",
+                "cpuUsageUsec": 2_000_000,
+                "cpuThrottledUsec": 15_000,
+                "memoryCurrentBytes": memory_current_bytes,
+                "network": {
+                    "rxBytes": receive_step_bytes + 1000,
+                    "txBytes": 1_001_000,
+                },
+            },
+            {
+                "capturedAt": "2026-07-31T00:00:02.000Z",
+                "cpuUsageUsec": 3_000_000,
+                "cpuThrottledUsec": 20_000,
+                "memoryCurrentBytes": memory_current_bytes,
+                "network": {
+                    "rxBytes": 2 * receive_step_bytes + 1000,
+                    "txBytes": 2_001_000,
+                },
+            },
+        ]
+        samples.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        return identity, runtime_identity, samples
+
+    @staticmethod
+    def run_checker(
+        root: Path,
+        identity: Path,
+        runtime_identity: Path,
+        samples: Path,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        output = root / "capacity.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(TOOLS_DIR / "check_load_generator_capacity.py"),
+                str(samples),
+                "--identity",
+                str(identity),
+                "--runtime-identity",
+                str(runtime_identity),
+                "--output",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result, json.loads(output.read_text(encoding="utf-8"))
+
+    def test_accepts_generator_with_cpu_memory_and_network_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            identity, runtime_identity, samples = self.write_inputs(root)
+            result, report = self.run_checker(
+                root,
+                identity,
+                runtime_identity,
+                samples,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(report["passed"])
+        observed = report["observed"]
+        self.assertAlmostEqual(observed["cpuRatio"]["p95"], 0.125)
+        self.assertAlmostEqual(
+            observed["networkMbps"]["receiveP95Ratio"],
+            0.4,
+        )
+        self.assertAlmostEqual(
+            observed["memory"]["maximumRatio"],
+            0.4,
+        )
+
+    def test_rejects_network_or_cgroup_memory_saturation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            identity, runtime_identity, samples = self.write_inputs(
+                root,
+                receive_step_bytes=50_000_000,
+                memory_current_bytes=900,
+            )
+            result, report = self.run_checker(
+                root,
+                identity,
+                runtime_identity,
+                samples,
+            )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(report["passed"])
+        self.assertGreater(
+            report["observed"]["networkMbps"]["receiveP95Ratio"],
+            report["limits"]["maximumP95NetworkRatio"],
+        )
+        self.assertGreater(
+            report["observed"]["memory"]["maximumRatio"],
+            report["limits"]["maximumMemoryRatio"],
+        )
+
+    def test_capacity_module_is_importable(self) -> None:
+        self.assertEqual(
+            check_load_generator_capacity.percentile([3, 1, 2], 0.95),
+            3,
+        )
 
 
 class ArrivalGateTests(unittest.TestCase):

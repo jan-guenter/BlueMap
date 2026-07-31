@@ -54,6 +54,10 @@ jobs:
           python -m unittest discover \
             -s benchmarks/web-performance/tests \
             -p 'test_*.py'
+          python benchmarks/web-performance/controller/test_packaging.py
+          python -m unittest discover \
+            -s benchmarks/web-performance/controller/tests \
+            -p 'test_*.py'
           find benchmarks/web-performance -type f -name '*.py' -print0 |
             xargs -0 python -m py_compile
           find benchmarks/web-performance -type f -name '*.sh' -print0 |
@@ -269,6 +273,55 @@ jobs:
             SOURCE=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=bluemap-web-php
           cache-to: type=gha,mode=max,scope=bluemap-web-php
+          provenance: mode=max
+          sbom: true
+
+  runpod-loadgen-image:
+    name: Build and publish RunPod load-generator image
+    runs-on: ubuntu-latest
+    needs: validate
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Normalize registry owner
+        id: registry
+        shell: bash
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_OUTPUT}"
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ steps.registry.outputs.owner }}/bluemap-perf-loadgen
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=BlueMap RunPod benchmark load generator
+            org.opencontainers.image.description=Pinned external k6 source for BlueMap web performance tests
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: benchmarks/web-performance/runpod/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=bluemap-perf-loadgen
+          cache-to: type=gha,mode=max,scope=bluemap-perf-loadgen
           provenance: mode=max
           sbom: true
 

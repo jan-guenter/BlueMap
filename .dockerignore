@@ -18,3 +18,11 @@ implementations/*
 !implementations/rust-webserver/
 !implementations/rust-webserver/**
 implementations/rust-webserver/target/
+!benchmarks/
+benchmarks/*
+!benchmarks/web-performance/
+benchmarks/web-performance/*
+!benchmarks/web-performance/runpod/
+!benchmarks/web-performance/runpod/**
+!benchmarks/web-performance/controller/
+!benchmarks/web-performance/controller/**
