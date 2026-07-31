@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bluemap-perf-public
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/name: bluemap-perf-public
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: runpod-public-route
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: bluemap-web
+    app.kubernetes.io/part-of: bluemap-web-performance
+  ports:
+    - name: http
+      port: 8100
+      protocol: TCP
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bluemap-perf-public
+  namespace: minecraft
+  labels:
+    app.kubernetes.io/name: bluemap-perf-public
+    app.kubernetes.io/part-of: bluemap-web-performance
+    bluemap.guenter.cloud/experiment-id: runpod-public-route
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: bluemap-test.guenter.cloud
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bluemap-perf-public
+                port:
+                  name: http
