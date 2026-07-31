@@ -7,10 +7,14 @@ This directory defines reproducible, comparative tests for:
 3. the minimally optimized standalone Java server;
 4. the standalone Rust server.
 
-The benchmark is deliberately split into origin and delivery tests. Origin
-tests target a Kubernetes Service directly and measure the server/database
-path. Delivery tests use the public Traefik and Cloudflare path and measure
-the user-facing caching result.
+The benchmark is deliberately split into server-comparison and delivery-cache
+tests. Formal server-comparison traffic originates from one fixed RunPod CPU
+Pod and reaches every candidate through the same public Cloudflare and
+Traefik route. Cloudflare caching must remain bypassed for every measured
+request, so the result compares the server/database path while also including
+the common public-network path. Correctness probes still use the selected
+candidate's exact cluster-DNS Service URL. Delivery-cache tests separately
+exercise the intended browser-cache behavior through the public route.
 
 ## Safety boundary
 
@@ -336,6 +340,14 @@ For a valid comparison, every variant in a matrix run uses:
 - the same HTTP protocol and keep-alive behavior;
 - the same warm-up, measurement duration, and workload order;
 - the same request `TRACE_SEED`, offered-rate gate, and p95/p99 gates;
+- the same frozen RunPod Pod, machine, CPU, image, SSH host-key, and public
+  traffic route;
+- an independently verified eight-vCPU cgroup quota/cpuset/affinity identity
+  and a per-phase load-generator CPU, memory, throttling, and network-capacity
+  gate;
+- a unique formal-run User-Agent and proof that Cloudflare neither cached nor
+  challenged measured requests; only the known origin-served `BYPASS`,
+  `DYNAMIC`, `EXPIRED`, and `MISS` cache states are accepted;
 - no server-side response cache unless that cache is the feature being tested.
 
 The runtime resource envelope is one CPU and 1 GiB memory per web replica.
@@ -567,6 +579,13 @@ Every measured run records:
 - response status counts and failure rate;
 - p50, p90, p95, p99, p99.9, maximum, and time to first byte;
 - bytes received and sent;
+- the frozen and independently rechecked RunPod Pod, machine, data-center,
+  CPU, image, SSH host-key, and runtime identities;
+- the live cgroup-v2 `cpu.max`, effective cpuset, process affinity, and derived
+  exact eight-vCPU capacity, plus per-phase RunPod CPU, throttling, memory, and
+  network samples and the resulting capacity gate;
+- Cloudflare reachability, mitigation, and edge-cache-bypass metrics for the
+  public measured requests;
 - selected Pod CPU/memory from `metrics.k8s.io`, restarts, image digests, and
   exact ready EndpointSlice membership;
 - optional Prometheus target-Pod and selected-node cAdvisor/node-exporter
@@ -585,18 +604,25 @@ Resource samples, exact manifests, image digests, source SHAs, workload
 parameters, and raw k6 output belong in an experiment-specific artifact
 directory. Do not commit credentials or unredacted cluster Secrets.
 
-## Reproducible origin-case runner
+## Reproducible formal case runner
 
-`tools/run_origin_case.sh` runs one complete origin case against an exact
-`bluemap-perf-*` Service. It requires the existing
-`bluemap-perf-loadgen` Pod and explicit names for every web Deployment, web
-Pod, and, for SQL cases, database Pod. File-storage cases omit
-`--database-pod`; it does not discover targets through broad selectors. It
-also requires the exact map IDs recorded in the manifest and the names of all
-non-secret ConfigMaps that render the tested server configuration. Standard
-ConfigMap volume, projected-volume, `envFrom`, and `configMapKeyRef`
-references are derived automatically from selected Deployments/Pods, and a
-missing explicit `--configmap` rejects the case.
+`tools/run_origin_case.sh` runs one complete formal case against an exact
+`bluemap-perf-*` Service. Formal use selects `runpod-ssh`, a frozen RunPod
+identity, and its dedicated Ed25519 private key. Measured k6 requests use
+`https://bluemap-test.guenter.cloud`; direct HTTP correctness requests use the
+selected candidate's exact cluster-DNS URL. The two URLs are recorded
+separately and cannot be substituted for each other. The legacy Kubernetes
+load-generator mode remains available only for local exploratory work and is
+not valid for the formal comparison.
+
+The runner requires explicit names for every web Deployment, web Pod, and,
+for SQL cases, database Pod. File-storage cases omit `--database-pod`; it does
+not discover targets through broad selectors. It also requires the exact map
+IDs recorded in the manifest and the names of all non-secret ConfigMaps that
+render the tested server configuration. Standard ConfigMap volume,
+projected-volume, `envFrom`, and `configMapKeyRef` references are derived
+automatically from selected Deployments/Pods, and a missing explicit
+`--configmap` rejects the case.
 
 Ready EndpointSlice membership must equal the named web Pods before/after the
 case, repetition, correctness, warm-up, measurement, and cool-down boundaries.
@@ -609,13 +635,15 @@ converged on its current Pod template; paused, rolling, or surplus old-revision
 Pods reject the case.
 
 The runner does not apply, patch, scale, restart, delete, or replace Kubernetes
-resources. It only reads exact resources and `metrics.k8s.io`, opens a local
-port-forward for the HTTP contract check, and executes k6 in the load-generator
-Pod. It copies the manifest and workload into that Pod with `kubectl cp` and
-verifies their SHA-256 hashes before use. When explicitly configured, it also
-opens a read-only port-forward to one exact cluster-local Prometheus Service.
-The copied workload files and k6 output are written to the load-generator
-Pod's disposable `/artifacts` `emptyDir`.
+resources. It reads exact resources and `metrics.k8s.io`, runs direct
+correctness requests from its in-cluster controller, and executes measured k6
+phases on the frozen RunPod source over SSH with strict host-key checking. It
+copies the manifest and workload to `/artifacts` on that source and verifies
+their SHA-256 hashes before use. A cluster-local Prometheus URL is queried
+directly by the controller. The public Service and exact Traefik Ingress
+binding `bluemap-test.guenter.cloud` to `bluemap-perf-public:8100` are checked
+at every phase boundary, snapshotted before and after the case, and required
+to remain unchanged.
 
 Use a unique case ID and current, exact Pod names:
 
@@ -632,6 +660,16 @@ benchmarks/web-performance/tools/run_origin_case.sh \
   --database-backend postgresql \
   --service bluemap-perf-java-new-postgresql \
   --service-port 8100 \
+  --load-generator-backend runpod-ssh \
+  --load-generator-identity /runpod-identity/identity.json \
+  --load-generator-identity-key /credentials/id_ed25519 \
+  --traffic-base-url https://bluemap-test.guenter.cloud \
+  --traffic-service bluemap-perf-public \
+  --traffic-service-port 8100 \
+  --origin-base-url \
+    http://bluemap-perf-java-new-postgresql.minecraft.svc.cluster.local:8100 \
+  --formal-run-id formal-COMMIT-runpod-r1 \
+  --require-edge-bypass \
   --manifest benchmarks/web-performance/artifacts/snapshot/manifest.json \
   --map-id world \
   --configmap bluemap-perf-java-new-postgresql-config \
@@ -728,8 +766,10 @@ The local `artifacts/<case-id>/` directory contains:
 - the expected and actual ready EndpointSlice Pod set before and after each
   phase and repetition, plus measurement-time membership samples;
 - resolved container image IDs/digests and per-repetition restart counts;
-- timestamped CPU and memory samples for the load generator and every selected
-  web/database Pod, read directly from `metrics.k8s.io`;
+- timestamped CPU and memory samples for every selected web/database Pod,
+  read directly from `metrics.k8s.io`;
+- the frozen RunPod identity, before/after live identity checks, remote
+  per-phase cgroup/network samples, and load-generator capacity reports;
 - when enabled, one bounded Prometheus `query_range` bundle for the exact case
   start/end timestamps, containing selected-pod cAdvisor CPU, working set,
   throttling and network series, selected-node/background series, and
@@ -939,8 +979,8 @@ required.
 For public delivery tests, use
 `https://bluemap-test.guenter.cloud` and a unique experiment ID. Any temporary
 Cloudflare exception must match both that hostname and the generated
-`BlueMap-Performance/<experiment-id>` User-Agent, and must be removed after
-the run.
+`BlueMap-Performance/<formal-run-id>/<experiment-id>` User-Agent, and must be
+removed after the run.
 
 The Runpod token is supplied only at runtime. Never put it in this repository,
 a Kubernetes Secret, a command-line argument captured in process listings, or

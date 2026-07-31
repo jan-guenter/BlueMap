@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bluemap.guenter.cloud/schemas/runpod-loadgen-identity-v1.json",
+  "title": "BlueMap formal benchmark RunPod load-generator identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "backend",
+    "capturedAt",
+    "formatVersion",
+    "remoteRoot",
+    "runId",
+    "runpod",
+    "ssh"
+  ],
+  "properties": {
+    "backend": {
+      "const": "runpod-ssh"
+    },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "formatVersion": {
+      "const": 1
+    },
+    "remoteRoot": {
+      "const": "/artifacts"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "runpod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "costPerHour",
+        "cpuFlavorId",
+        "dataCenterId",
+        "image",
+        "imageDigest",
+        "machineId",
+        "maxDownloadMbps",
+        "maxUploadMbps",
+        "minDownloadMbps",
+        "minUploadMbps",
+        "podId",
+        "publicIp",
+        "secureCloud",
+        "vcpuCount"
+      ],
+      "properties": {
+        "costPerHour": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cpuFlavorId": {
+          "const": "cpu5c"
+        },
+        "dataCenterId": {
+          "enum": [
+            "EU-CZ-1",
+            "EU-FR-1",
+            "EU-NL-1",
+            "EU-RO-1",
+            "EU-SE-1"
+          ]
+        },
+        "image": {
+          "type": "string",
+          "pattern": "^ghcr\\.io/[a-z0-9][a-z0-9._-]*/bluemap-perf-loadgen@sha256:[a-f0-9]{64}$"
+        },
+        "imageDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "machineId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maxDownloadMbps": {
+          "type": "number",
+          "minimum": 500
+        },
+        "maxUploadMbps": {
+          "type": "number",
+          "minimum": 100
+        },
+        "minDownloadMbps": {
+          "const": 500
+        },
+        "minUploadMbps": {
+          "const": 100
+        },
+        "podId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{3,191}$"
+        },
+        "publicIp": {
+          "type": "string",
+          "format": "ipv4"
+        },
+        "secureCloud": {
+          "const": true
+        },
+        "vcpuCount": {
+          "const": 8
+        }
+      }
+    },
+    "ssh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "hostKey",
+        "hostKeyFingerprint",
+        "port",
+        "user"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "format": "ipv4"
+        },
+        "hostKey": {
+          "type": "string",
+          "pattern": "^ssh-ed25519 [A-Za-z0-9+/=]+$"
+        },
+        "hostKeyFingerprint": {
+          "type": "string",
+          "pattern": "^SHA256:[A-Za-z0-9+/]+$"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "user": {
+          "const": "loadgen"
+        }
+      }
+    }
+  }
+}

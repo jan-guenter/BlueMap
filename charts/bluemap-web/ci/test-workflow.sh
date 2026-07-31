@@ -44,8 +44,8 @@ assert_contains "$workflow" \
 assert_contains "$workflow" "needs: validate"
 
 long_sha_tags=$(grep -F -c "type=sha,format=long,prefix=sha-" "$workflow")
-if [ "$long_sha_tags" -ne 3 ]; then
-    echo "expected all three images to have one full-SHA tag, found $long_sha_tags" >&2
+if [ "$long_sha_tags" -ne 4 ]; then
+    echo "expected all four images to have one full-SHA tag, found $long_sha_tags" >&2
     exit 1
 fi
 

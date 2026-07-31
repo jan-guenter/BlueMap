@@ -8,6 +8,16 @@ REPOSITORY_ROOT="$(cd -- "$BENCHMARK_ROOT/../.." && pwd)"
 KUBECONFIG_PATH="/root/.kube/guenter-cloud"
 NAMESPACE="minecraft"
 LOADGEN_POD="bluemap-perf-loadgen"
+LOADGEN_BACKEND="kubernetes"
+LOADGEN_IDENTITY=""
+LOADGEN_IDENTITY_KEY=""
+RUNPOD_LOADGEN_HELPER="$BENCHMARK_ROOT/tools/runpod_loadgen.sh"
+TRAFFIC_BASE_URL=""
+ORIGIN_BASE_URL=""
+DIRECT_ORIGIN_BASE_URL=""
+CLUSTER_SERVICE_TRANSPORT="port-forward"
+FORMAL_RUN_ID=""
+REQUIRE_EDGE_BYPASS="false"
 K6_SCRIPT="$BENCHMARK_ROOT/k6/bluemap.js"
 CONTRACT_SCRIPT="$BENCHMARK_ROOT/tools/check_http_contract.py"
 RUNTIME_IDENTITY_SCRIPT="$BENCHMARK_ROOT/tools/runtime_identity.py"
@@ -40,6 +50,10 @@ MAX_NON_TARGET_NODE_CPU_MAXIMUM_CORES="4.0"
 PYTHON_BIN="${BENCHMARK_PYTHON:-python3}"
 SERVICE_PORT=""
 SERVICE=""
+TRAFFIC_SERVICE=""
+TRAFFIC_SERVICE_PORT=""
+TRAFFIC_INGRESS="bluemap-perf-public"
+TRAFFIC_HOST="bluemap-test.guenter.cloud"
 CASE_ID=""
 MANIFEST=""
 MATRIX=""
@@ -102,7 +116,9 @@ Usage:
 
 Required targets are explicit; every Service, Deployment, and Pod name must
 start with "bluemap-perf-". The runner only performs Kubernetes get, get
---raw, exec/cp into bluemap-perf-loadgen, and port-forward operations.
+--raw, and port-forward operations. Kubernetes load generation additionally
+uses exec/cp into bluemap-perf-loadgen. RunPod load generation uses a frozen
+identity plus a dedicated Ed25519 key and sends traffic through a public URL.
 
 Workload options:
   --profile NAME                  k6 profile (default: map-data-mixed)
@@ -136,6 +152,17 @@ Workload options:
                                   reject peak background CPU above N (default: 4)
 
 Path/cluster options:
+  --load-generator-backend kubernetes|runpod-ssh
+                                  request source (default: kubernetes)
+  --load-generator-identity FILE frozen non-secret RunPod identity
+  --load-generator-identity-key FILE
+                                  private Ed25519 identity for RunPod SSH
+  --traffic-base-url URL          public HTTPS request target for RunPod
+  --traffic-service NAME          public routing Service for RunPod
+  --traffic-service-port PORT     public routing Service port for RunPod
+  --origin-base-url URL           exact cluster-DNS origin URL for direct access
+  --formal-run-id ID              unique run identifier included in User-Agent
+  --require-edge-bypass           reject Cloudflare cache hits/challenges
   --artifact-root DIRECTORY
   --matrix FILE                     frozen formal matrix (requires schedule/entry)
   --schedule FILE                   generated balanced schedule
@@ -258,6 +285,42 @@ while (($# > 0)); do
         --database-backend)
             DATABASE_BACKEND="${2:-}"
             shift 2
+            ;;
+        --load-generator-backend)
+            LOADGEN_BACKEND="${2:-}"
+            shift 2
+            ;;
+        --load-generator-identity)
+            LOADGEN_IDENTITY="${2:-}"
+            shift 2
+            ;;
+        --load-generator-identity-key)
+            LOADGEN_IDENTITY_KEY="${2:-}"
+            shift 2
+            ;;
+        --traffic-base-url)
+            TRAFFIC_BASE_URL="${2:-}"
+            shift 2
+            ;;
+        --traffic-service)
+            TRAFFIC_SERVICE="${2:-}"
+            shift 2
+            ;;
+        --traffic-service-port)
+            TRAFFIC_SERVICE_PORT="${2:-}"
+            shift 2
+            ;;
+        --origin-base-url)
+            DIRECT_ORIGIN_BASE_URL="${2:-}"
+            shift 2
+            ;;
+        --formal-run-id)
+            FORMAL_RUN_ID="${2:-}"
+            shift 2
+            ;;
+        --require-edge-bypass)
+            REQUIRE_EDGE_BYPASS="true"
+            shift
             ;;
         --web-deployment)
             WEB_DEPLOYMENTS+=("${2:-}")
@@ -426,17 +489,54 @@ done
 ((${#CONFIGMAPS[@]} > 0)) || die "At least one --configmap is required"
 
 validate_prefixed_name "Service" "$SERVICE"
-validate_prefixed_name "load-generator Pod" "$LOADGEN_POD"
+[[ "$LOADGEN_BACKEND" == "kubernetes" || "$LOADGEN_BACKEND" == "runpod-ssh" ]] ||
+    die "--load-generator-backend must be kubernetes or runpod-ssh"
+if [[ "$LOADGEN_BACKEND" == "kubernetes" ]]; then
+    validate_prefixed_name "load-generator Pod" "$LOADGEN_POD"
+    [[ -z "$LOADGEN_IDENTITY" && -z "$LOADGEN_IDENTITY_KEY" ]] ||
+        die "Kubernetes load generation does not accept RunPod identity files"
+    [[ -z "$TRAFFIC_BASE_URL" ]] ||
+        die "Kubernetes load generation does not accept --traffic-base-url"
+    [[ -z "$TRAFFIC_SERVICE" && -z "$TRAFFIC_SERVICE_PORT" ]] ||
+        die "Kubernetes load generation does not accept a traffic Service"
+    [[ "$REQUIRE_EDGE_BYPASS" == "false" ]] ||
+        die "Kubernetes load generation cannot require an edge bypass"
+else
+    [[ -f "$LOADGEN_IDENTITY" && ! -L "$LOADGEN_IDENTITY" ]] ||
+        die "RunPod load generation requires a regular --load-generator-identity"
+    [[ -f "$LOADGEN_IDENTITY_KEY" && ! -L "$LOADGEN_IDENTITY_KEY" ]] ||
+        die "RunPod load generation requires a regular --load-generator-identity-key"
+    [[ "$TRAFFIC_BASE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]] ||
+        die "RunPod load generation requires an absolute HTTPS --traffic-base-url"
+    [[ "$TRAFFIC_BASE_URL" != *"?"* && "$TRAFFIC_BASE_URL" != *"#"* ]] ||
+        die "RunPod traffic URLs must not contain a query or fragment"
+    [[ "${TRAFFIC_BASE_URL%/}" == "https://$TRAFFIC_HOST" ]] ||
+        die "RunPod traffic must use the exact public benchmark hostname"
+    [[ "$TRAFFIC_SERVICE" == "bluemap-perf-public" ]] ||
+        die "RunPod load generation requires --traffic-service bluemap-perf-public"
+    [[ "$TRAFFIC_SERVICE_PORT" == "8100" ]] ||
+        die "RunPod load generation requires --traffic-service-port 8100"
+    [[ "$TRAFFIC_SERVICE" != "$SERVICE" ]] ||
+        die "RunPod traffic and candidate Services must be distinct"
+    [[ "$FORMAL_RUN_ID" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] ||
+        die "RunPod load generation requires a valid --formal-run-id"
+    [[ "$REQUIRE_EDGE_BYPASS" == "true" ]] ||
+        die "RunPod load generation requires --require-edge-bypass"
+    [[ "$(jq -r '.runId // empty' "$LOADGEN_IDENTITY")" == "$FORMAL_RUN_ID" ]] ||
+        die "RunPod identity runId differs from --formal-run-id"
+fi
 for name in "${WEB_DEPLOYMENTS[@]}"; do
     validate_prefixed_name "Deployment" "$name"
 done
 for name in "${WEB_PODS[@]}"; do
     validate_prefixed_name "web Pod" "$name"
-    [[ "$name" != "$LOADGEN_POD" ]] || die "The load-generator Pod cannot be a web Pod"
+    [[ "$LOADGEN_BACKEND" != "kubernetes" || "$name" != "$LOADGEN_POD" ]] ||
+        die "The load-generator Pod cannot be a web Pod"
 done
 for name in "${DATABASE_PODS[@]}"; do
     validate_prefixed_name "database Pod" "$name"
-    [[ "$name" != "$LOADGEN_POD" ]] || die "The load-generator Pod cannot be a database Pod"
+    [[ "$LOADGEN_BACKEND" != "kubernetes" || "$name" != "$LOADGEN_POD" ]] ||
+        die "The load-generator Pod cannot be a database Pod"
 done
 for name in "${CONFIGMAPS[@]}"; do
     validate_prefixed_name "ConfigMap" "$name"
@@ -448,6 +548,12 @@ done
 
 validate_positive_integer "service port" "$SERVICE_PORT"
 ((SERVICE_PORT <= 65535)) || die "service port must not exceed 65535"
+if [[ -n "$DIRECT_ORIGIN_BASE_URL" ]]; then
+    [[ "$DIRECT_ORIGIN_BASE_URL" == \
+        "http://$SERVICE.$NAMESPACE.svc.cluster.local:$SERVICE_PORT" ]] ||
+        die "--origin-base-url must exactly match the selected Service cluster-DNS URL"
+    CLUSTER_SERVICE_TRANSPORT="direct-cluster-dns"
+fi
 validate_positive_integer "rate" "$RATE"
 validate_positive_integer "viewers" "$VIEWERS"
 validate_positive_integer "marker interval seconds" "$MARKER_INTERVAL_SECONDS"
@@ -545,13 +651,22 @@ fi
     die "Schedule validator is unavailable"
 [[ -f "$SCRIPT_DIR/check_arrival_gate.py" ]] ||
     die "Arrival-gate helper is unavailable"
+[[ -f "$SCRIPT_DIR/check_load_generator_capacity.py" ]] ||
+    die "Load-generator capacity helper is unavailable"
 [[ -f "$RUNTIME_IDENTITY_SCRIPT" ]] ||
     die "Runtime-identity helper is unavailable"
+[[ -f "$RUNPOD_LOADGEN_HELPER" ]] ||
+    die "RunPod load-generator helper is unavailable"
 [[ -f "$KUBECONFIG_PATH" ]] || die "Kubeconfig '$KUBECONFIG_PATH' is not a regular file"
 
 for command in git kubectl jq sha256sum tee diff; do
     require_command "$command"
 done
+if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+    for command in scp ssh; do
+        require_command "$command"
+    done
+fi
 require_command "$PYTHON_BIN"
 BENCHMARK_COMMIT="$(
     git -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null
@@ -587,6 +702,8 @@ schedule_option_count=0
 ((schedule_option_count == 0 || schedule_option_count == 3)) ||
     die "--matrix, --schedule, and --schedule-entry must be supplied together"
 if ((schedule_option_count == 3)); then
+    [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]] ||
+        die "Formal scheduled cases require the RunPod SSH load generator"
     ((variant_option_count == 4)) ||
         die "Formal schedule entries require complete variant metadata"
     ((REPETITIONS == 1)) ||
@@ -620,12 +737,14 @@ if ((schedule_option_count == 3)); then
     for helper in \
         capture_prometheus.py \
         check_arrival_gate.py \
+        check_load_generator_capacity.py \
         configmap_references.py \
         generate_schedule.py \
         runtime_identity.py \
         sanitize_configmap.py \
         sanitize_kubernetes_resource.py \
-        slow_reader.py; do
+        slow_reader.py \
+        runpod_loadgen.sh; do
         verify_committed_benchmark_file \
             "benchmarks/web-performance/tools/$helper" \
             "$SCRIPT_DIR/$helper"
@@ -900,16 +1019,51 @@ validate_load_generator_pod() {
         die "Pod '$LOADGEN_POD' does not match the fail-closed load-generator structure"
 }
 
+validate_runpod_load_generator() {
+    "$RUNPOD_LOADGEN_HELPER" \
+        --identity "$LOADGEN_IDENTITY" \
+        --identity-key "$LOADGEN_IDENTITY_KEY" \
+        validate
+}
+
 loadgen_exec() {
-    validate_load_generator_pod
-    kube exec "pod/$LOADGEN_POD" -c k6 -- "$@"
+    if [[ "$LOADGEN_BACKEND" == "kubernetes" ]]; then
+        validate_load_generator_pod
+        kube exec "pod/$LOADGEN_POD" -c k6 -- "$@"
+    else
+        "$RUNPOD_LOADGEN_HELPER" \
+            --identity "$LOADGEN_IDENTITY" \
+            --identity-key "$LOADGEN_IDENTITY_KEY" \
+            exec "$@"
+    fi
 }
 
 loadgen_copy_to() {
     local local_file="$1"
     local remote_file="$2"
-    validate_load_generator_pod
-    kube cp "$local_file" "$LOADGEN_POD:$remote_file" -c k6
+    if [[ "$LOADGEN_BACKEND" == "kubernetes" ]]; then
+        validate_load_generator_pod
+        kube cp "$local_file" "$LOADGEN_POD:$remote_file" -c k6
+    else
+        "$RUNPOD_LOADGEN_HELPER" \
+            --identity "$LOADGEN_IDENTITY" \
+            --identity-key "$LOADGEN_IDENTITY_KEY" \
+            copy-to "$local_file" "$remote_file"
+    fi
+}
+
+loadgen_copy_from() {
+    local remote_file="$1"
+    local local_file="$2"
+    if [[ "$LOADGEN_BACKEND" == "kubernetes" ]]; then
+        validate_load_generator_pod
+        kube cp "$LOADGEN_POD:$remote_file" "$local_file" -c k6
+    else
+        "$RUNPOD_LOADGEN_HELPER" \
+            --identity "$LOADGEN_IDENTITY" \
+            --identity-key "$LOADGEN_IDENTITY_KEY" \
+            copy-from "$remote_file" "$local_file"
+    fi
 }
 
 validate_available_deployment() {
@@ -928,9 +1082,76 @@ validate_available_deployment() {
         die "Deployment '$deployment' has not converged on its current Pod template"
 }
 
-verify_service_endpoints() {
-    local label="$1"
-    local destination="$ARTIFACT_DIR/cluster/endpoints-$label.json"
+validate_traffic_service() {
+    local payload
+    payload="$(kube get service "$TRAFFIC_SERVICE" -o json)" ||
+        return 1
+    jq -e \
+        --arg service "$TRAFFIC_SERVICE" \
+        --arg namespace "$NAMESPACE" \
+        --argjson port "$TRAFFIC_SERVICE_PORT" \
+        '
+        .apiVersion == "v1"
+        and .kind == "Service"
+        and .metadata.name == $service
+        and .metadata.namespace == $namespace
+        and (.metadata.uid | type == "string" and length > 0)
+        and .metadata.deletionTimestamp == null
+        and .metadata.labels["app.kubernetes.io/part-of"]
+            == "bluemap-web-performance"
+        and .metadata.labels["bluemap.guenter.cloud/experiment-id"]
+            == "runpod-public-route"
+        and .spec.type == "ClusterIP"
+        and .spec.selector == {
+            "app.kubernetes.io/name": "bluemap-web",
+            "app.kubernetes.io/part-of": "bluemap-web-performance"
+        }
+        and (.spec.ports | length) == 1
+        and .spec.ports[0].name == "http"
+        and .spec.ports[0].port == $port
+        and .spec.ports[0].protocol == "TCP"
+        and .spec.ports[0].targetPort == "http"
+        ' <<<"$payload" >/dev/null
+}
+
+validate_traffic_ingress() {
+    local payload
+    payload="$(kube get ingress "$TRAFFIC_INGRESS" -o json)" ||
+        return 1
+    jq -e \
+        --arg ingress "$TRAFFIC_INGRESS" \
+        --arg namespace "$NAMESPACE" \
+        --arg host "$TRAFFIC_HOST" \
+        --arg service "$TRAFFIC_SERVICE" \
+        '
+        .apiVersion == "networking.k8s.io/v1"
+        and .kind == "Ingress"
+        and .metadata.name == $ingress
+        and .metadata.namespace == $namespace
+        and (.metadata.uid | type == "string" and length > 0)
+        and .metadata.deletionTimestamp == null
+        and .metadata.labels["app.kubernetes.io/part-of"]
+            == "bluemap-web-performance"
+        and .metadata.labels["bluemap.guenter.cloud/experiment-id"]
+            == "runpod-public-route"
+        and .spec.ingressClassName == "traefik"
+        and .spec.defaultBackend == null
+        and ((.spec.tls // []) | length) == 0
+        and (.spec.rules | length) == 1
+        and .spec.rules[0].host == $host
+        and (.spec.rules[0].http.paths | length) == 1
+        and .spec.rules[0].http.paths[0].path == "/"
+        and .spec.rules[0].http.paths[0].pathType == "Prefix"
+        and .spec.rules[0].http.paths[0].backend.service.name == $service
+        and .spec.rules[0].http.paths[0].backend.service.port == {
+            "name": "http"
+        }
+        ' <<<"$payload" >/dev/null
+}
+
+verify_named_service_endpoints() {
+    local service="$1"
+    local destination="$2"
     local payload
     local expected_pods_json
     expected_pods_json="$(
@@ -939,13 +1160,13 @@ verify_service_endpoints() {
     )"
     payload="$(
         kube get endpointslice \
-            --selector "kubernetes.io/service-name=$SERVICE" \
+            --selector "kubernetes.io/service-name=$service" \
             -o json
     )" || return 1
 
     jq \
         --arg capturedAt "$(timestamp)" \
-        --arg service "$SERVICE" \
+        --arg service "$service" \
         --argjson expected "$expected_pods_json" \
         '{
             capturedAt: $capturedAt,
@@ -995,6 +1216,22 @@ verify_service_endpoints() {
         .allReadyEndpointsReferencePods == true
         and .readyPods == .expectedReadyPods
     ' "$destination" >/dev/null
+}
+
+verify_service_endpoints() {
+    local label="$1"
+    verify_named_service_endpoints \
+        "$SERVICE" \
+        "$ARTIFACT_DIR/cluster/endpoints-$label.json" ||
+        return 1
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+        validate_traffic_service || return 1
+        validate_traffic_ingress || return 1
+        verify_named_service_endpoints \
+            "$TRAFFIC_SERVICE" \
+            "$ARTIFACT_DIR/cluster/traffic-endpoints-$label.json" ||
+            return 1
+    fi
 }
 
 verify_web_pod_ownership() {
@@ -1193,15 +1430,16 @@ verify_web_pod_ownership() {
     rm -f -- "$items_file"
 }
 
-sample_service_endpoints() {
-    local phase="$1"
-    local destination="$ARTIFACT_DIR/samples/endpoint-membership.ndjson"
+sample_named_service_endpoints() {
+    local service="$1"
+    local phase="$2"
+    local destination="$3"
     local payload
     local expected_pods_json
     expected_pods_json="$(json_array "${WEB_PODS[@]}" | jq -cS .)"
     if ! payload="$(
         kube get endpointslice \
-            --selector "kubernetes.io/service-name=$SERVICE" \
+            --selector "kubernetes.io/service-name=$service" \
             -o json
     )"; then
         : > "$ENDPOINT_SAMPLE_FAILED_FILE"
@@ -1234,6 +1472,20 @@ sample_service_endpoints() {
     fi
     if ! tail -n 1 "$destination" | jq -e '.passed == true' >/dev/null; then
         : > "$ENDPOINT_SAMPLE_FAILED_FILE"
+    fi
+}
+
+sample_service_endpoints() {
+    local phase="$1"
+    sample_named_service_endpoints \
+        "$SERVICE" \
+        "$phase" \
+        "$ARTIFACT_DIR/samples/endpoint-membership.ndjson"
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+        sample_named_service_endpoints \
+            "$TRAFFIC_SERVICE" \
+            "$phase" \
+            "$ARTIFACT_DIR/samples/traffic-endpoint-membership.ndjson"
     fi
 }
 
@@ -1287,6 +1539,18 @@ capture_snapshot_set() {
 
     snapshot_resource service "$SERVICE" "$directory/service-$SERVICE.json" ||
         return 1
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+        snapshot_resource \
+            service \
+            "$TRAFFIC_SERVICE" \
+            "$directory/service-$TRAFFIC_SERVICE.json" ||
+            return 1
+        snapshot_resource \
+            ingress \
+            "$TRAFFIC_INGRESS" \
+            "$directory/ingress-$TRAFFIC_INGRESS.json" ||
+            return 1
+    fi
     runtime_spec_arguments=(
         runtime-spec-snapshots
         --service "$directory/service-$SERVICE.json"
@@ -1686,26 +1950,44 @@ wait_for_port_forward() {
 run_contract_check() {
     local repetition="$1"
     local repetition_dir="$2"
-    local local_port
-    local_port="$(find_free_local_port)"
+    local contract_base_url
+    local transport
     local forward_log="$repetition_dir/contract-port-forward.log"
     local contract_log="$repetition_dir/contract.log"
 
-    kube port-forward \
-        --address 127.0.0.1 \
-        "service/$SERVICE" \
-        "$local_port:$SERVICE_PORT" >"$forward_log" 2>&1 &
-    PORT_FORWARD_PID=$!
+    if [[ -n "$DIRECT_ORIGIN_BASE_URL" ]]; then
+        contract_base_url="$DIRECT_ORIGIN_BASE_URL"
+        transport="direct-cluster-dns"
+    else
+        local local_port
+        local_port="$(find_free_local_port)"
+        contract_base_url="http://127.0.0.1:$local_port"
+        transport="port-forward"
+        kube port-forward \
+            --address 127.0.0.1 \
+            "service/$SERVICE" \
+            "$local_port:$SERVICE_PORT" >"$forward_log" 2>&1 &
+        PORT_FORWARD_PID=$!
 
-    if ! wait_for_port_forward "$PORT_FORWARD_PID" "$forward_log"; then
-        stop_port_forward
-        record_failure "Repetition $repetition: port-forward readiness failed"
-        return 1
+        if ! wait_for_port_forward "$PORT_FORWARD_PID" "$forward_log"; then
+            stop_port_forward
+            record_failure "Repetition $repetition: port-forward readiness failed"
+            return 1
+        fi
     fi
+    jq -n \
+        --arg capturedAt "$(timestamp)" \
+        --arg transport "$transport" \
+        --arg baseUrl "$contract_base_url" \
+        '{
+            capturedAt: $capturedAt,
+            transport: $transport,
+            baseUrl: $baseUrl
+        }' > "$repetition_dir/contract-transport.json"
 
     set +e
     "$PYTHON_BIN" "$CONTRACT_SCRIPT" \
-        "http://127.0.0.1:$local_port" \
+        "$contract_base_url" \
         "$MANIFEST" \
         --mode "$CONTRACT_MODE" \
         --stored-encoding "$STORED_ENCODING" \
@@ -1737,7 +2019,9 @@ capture_prometheus_metrics() {
     )"
     local forward_log="$ARTIFACT_DIR/samples/prometheus-port-forward.log"
 
-    if [[ -n "$prometheus_service" ]]; then
+    local prometheus_transport="direct-http"
+    if [[ -n "$prometheus_service" &&
+        "$CLUSTER_SERVICE_TRANSPORT" == "port-forward" ]]; then
         local prometheus_namespace
         local prometheus_port
         local prometheus_scheme
@@ -1767,7 +2051,21 @@ capture_prometheus_metrics() {
             return 1
         fi
         query_url="$prometheus_scheme://127.0.0.1:$local_port$prometheus_path"
+        prometheus_transport="port-forward"
+    elif [[ -n "$prometheus_service" ]]; then
+        prometheus_transport="direct-cluster-dns"
     fi
+    jq -n \
+        --arg capturedAt "$(timestamp)" \
+        --arg transport "$prometheus_transport" \
+        --arg sourceUrl "$(jq -r '.baseUrl' <<<"$PROMETHEUS_INSPECTION")" \
+        --arg queryUrl "$query_url" \
+        '{
+            capturedAt: $capturedAt,
+            transport: $transport,
+            sourceUrl: $sourceUrl,
+            queryUrl: $queryUrl
+        }' > "$ARTIFACT_DIR/samples/prometheus-transport.json"
 
     local -a capture_arguments=(
         capture
@@ -1822,7 +2120,8 @@ copy_remote_file() {
     local local_file="$2"
     loadgen_exec test -f "$remote" >/dev/null 2>&1 ||
         return 1
-    loadgen_exec cat "$remote" > "$local_file"
+    loadgen_copy_from "$remote" "$local_file" ||
+        return 1
     [[ -s "$local_file" ]]
 }
 
@@ -1898,6 +2197,9 @@ run_k6_phase() {
     local remote_dir="/artifacts/$CASE_ID/repetitions/$repetition_name/$phase"
     local remote_summary="$remote_dir/summary.json"
     local remote_raw="$remote_dir/raw.ndjson"
+    local remote_resources="$remote_dir/load-generator-resources.ndjson"
+    local phase_timeout_seconds
+    local -a phase_command
     mkdir -- "$local_dir" || return 1
     if ! verify_service_endpoints \
         "repetition-$repetition_name-$phase-start"; then
@@ -1918,33 +2220,61 @@ run_k6_phase() {
     if [[ "$phase" == "measurement" ]]; then
         enforce_latency_gates="true"
     fi
+    phase_timeout_seconds="$(
+        "$PYTHON_BIN" -c '
+import math
+import re
+import sys
+
+match = re.fullmatch(r"([1-9][0-9]*)(ms|s|m|h)", sys.argv[1])
+if match is None:
+    raise SystemExit(1)
+value = int(match.group(1))
+factor = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+print(math.ceil(value * factor) + 90)
+' "$duration"
+    )" || return 1
+
+    phase_command=(
+        env K6_NO_USAGE_REPORT=true K6_NO_COLOR=true
+        k6 run
+        --summary-export "$remote_summary"
+        --out "json=$remote_raw"
+        -e "BASE_URL=$BASE_URL"
+        -e "MANIFEST=/artifacts/$CASE_ID/inputs/manifest.json"
+        -e "PROFILE=$PROFILE"
+        -e "RATE=$RATE"
+        -e "DURATION=$duration"
+        -e "PRE_ALLOCATED_VUS=$PRE_ALLOCATED_VUS"
+        -e "MAX_VUS=$MAX_VUS"
+        -e "VIEWERS=$VIEWERS"
+        -e "MARKER_INTERVAL_SECONDS=$MARKER_INTERVAL_SECONDS"
+        -e "MIN_ACHIEVED_RATE_RATIO=$MIN_ACHIEVED_RATE_RATIO"
+        -e "TRACE_SEED=$TRACE_SEED"
+        -e "LATENCY_P95_MS=$LATENCY_P95_MS"
+        -e "LATENCY_P99_MS=$LATENCY_P99_MS"
+        -e "LARGE_OBJECT_LATENCY_P95_MS=$LARGE_OBJECT_LATENCY_P95_MS"
+        -e "LARGE_OBJECT_LATENCY_P99_MS=$LARGE_OBJECT_LATENCY_P99_MS"
+        -e "ENFORCE_LATENCY_GATES=$enforce_latency_gates"
+        -e "FORMAL_RUN_ID=$FORMAL_RUN_ID"
+        -e "REQUIRE_EDGE_BYPASS=$REQUIRE_EDGE_BYPASS"
+        -e "EXPERIMENT_ID=$CASE_ID-r$repetition_name-$phase"
+        -e "ACCEPT_ENCODING=$ACCEPT_ENCODING"
+        -e "CONTRACT_MODE=$CONTRACT_MODE"
+        "/artifacts/$CASE_ID/inputs/bluemap.js"
+    )
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+        phase_command=(
+            env "BLUEMAP_PHASE_TIMEOUT_SECONDS=$phase_timeout_seconds"
+            bluemap-runpod-run-phase
+            --resource-output "$remote_resources"
+            --
+            "${phase_command[@]}"
+        )
+    fi
 
     set +e
-    loadgen_exec \
-        env K6_NO_USAGE_REPORT=true K6_NO_COLOR=true \
-        k6 run \
-        --summary-export "$remote_summary" \
-        --out "json=$remote_raw" \
-        -e "BASE_URL=$BASE_URL" \
-        -e "MANIFEST=/artifacts/$CASE_ID/inputs/manifest.json" \
-        -e "PROFILE=$PROFILE" \
-        -e "RATE=$RATE" \
-        -e "DURATION=$duration" \
-        -e "PRE_ALLOCATED_VUS=$PRE_ALLOCATED_VUS" \
-        -e "MAX_VUS=$MAX_VUS" \
-        -e "VIEWERS=$VIEWERS" \
-        -e "MARKER_INTERVAL_SECONDS=$MARKER_INTERVAL_SECONDS" \
-        -e "MIN_ACHIEVED_RATE_RATIO=$MIN_ACHIEVED_RATE_RATIO" \
-        -e "TRACE_SEED=$TRACE_SEED" \
-        -e "LATENCY_P95_MS=$LATENCY_P95_MS" \
-        -e "LATENCY_P99_MS=$LATENCY_P99_MS" \
-        -e "LARGE_OBJECT_LATENCY_P95_MS=$LARGE_OBJECT_LATENCY_P95_MS" \
-        -e "LARGE_OBJECT_LATENCY_P99_MS=$LARGE_OBJECT_LATENCY_P99_MS" \
-        -e "ENFORCE_LATENCY_GATES=$enforce_latency_gates" \
-        -e "EXPERIMENT_ID=$CASE_ID-r$repetition_name-$phase" \
-        -e "ACCEPT_ENCODING=$ACCEPT_ENCODING" \
-        -e "CONTRACT_MODE=$CONTRACT_MODE" \
-        "/artifacts/$CASE_ID/inputs/bluemap.js" \
+    loadgen_exec "${phase_command[@]}" \
         2>&1 | tee "$local_dir/console.log"
     local status="${PIPESTATUS[0]}"
     set -e
@@ -1959,6 +2289,24 @@ run_k6_phase() {
     if ! copy_remote_file "$remote_raw" "$local_dir/raw.ndjson"; then
         record_failure \
             "Repetition $repetition $phase: raw k6 metric output is missing"
+        artifact_failure=1
+    fi
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]] &&
+        ! copy_remote_file \
+            "$remote_resources" \
+            "$local_dir/load-generator-resources.ndjson"; then
+        record_failure \
+            "Repetition $repetition $phase: RunPod resource telemetry is missing"
+        artifact_failure=1
+    elif [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]] &&
+        ! "$PYTHON_BIN" "$SCRIPT_DIR/check_load_generator_capacity.py" \
+            "$local_dir/load-generator-resources.ndjson" \
+            --identity "$ARTIFACT_DIR/generator/frozen-identity.json" \
+            --runtime-identity \
+            "$ARTIFACT_DIR/generator/live-identity-before.json" \
+            --output "$local_dir/load-generator-capacity.json"; then
+        record_failure \
+            "Repetition $repetition $phase: RunPod load generator exceeded its capacity gate"
         artifact_failure=1
     fi
     if [[ -s "$local_dir/summary.json" ]] &&
@@ -2003,10 +2351,12 @@ write_workload_metadata() {
     local derived_configmaps_json
     local prometheus_enabled=false
     local prometheus_url=""
+    local prometheus_transport=""
     local schedule_enabled=false
     local variant_metadata_enabled=false
     local matrix_sha256=""
     local schedule_sha256=""
+    local generator_identity_json
     web_deployments_json="$(
         json_array "${WEB_DEPLOYMENTS[@]}"
     )"
@@ -2025,6 +2375,12 @@ write_workload_metadata() {
     if [[ -n "$PROMETHEUS_URL" ]]; then
         prometheus_enabled=true
         prometheus_url="$(jq -r '.baseUrl' <<<"$PROMETHEUS_INSPECTION")"
+        if [[ -n "$(jq -r '.clusterService.service // empty' \
+            <<<"$PROMETHEUS_INSPECTION")" ]]; then
+            prometheus_transport="$CLUSTER_SERVICE_TRANSPORT"
+        else
+            prometheus_transport="direct-http"
+        fi
     fi
     if [[ -n "$SCHEDULE_ENTRY_JSON" ]]; then
         schedule_enabled=true
@@ -2034,6 +2390,19 @@ write_workload_metadata() {
     if [[ -n "$VARIANT_ID" ]]; then
         variant_metadata_enabled=true
     fi
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+        generator_identity_json="$(jq -cS . "$LOADGEN_IDENTITY")"
+    else
+        generator_identity_json="$(
+            jq -nc \
+                --arg pod "$LOADGEN_POD" \
+                '{
+                    formatVersion: 1,
+                    backend: "kubernetes",
+                    pod: $pod
+                }'
+        )"
+    fi
 
     jq -n \
         --arg capturedAt "$(timestamp)" \
@@ -2041,7 +2410,16 @@ write_workload_metadata() {
         --arg namespace "$NAMESPACE" \
         --arg service "$SERVICE" \
         --argjson servicePort "$SERVICE_PORT" \
-        --arg baseUrl "$BASE_URL" \
+        --arg originBaseUrl "$ORIGIN_BASE_URL" \
+        --arg trafficBaseUrl "$BASE_URL" \
+        --arg trafficService "$TRAFFIC_SERVICE" \
+        --arg trafficServicePort "$TRAFFIC_SERVICE_PORT" \
+        --arg clusterServiceTransport "$CLUSTER_SERVICE_TRANSPORT" \
+        --arg prometheusTransport "$prometheus_transport" \
+        --arg loadGeneratorBackend "$LOADGEN_BACKEND" \
+        --arg formalRunId "$FORMAL_RUN_ID" \
+        --argjson requireEdgeBypass "$REQUIRE_EDGE_BYPASS" \
+        --argjson generatorIdentity "$generator_identity_json" \
         --arg profile "$PROFILE" \
         --argjson rate "$RATE" \
         --argjson viewers "$VIEWERS" \
@@ -2092,7 +2470,9 @@ write_workload_metadata() {
         --arg configSanitizerSha256 "$(sha256sum "$SCRIPT_DIR/sanitize_configmap.py" | awk '{print $1}')" \
         --arg configMapReferencesSha256 "$(sha256sum "$SCRIPT_DIR/configmap_references.py" | awk '{print $1}')" \
         --arg arrivalGateSha256 "$(sha256sum "$SCRIPT_DIR/check_arrival_gate.py" | awk '{print $1}')" \
+        --arg loadGeneratorCapacitySha256 "$(sha256sum "$SCRIPT_DIR/check_load_generator_capacity.py" | awk '{print $1}')" \
         --arg slowReaderSha256 "$(sha256sum "$SCRIPT_DIR/slow_reader.py" | awk '{print $1}')" \
+        --arg runpodLoadgenHelperSha256 "$(sha256sum "$RUNPOD_LOADGEN_HELPER" | awk '{print $1}')" \
         --arg runtimeIdentitySha256 "$(sha256sum "$RUNTIME_IDENTITY_SCRIPT" | awk '{print $1}')" \
         --argjson mapIds "$MANIFEST_MAP_IDS_JSON" \
         --argjson configMaps "$CONFIGMAPS_JSON" \
@@ -2108,7 +2488,28 @@ write_workload_metadata() {
             origin: {
                 service: $service,
                 port: $servicePort,
-                baseUrl: $baseUrl
+                baseUrl: $originBaseUrl,
+                correctnessTransport: $clusterServiceTransport
+            },
+            traffic: {
+                baseUrl: $trafficBaseUrl,
+                service: (
+                    if $trafficService == "" then null else $trafficService end
+                ),
+                port: (
+                    if $trafficServicePort == ""
+                    then null
+                    else ($trafficServicePort | tonumber)
+                    end
+                ),
+                formalRunId: (
+                    if $formalRunId == "" then null else $formalRunId end
+                ),
+                requiresEdgeBypass: $requireEdgeBypass
+            },
+            loadGenerator: {
+                backend: $loadGeneratorBackend,
+                identity: $generatorIdentity
             },
             workload: {
                 profile: $profile,
@@ -2154,6 +2555,12 @@ write_workload_metadata() {
                 },
                 prometheus: {
                     enabled: $prometheusEnabled,
+                    clusterServiceTransport: (
+                        if $prometheusEnabled
+                        then $prometheusTransport
+                        else null
+                        end
+                    ),
                     baseUrl: (
                         if $prometheusEnabled then $prometheusUrl else null end
                     ),
@@ -2228,14 +2635,20 @@ write_workload_metadata() {
                 configSanitizerSha256: $configSanitizerSha256,
                 configMapReferencesSha256: $configMapReferencesSha256,
                 arrivalGateSha256: $arrivalGateSha256,
+                loadGeneratorCapacitySha256: $loadGeneratorCapacitySha256,
                 slowReaderSha256: $slowReaderSha256,
+                runpodLoadgenHelperSha256: $runpodLoadgenHelperSha256,
                 runtimeIdentitySha256: $runtimeIdentitySha256
             }
         }' > "$ARTIFACT_DIR/inputs/workload.json"
 }
 
-SAMPLE_TARGETS=("loadgen:$LOADGEN_POD")
-ALL_PODS=("$LOADGEN_POD")
+SAMPLE_TARGETS=()
+ALL_PODS=()
+if [[ "$LOADGEN_BACKEND" == "kubernetes" ]]; then
+    SAMPLE_TARGETS+=("loadgen:$LOADGEN_POD")
+    ALL_PODS+=("$LOADGEN_POD")
+fi
 for pod in "${WEB_PODS[@]}"; do
     SAMPLE_TARGETS+=("web:$pod")
     ALL_PODS+=("$pod")
@@ -2249,10 +2662,26 @@ if (($(printf '%s\n' "${ALL_PODS[@]}" | sort | uniq -d | wc -l) > 0)); then
     die "Pod targets must be distinct"
 fi
 
-BASE_URL="http://$SERVICE.$NAMESPACE.svc.cluster.local:$SERVICE_PORT"
+ORIGIN_BASE_URL="http://$SERVICE.$NAMESPACE.svc.cluster.local:$SERVICE_PORT"
+BASE_URL="$ORIGIN_BASE_URL"
+if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+    BASE_URL="${TRAFFIC_BASE_URL%/}"
+fi
 
 kube get service "$SERVICE" -o name >/dev/null
-validate_load_generator_pod
+if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+    validate_traffic_service ||
+        die "Traffic Service '$TRAFFIC_SERVICE' differs from the fail-closed public route"
+    validate_traffic_ingress ||
+        die "Ingress '$TRAFFIC_INGRESS' does not exactly route $TRAFFIC_HOST to $TRAFFIC_SERVICE"
+    mkdir -- "$ARTIFACT_DIR/generator"
+    validate_runpod_load_generator \
+        > "$ARTIFACT_DIR/generator/live-identity-before.json"
+    jq -S . "$LOADGEN_IDENTITY" \
+        > "$ARTIFACT_DIR/generator/frozen-identity.json"
+else
+    validate_load_generator_pod
+fi
 for deployment in "${WEB_DEPLOYMENTS[@]}"; do
     validate_available_deployment "$deployment"
     deployment_replicas="$(
@@ -2328,12 +2757,20 @@ cp -- "$SCRIPT_DIR/capture_prometheus.py" \
     "$ARTIFACT_DIR/inputs/capture_prometheus.py"
 cp -- "$SCRIPT_DIR/check_arrival_gate.py" \
     "$ARTIFACT_DIR/inputs/check_arrival_gate.py"
+cp -- "$SCRIPT_DIR/check_load_generator_capacity.py" \
+    "$ARTIFACT_DIR/inputs/check_load_generator_capacity.py"
 cp -- "$SCRIPT_DIR/slow_reader.py" \
     "$ARTIFACT_DIR/inputs/slow_reader.py"
 cp -- "$SCRIPT_DIR/generate_schedule.py" \
     "$ARTIFACT_DIR/inputs/generate_schedule.py"
 cp -- "$RUNTIME_IDENTITY_SCRIPT" \
     "$ARTIFACT_DIR/inputs/runtime_identity.py"
+cp -- "$RUNPOD_LOADGEN_HELPER" \
+    "$ARTIFACT_DIR/inputs/runpod_loadgen.sh"
+if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+    jq -S . "$LOADGEN_IDENTITY" \
+        > "$ARTIFACT_DIR/inputs/runpod-load-generator-identity.json"
+fi
 if [[ -n "$SCHEDULE_ENTRY_JSON" ]]; then
     cp -- "$MATRIX" "$ARTIFACT_DIR/inputs/matrix.json"
     cp -- "$SCHEDULE" "$ARTIFACT_DIR/inputs/schedule.json"
@@ -2353,10 +2790,15 @@ write_workload_metadata
         configmap_references.py \
         capture_prometheus.py \
         check_arrival_gate.py \
+        check_load_generator_capacity.py \
         slow_reader.py \
         generate_schedule.py \
         runtime_identity.py \
+        runpod_loadgen.sh \
         workload.json > SHA256SUMS
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+        sha256sum runpod-load-generator-identity.json >> SHA256SUMS
+    fi
     if [[ -n "$SCHEDULE_ENTRY_JSON" ]]; then
         sha256sum matrix.json schedule.json schedule-entry.json >> SHA256SUMS
     fi
@@ -2370,9 +2812,9 @@ loadgen_exec \
     'umask 077; mkdir "$1"; mkdir "$1/inputs" "$1/repetitions"' \
     sh "$REMOTE_ROOT"
 copy_local_file "$MANIFEST" "$REMOTE_ROOT/inputs/manifest.json" ||
-    die "Could not copy and verify the manifest in the load-generator Pod"
+    die "Could not copy and verify the manifest on the load generator"
 copy_local_file "$K6_SCRIPT" "$REMOTE_ROOT/inputs/bluemap.js" ||
-    die "Could not copy and verify the k6 script in the load-generator Pod"
+    die "Could not copy and verify the k6 script on the load generator"
 
 capture_snapshot_set before
 verify_web_pod_ownership before ||
@@ -2549,6 +2991,26 @@ if ! diff -u \
     record_failure "A selected Service or Deployment runtime spec changed during the case"
     case_failed=1
 fi
+if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]] &&
+    ! diff -u \
+        <(jq -S 'del(.capturedAt)' \
+            "$ARTIFACT_DIR/cluster/before/service-$TRAFFIC_SERVICE.json") \
+        <(jq -S 'del(.capturedAt)' \
+            "$ARTIFACT_DIR/cluster/after/service-$TRAFFIC_SERVICE.json") \
+        > "$ARTIFACT_DIR/cluster/traffic-service.diff"; then
+    record_failure "The public traffic Service changed during the case"
+    case_failed=1
+fi
+if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]] &&
+    ! diff -u \
+        <(jq -S 'del(.capturedAt)' \
+            "$ARTIFACT_DIR/cluster/before/ingress-$TRAFFIC_INGRESS.json") \
+        <(jq -S 'del(.capturedAt)' \
+            "$ARTIFACT_DIR/cluster/after/ingress-$TRAFFIC_INGRESS.json") \
+        > "$ARTIFACT_DIR/cluster/traffic-ingress.diff"; then
+    record_failure "The public traffic Ingress changed during the case"
+    case_failed=1
+fi
 
 if ((completed_repetitions != REPETITIONS)); then
     record_failure \
@@ -2557,6 +3019,21 @@ if ((completed_repetitions != REPETITIONS)); then
 fi
 if ! capture_prometheus_metrics; then
     case_failed=1
+fi
+if [[ "$LOADGEN_BACKEND" == "runpod-ssh" ]]; then
+    if ! validate_runpod_load_generator \
+        > "$ARTIFACT_DIR/generator/live-identity-after.json"; then
+        record_failure "Final RunPod load-generator identity validation failed"
+        case_failed=1
+    elif ! diff -u \
+        <(jq -S 'del(.capturedAt)' \
+            "$ARTIFACT_DIR/generator/live-identity-before.json") \
+        <(jq -S 'del(.capturedAt)' \
+            "$ARTIFACT_DIR/generator/live-identity-after.json") \
+        > "$ARTIFACT_DIR/generator/live-identity.diff"; then
+        record_failure "RunPod load-generator runtime identity changed"
+        case_failed=1
+    fi
 fi
 
 result="passed"

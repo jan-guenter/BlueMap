@@ -44,6 +44,11 @@ const ENFORCE_LATENCY_GATES = booleanValue(
   __ENV.ENFORCE_LATENCY_GATES || "true",
   "ENFORCE_LATENCY_GATES",
 );
+const FORMAL_RUN_ID = __ENV.FORMAL_RUN_ID || "";
+const REQUIRE_EDGE_BYPASS = booleanValue(
+  __ENV.REQUIRE_EDGE_BYPASS || "false",
+  "REQUIRE_EDGE_BYPASS",
+);
 const EXPERIMENT_ID = requiredEnv("EXPERIMENT_ID");
 const ACCEPT_ENCODING = __ENV.ACCEPT_ENCODING || "zstd";
 const CONTRACT_MODE = __ENV.CONTRACT_MODE || "enhanced";
@@ -51,6 +56,14 @@ const CONTRACT_MODE = __ENV.CONTRACT_MODE || "enhanced";
 if (TRACE_SEED.length > 128 || /[\r\n\0]/.test(TRACE_SEED)) {
   throw new Error(
     "TRACE_SEED must be at most 128 characters without control line breaks",
+  );
+}
+if (
+  FORMAL_RUN_ID.length > 0 &&
+  !/^[a-z0-9][a-z0-9-]{0,62}$/.test(FORMAL_RUN_ID)
+) {
+  throw new Error(
+    "FORMAL_RUN_ID must contain 1-63 lowercase letters, digits, or hyphens",
   );
 }
 if (!["enhanced", "legacy"].includes(CONTRACT_MODE)) {
@@ -100,11 +113,23 @@ const status204 = new Counter("bluemap_status_204");
 const status304 = new Counter("bluemap_status_304");
 const status406 = new Counter("bluemap_status_406");
 const requestTtfb = new Trend("bluemap_ttfb", true);
+const edgeCacheViolation = new Rate("bluemap_edge_cache_violation");
+const edgeMitigation = new Rate("bluemap_edge_mitigation");
+const originServedCacheStatuses = new Set([
+  "BYPASS",
+  "DYNAMIC",
+  "EXPIRED",
+  "MISS",
+]);
+const performanceUserAgent =
+  FORMAL_RUN_ID.length > 0
+    ? `BlueMap-Performance/${FORMAL_RUN_ID}/${EXPERIMENT_ID}`
+    : `BlueMap-Performance/${EXPERIMENT_ID}`;
 
 const requestParams = {
   headers: {
     "Accept-Encoding": ACCEPT_ENCODING,
-    "User-Agent": `BlueMap-Performance/${EXPERIMENT_ID}`,
+    "User-Agent": performanceUserAgent,
   },
   responseType: "none",
 };
@@ -198,6 +223,10 @@ function buildOptions() {
     "http_req_failed{traffic:workload}": ["rate<0.001"],
     dropped_iterations: ["count==0"],
   };
+  if (REQUIRE_EDGE_BYPASS) {
+    commonThresholds.bluemap_edge_cache_violation = ["rate==0"];
+    commonThresholds.bluemap_edge_mitigation = ["rate==0"];
+  }
   if (ENFORCE_LATENCY_GATES) {
     const latency = effectiveLatencyGates();
     commonThresholds["http_req_duration{traffic:workload}"] = [
@@ -351,7 +380,38 @@ function timedGet(path, endpointClass, params, traffic = "workload") {
       profile: PROFILE,
     });
   }
+  if (traffic === "workload" && REQUIRE_EDGE_BYPASS) {
+    recordEdgeState(response, endpointClass);
+  }
   return response;
+}
+
+function recordEdgeState(response, endpointClass) {
+  const cacheStatus = responseHeader(response, "cf-cache-status").toUpperCase();
+  const cfRay = responseHeader(response, "cf-ray");
+  const mitigation = responseHeader(response, "cf-mitigated").toLowerCase();
+  const cacheViolation =
+    cfRay.length === 0 || !originServedCacheStatuses.has(cacheStatus);
+  const mitigationApplied = mitigation === "challenge";
+  const tags = {
+    endpoint_class: endpointClass,
+    profile: PROFILE,
+    cache_status: cacheStatus || "missing",
+  };
+  edgeCacheViolation.add(cacheViolation, tags);
+  edgeMitigation.add(mitigationApplied, tags);
+  check(response, {
+    "Cloudflare reached and response was origin-served": () => !cacheViolation,
+    "Cloudflare mitigation not applied": () => !mitigationApplied,
+  });
+}
+
+function responseHeader(response, name) {
+  const expected = name.toLowerCase();
+  for (const [key, value] of Object.entries(response.headers || {})) {
+    if (key.toLowerCase() === expected) return String(value || "");
+  }
+  return "";
 }
 
 function recordStatus(response, expectedStatuses) {
