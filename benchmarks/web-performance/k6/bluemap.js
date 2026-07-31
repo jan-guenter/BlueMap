@@ -49,8 +49,10 @@ const REQUIRE_EDGE_BYPASS = booleanValue(
   __ENV.REQUIRE_EDGE_BYPASS || "false",
   "REQUIRE_EDGE_BYPASS",
 );
+const TRAFFIC_MODE = __ENV.TRAFFIC_MODE || "cloudflare-https";
 const EXPERIMENT_ID = requiredEnv("EXPERIMENT_ID");
 const ACCEPT_ENCODING = __ENV.ACCEPT_ENCODING || "zstd";
+const STORED_ENCODING = __ENV.STORED_ENCODING || "zstd";
 const CONTRACT_MODE = __ENV.CONTRACT_MODE || "enhanced";
 
 if (TRACE_SEED.length > 128 || /[\r\n\0]/.test(TRACE_SEED)) {
@@ -66,8 +68,39 @@ if (
     "FORMAL_RUN_ID must contain 1-63 lowercase letters, digits, or hyphens",
   );
 }
+if (!["cloudflare-https", "ssh-l4-traefik"].includes(TRAFFIC_MODE)) {
+  throw new Error(
+    "TRAFFIC_MODE must be 'cloudflare-https' or 'ssh-l4-traefik'",
+  );
+}
+if (TRAFFIC_MODE === "ssh-l4-traefik") {
+  if (BASE_URL !== "http://bluemap-test.guenter.cloud") {
+    throw new Error(
+      "ssh-l4-traefik requires BASE_URL=http://bluemap-test.guenter.cloud",
+    );
+  }
+  if (REQUIRE_EDGE_BYPASS) {
+    throw new Error("ssh-l4-traefik forbids REQUIRE_EDGE_BYPASS=true");
+  }
+} else if (FORMAL_RUN_ID.length > 0) {
+  if (BASE_URL !== "https://bluemap-test.guenter.cloud") {
+    throw new Error(
+      "formal cloudflare-https traffic requires the exact HTTPS benchmark URL",
+    );
+  }
+  if (!REQUIRE_EDGE_BYPASS) {
+    throw new Error(
+      "formal cloudflare-https traffic requires REQUIRE_EDGE_BYPASS=true",
+    );
+  }
+}
 if (!["enhanced", "legacy"].includes(CONTRACT_MODE)) {
   throw new Error("CONTRACT_MODE must be 'enhanced' or 'legacy'");
+}
+if (!["gzip", "zstd", "deflate", "identity"].includes(STORED_ENCODING)) {
+  throw new Error(
+    "STORED_ENCODING must be 'gzip', 'zstd', 'deflate', or 'identity'",
+  );
 }
 if (PROFILE === "conditional" && CONTRACT_MODE !== "enhanced") {
   throw new Error("The conditional profile requires CONTRACT_MODE=enhanced");
@@ -115,6 +148,10 @@ const status406 = new Counter("bluemap_status_406");
 const requestTtfb = new Trend("bluemap_ttfb", true);
 const edgeCacheViolation = new Rate("bluemap_edge_cache_violation");
 const edgeMitigation = new Rate("bluemap_edge_mitigation");
+const prohibitedEdgeHeader = new Rate("bluemap_prohibited_edge_header");
+const storedContentEncodingViolation = new Rate(
+  "bluemap_stored_content_encoding_violation",
+);
 const originServedCacheStatuses = new Set([
   "BYPASS",
   "DYNAMIC",
@@ -223,9 +260,24 @@ function buildOptions() {
     "http_req_failed{traffic:workload}": ["rate<0.001"],
     dropped_iterations: ["count==0"],
   };
+  const networkOptions =
+    TRAFFIC_MODE === "ssh-l4-traefik"
+      ? {
+          maxRedirects: 0,
+          hosts: {
+            "bluemap-test.guenter.cloud:80": "127.0.0.1:18080",
+          },
+        }
+      : {};
   if (REQUIRE_EDGE_BYPASS) {
     commonThresholds.bluemap_edge_cache_violation = ["rate==0"];
     commonThresholds.bluemap_edge_mitigation = ["rate==0"];
+  }
+  if (TRAFFIC_MODE === "ssh-l4-traefik") {
+    commonThresholds.bluemap_prohibited_edge_header = ["rate==0"];
+    if (CONTRACT_MODE === "enhanced" && storedCompressionProofApplicable()) {
+      commonThresholds.bluemap_stored_content_encoding_violation = ["rate==0"];
+    }
   }
   if (ENFORCE_LATENCY_GATES) {
     const latency = effectiveLatencyGates();
@@ -270,6 +322,7 @@ function buildOptions() {
       ];
     }
     return {
+      ...networkOptions,
       discardResponseBodies: true,
       scenarios,
       thresholds: {
@@ -281,6 +334,7 @@ function buildOptions() {
   }
 
   return {
+    ...networkOptions,
     discardResponseBodies: true,
     scenarios: {
       workload: {
@@ -383,7 +437,88 @@ function timedGet(path, endpointClass, params, traffic = "workload") {
   if (traffic === "workload" && REQUIRE_EDGE_BYPASS) {
     recordEdgeState(response, endpointClass);
   }
+  if (TRAFFIC_MODE === "ssh-l4-traefik") {
+    recordProhibitedEdgeHeaders(response, endpointClass, traffic);
+  }
+  recordStoredContentEncoding(response, path, endpointClass, traffic);
   return response;
+}
+
+function recordStoredContentEncoding(response, path, endpointClass, traffic) {
+  if (
+    TRAFFIC_MODE !== "ssh-l4-traefik" ||
+    CONTRACT_MODE !== "enhanced" ||
+    response.status !== 200 ||
+    !isStoredCompressedRoute(path)
+  ) {
+    return;
+  }
+
+  const actualEncoding =
+    responseHeader(response, "content-encoding").trim().toLowerCase() ||
+    "identity";
+  const expectedEncoding = STORED_ENCODING.toLowerCase();
+  const violation = actualEncoding !== expectedEncoding;
+  const tags = {
+    endpoint_class: endpointClass,
+    profile: PROFILE,
+    traffic,
+    actual_encoding: actualEncoding,
+    expected_encoding: expectedEncoding,
+  };
+  storedContentEncodingViolation.add(violation, tags);
+  check(response, {
+    "SSH L4 Traefik preserves stored Content-Encoding": () => !violation,
+  });
+}
+
+function isStoredCompressedRoute(path) {
+  const normalized = normalizePath(path);
+  return (
+    (manifest.tiles.includes(normalized) && /\/tiles\/0\//.test(normalized)) ||
+    manifest.textures.includes(normalized)
+  );
+}
+
+function storedCompressionProofApplicable() {
+  switch (PROFILE) {
+    case "hot-tile":
+    case "conditional":
+      return isStoredCompressedRoute(manifest.hotTile);
+    case "random-tiles":
+      return manifest.tiles.some((path) => isStoredCompressedRoute(path));
+    case "large-tile":
+      return isStoredCompressedRoute(manifest.largeTile);
+    case "textures":
+      return manifest.textures.some((path) => isStoredCompressedRoute(path));
+    case "large-object":
+      return isStoredCompressedRoute(manifest.largeObject);
+    case "map-data-mixed":
+    case "browser-mixed":
+      return (
+        manifest.tiles.some((path) => isStoredCompressedRoute(path)) ||
+        manifest.textures.some((path) => isStoredCompressedRoute(path))
+      );
+    default:
+      return false;
+  }
+}
+
+function recordProhibitedEdgeHeaders(response, endpointClass, traffic) {
+  const present = ["cf-ray", "cf-cache-status", "cf-mitigated"].filter(
+    (name) => responseHeader(response, name).length > 0,
+  );
+  const violation = present.length > 0;
+  const tags = {
+    endpoint_class: endpointClass,
+    profile: PROFILE,
+    traffic,
+    headers: present.length > 0 ? present.join(",") : "none",
+  };
+  prohibitedEdgeHeader.add(violation, tags);
+  check(response, {
+    "SSH L4 Traefik response has no Cloudflare headers": () => !violation,
+  });
 }
 
 function recordEdgeState(response, endpointClass) {

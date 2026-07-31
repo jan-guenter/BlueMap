@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,14 +46,21 @@ RUNTIME_IDENTITY = TOOLS_DIR / "runtime_identity.py"
 SANITIZE_RESOURCE = TOOLS_DIR / "sanitize_kubernetes_resource.py"
 SANITIZE_CONFIGMAP = TOOLS_DIR / "sanitize_configmap.py"
 SCHEDULE_GENERATOR = TOOLS_DIR / "generate_schedule.py"
-DEFAULT_OUTPUT_DIR = BENCHMARK_ROOT / "artifacts" / "snapshot"
-DEFAULT_MANIFEST = DEFAULT_OUTPUT_DIR / "manifest.json"
+DEFAULT_SNAPSHOT_DIR = BENCHMARK_ROOT / "artifacts" / "snapshot"
+DEFAULT_MANIFEST = DEFAULT_SNAPSHOT_DIR / "manifest.json"
+DEFAULT_OUTPUT_DIR = (
+    BENCHMARK_ROOT / "artifacts" / "formal-runs" / f"freeze-{REQUIRED_REVISION}"
+)
 ARCHIVE_NAME = f"runtime-identity-freeze-{REQUIRED_REVISION}"
 BUNDLE_NAME = "formal-inputs"
 STAGING_BUNDLE_NAME = f".{BUNDLE_NAME}-{REQUIRED_REVISION}.staging"
 CONTROL_LOCK = orchestrate.CONTROL_LOCK
 PLACEHOLDER = "REPLACE_WITH_"
 ANALYZER = SCRIPT_DIR / "analyze.py"
+LOAD_GENERATOR_IMAGE = re.compile(
+    r"^ghcr\.io/jan-guenter/bluemap-perf-loadgen@"
+    r"(?P<digest>sha256:[0-9a-f]{64})$"
+)
 
 REVIEWED_CONTROLLERS = {
     "freeze.py": Path(__file__).resolve(),
@@ -133,9 +142,34 @@ def validate_control_lock() -> tuple[dict[str, str], str]:
     return hashes, orchestrate.file_sha256(CONTROL_LOCK)
 
 
-def required_confirmation() -> str:
+def load_generator_control(image: str) -> dict[str, str]:
+    match = LOAD_GENERATOR_IMAGE.fullmatch(image)
+    if match is None or set(match.group("digest").removeprefix("sha256:")) == {"0"}:
+        raise orchestrate.SafetyError(
+            "--load-generator-image must be the immutable jan-guenter "
+            "bluemap-perf-loadgen GHCR image"
+        )
+    return {
+        "backend": "runpod-ssh",
+        "image": image,
+        "imageDigest": match.group("digest"),
+        "sourceRevision": REQUIRED_REVISION,
+    }
+
+
+def load_generator_control_sha256(image: str) -> str:
+    return hashlib.sha256(
+        orchestrate.canonical_json(load_generator_control(image))
+    ).hexdigest()
+
+
+def required_confirmation(load_generator_image: str) -> str:
     _, lock_digest = validate_control_lock()
-    return f"FREEZE-FORMAL-MATRIX-{REQUIRED_REVISION}-CONTROL-{lock_digest}"
+    load_generator_sha256 = load_generator_control_sha256(load_generator_image)
+    return (
+        f"FREEZE-FORMAL-MATRIX-{REQUIRED_REVISION}-CONTROL-{lock_digest}"
+        f"-LOADGEN-{load_generator_sha256}"
+    )
 
 
 def invoke_json_tool(
@@ -847,6 +881,7 @@ def copy_input(path: Path, destination: Path) -> None:
 def archive_file_inventory(
     archive_root: Path,
     identities: dict[str, dict[str, Any]],
+    load_generator: dict[str, str],
 ) -> None:
     controller_hashes, control_lock_sha256 = validate_control_lock()
     excluded = {
@@ -872,6 +907,10 @@ def archive_file_inventory(
         "benchmarkGitRevision": REQUIRED_REVISION,
         "controllerLockSha256": control_lock_sha256,
         "controllerSha256": controller_hashes,
+        "loadGenerator": load_generator,
+        "loadGeneratorSha256": hashlib.sha256(
+            orchestrate.canonical_json(load_generator)
+        ).hexdigest(),
         "variants": [
             {
                 "variantId": variant_id,
@@ -955,6 +994,7 @@ def create_frozen_documents(
     manifest_path: Path,
     manifest_sha256: str,
     identities: dict[str, dict[str, Any]],
+    load_generator: dict[str, str],
     archive_root: Path,
     toolchain: Toolchain = LIVE_TOOLCHAIN,
 ) -> tuple[Path, Path, Path, Path]:
@@ -1041,6 +1081,7 @@ def create_frozen_documents(
             "orchestratorSha256": controller_hashes["orchestrate.py"],
             "freezerSha256": controller_hashes["freeze.py"],
             "analyzerSha256": controller_hashes["analyze.py"],
+            "loadGenerator": load_generator,
         },
     )
     return (
@@ -1057,7 +1098,11 @@ def execute_freeze(
     args: argparse.Namespace,
 ) -> None:
     controller_hashes, control_lock_sha256 = validate_control_lock()
-    confirmation = required_confirmation()
+    load_generator = load_generator_control(args.load_generator_image)
+    load_generator_sha256 = hashlib.sha256(
+        orchestrate.canonical_json(load_generator)
+    ).hexdigest()
+    confirmation = required_confirmation(args.load_generator_image)
     if args.confirm != confirmation:
         raise orchestrate.SafetyError(f"--confirm must exactly equal {confirmation!r}")
     orchestrate.validate_repository_freeze(REQUIRED_REVISION, RUNTIME_IDENTITY)
@@ -1090,6 +1135,8 @@ def execute_freeze(
             "benchmarkGitRevision": REQUIRED_REVISION,
             "controllerLockSha256": control_lock_sha256,
             "controllerSha256": controller_hashes,
+            "loadGenerator": load_generator,
+            "loadGeneratorSha256": load_generator_sha256,
             "nextVariant": next(iter(orchestrate.TARGETS)),
             "variants": {},
         }
@@ -1223,10 +1270,11 @@ def execute_freeze(
             args.manifest,
             manifest_sha256,
             identities,
+            load_generator,
             archive_root,
             archived_toolchain,
         )
-        archive_file_inventory(archive_root, identities)
+        archive_file_inventory(archive_root, identities, load_generator)
         (
             output_matrix,
             output_schedule,
@@ -1282,12 +1330,21 @@ def execute_freeze(
         run_lock.close()
 
 
-def freeze_plan(manifest_path: Path, output_dir: Path) -> dict[str, Any]:
+def freeze_plan(
+    manifest_path: Path,
+    output_dir: Path,
+    load_generator_image: str,
+) -> dict[str, Any]:
+    load_generator = load_generator_control(load_generator_image)
     return {
         "formatVersion": 1,
         "clusterContacted": False,
         "benchmarkGitRevision": REQUIRED_REVISION,
-        "requiredConfirmation": required_confirmation(),
+        "requiredConfirmation": required_confirmation(load_generator_image),
+        "loadGenerator": load_generator,
+        "loadGeneratorSha256": hashlib.sha256(
+            orchestrate.canonical_json(load_generator)
+        ).hexdigest(),
         "manifest": str(manifest_path.resolve()),
         "outputDirectory": str(output_dir.resolve()),
         "archiveDirectory": str((output_dir / ARCHIVE_NAME).resolve()),
@@ -1335,6 +1392,7 @@ def freeze_plan(manifest_path: Path, output_dir: Path) -> dict[str, Any]:
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--load-generator-image", required=True)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -1408,7 +1466,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "benchmarkGitRevision": REQUIRED_REVISION,
                         "variants": list(orchestrate.TARGETS),
                         "manifestSha256": orchestrate.file_sha256(args.manifest),
-                        "requiredConfirmation": required_confirmation(),
+                        "loadGenerator": load_generator_control(
+                            args.load_generator_image
+                        ),
+                        "loadGeneratorSha256": load_generator_control_sha256(
+                            args.load_generator_image
+                        ),
+                        "requiredConfirmation": required_confirmation(
+                            args.load_generator_image
+                        ),
                     },
                     indent=2,
                     sort_keys=True,
@@ -1416,7 +1482,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "dry-run":
-            plan = freeze_plan(args.manifest, args.output_dir)
+            plan = freeze_plan(
+                args.manifest,
+                args.output_dir,
+                args.load_generator_image,
+            )
             orchestrate.atomic_write_json(args.plan_output.resolve(), plan)
             print(args.plan_output.resolve())
             return 0

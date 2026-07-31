@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -1354,6 +1355,235 @@ class OriginRunnerStaticTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("identity is malformed", result.stderr)
+
+    def test_runpod_image_bakes_and_live_checks_source_revision(self) -> None:
+        repository_root = BENCHMARK_ROOT.parents[1]
+        workflow = (
+            repository_root / ".github" / "workflows" / "web.yml"
+        ).read_text(encoding="utf-8")
+        dockerfile = (
+            BENCHMARK_ROOT / "runpod" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        entrypoint = (
+            BENCHMARK_ROOT / "runpod" / "entrypoint.sh"
+        ).read_text(encoding="utf-8")
+        runtime_identity = (
+            BENCHMARK_ROOT / "runpod" / "identity.sh"
+        ).read_text(encoding="utf-8")
+        helper = (TOOLS_DIR / "runpod_loadgen.sh").read_text(encoding="utf-8")
+        schema = json.loads(
+            (
+                BENCHMARK_ROOT / "runpod" / "identity.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        self.assertIn("BLUEMAP_SOURCE_REVISION=${{ github.sha }}", workflow)
+        self.assertIn("ARG BLUEMAP_SOURCE_REVISION", dockerfile)
+        self.assertIn("/runner/loadgen-build.json", dockerfile)
+        self.assertIn("chmod 0444 /runner/loadgen-build.json", dockerfile)
+        self.assertNotIn("ENV BLUEMAP_SOURCE_REVISION", dockerfile)
+        self.assertIn("/runner/loadgen-build.json", entrypoint)
+        self.assertIn("sourceRevision: $sourceRevision", entrypoint)
+        self.assertNotIn("BLUEMAP_SOURCE_REVISION", entrypoint)
+        self.assertIn(".sourceRevision", runtime_identity)
+        self.assertIn('--arg sourceRevision "$expected_source_revision"', helper)
+        self.assertIn("and .sourceRevision == $sourceRevision", helper)
+        self.assertIn("sourceRevision", schema["required"])
+        source_revision_schema = schema["properties"]["sourceRevision"]
+        self.assertEqual(source_revision_schema["minLength"], 40)
+        self.assertEqual(source_revision_schema["maxLength"], 40)
+        self.assertEqual(source_revision_schema["pattern"], "^[a-f0-9]+$")
+        self.assertEqual(
+            source_revision_schema["not"]["anyOf"],
+            [
+                {"pattern": "[^a-f0-9]"},
+                {"const": "0" * 40},
+            ],
+        )
+        runpod_schema = schema["properties"]["runpod"]["properties"]
+        self.assertEqual(runpod_schema["image"]["minLength"], 112)
+        self.assertEqual(runpod_schema["image"]["maxLength"], 112)
+        self.assertEqual(runpod_schema["imageDigest"]["minLength"], 71)
+        self.assertEqual(runpod_schema["imageDigest"]["maxLength"], 71)
+        self.assertEqual(
+            runpod_schema["imageDigest"]["not"]["const"],
+            "sha256:" + "0" * 64,
+        )
+
+    def test_runpod_helper_rejects_live_source_revision_mismatch(self) -> None:
+        source_revision = "b" * 40
+        image_digest = "sha256:" + "a" * 64
+        frozen_identity = {
+            "backend": "runpod-ssh",
+            "capturedAt": "2026-07-31T00:00:00.000Z",
+            "formatVersion": 1,
+            "remoteRoot": "/artifacts",
+            "runId": "formal-source-test",
+            "sourceRevision": source_revision,
+            "runpod": {
+                "costPerHour": 0.1,
+                "cpuFlavorId": "cpu5c",
+                "dataCenterId": "EU-NL-1",
+                "image": (
+                    "ghcr.io/jan-guenter/bluemap-perf-loadgen@"
+                    + image_digest
+                ),
+                "imageDigest": image_digest,
+                "machineId": "machine-source-test",
+                "maxDownloadMbps": 1000,
+                "maxUploadMbps": 500,
+                "minDownloadMbps": 500,
+                "minUploadMbps": 100,
+                "podId": "pod-source-test",
+                "publicIp": "192.0.2.20",
+                "secureCloud": True,
+                "vcpuCount": 8,
+            },
+            "ssh": {
+                "host": "192.0.2.20",
+                "hostKey": (
+                    "ssh-ed25519 "
+                    "AAAAC3NzaC1lZDI1NTE5AAAAIFNvdXJjZVJldmlzaW9uVGVzdA=="
+                ),
+                "hostKeyFingerprint": "SHA256:sourceRevisionTest",
+                "port": 22,
+                "user": "loadgen",
+            },
+        }
+        live_identity = {
+            "capturedAt": "2026-07-31T00:01:00.000Z",
+            "formatVersion": 1,
+            "imageDigest": image_digest,
+            "runId": "formal-source-test",
+            "sourceRevision": source_revision,
+            "runpod": {
+                "configuredVcpuCount": 8,
+                "cpuFlavor": "cpu5c",
+                "dataCenterId": "EU-NL-1",
+                "podHostname": "source-test",
+                "podId": "pod-source-test",
+                "publicIp": "192.0.2.20",
+                "vcpuCount": 8,
+            },
+            "runtime": {
+                "cgroupVersion": 2,
+                "cpu": {
+                    "affinity": "0-7",
+                    "affinityCount": 8,
+                    "cgroupCpuMax": "800000 100000",
+                    "cpusetEffective": "0-7",
+                    "cpusetEffectiveCount": 8,
+                    "effectiveVcpuCount": 8,
+                    "periodMicros": 100000,
+                    "quotaMicros": 800000,
+                    "quotaVcpuCount": 8,
+                },
+                "k6Version": "k6 v2.1.0 (test)",
+                "memoryCapacityBytes": 1024,
+                "onlineProcessors": 8,
+            },
+            "startedAt": "2026-07-31T00:00:00.000Z",
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_ssh = fake_bin / "ssh"
+            fake_ssh.write_text(
+                '#!/bin/sh\nexec cat "$FAKE_LIVE_IDENTITY"\n',
+                encoding="utf-8",
+            )
+            fake_ssh.chmod(0o755)
+            identity_path = root / "frozen-identity.json"
+            live_path = root / "live-identity.json"
+            key_path = root / "id_ed25519"
+            identity_path.write_text(
+                json.dumps(frozen_identity), encoding="utf-8"
+            )
+            live_path.write_text(json.dumps(live_identity), encoding="utf-8")
+            key_path.write_text("test-key\n", encoding="utf-8")
+            key_path.chmod(0o600)
+            environment = {
+                **os.environ,
+                "FAKE_LIVE_IDENTITY": str(live_path),
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            }
+            command = [
+                "bash",
+                str(TOOLS_DIR / "runpod_loadgen.sh"),
+                "--identity",
+                str(identity_path),
+                "--identity-key",
+                str(key_path),
+                "validate",
+            ]
+
+            matching = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                env=environment,
+                text=True,
+            )
+            self.assertEqual(matching.returncode, 0, matching.stderr)
+
+            live_identity["sourceRevision"] = "c" * 40
+            live_path.write_text(json.dumps(live_identity), encoding="utf-8")
+            mismatching = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                env=environment,
+                text=True,
+            )
+            self.assertNotEqual(mismatching.returncode, 0)
+            self.assertIn(
+                "Live RunPod identity differs from the frozen identity",
+                mismatching.stderr,
+            )
+
+            frozen_identity["sourceRevision"] = "b" * 39 + "\n"
+            identity_path.write_text(
+                json.dumps(frozen_identity), encoding="utf-8"
+            )
+            newline = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                env=environment,
+                text=True,
+            )
+            self.assertNotEqual(newline.returncode, 0)
+            self.assertIn("identity is malformed", newline.stderr)
+
+    def test_runpod_sshd_permits_only_the_fixed_remote_listener(self) -> None:
+        dockerfile = (
+            BENCHMARK_ROOT / "runpod" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        directives: dict[str, list[str]] = {}
+        for line in dockerfile.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("'") or "'" not in stripped[1:]:
+                continue
+            directive = stripped[1 : stripped.index("'", 1)]
+            name, separator, value = directive.partition(" ")
+            if separator:
+                directives.setdefault(name, []).append(value)
+
+        self.assertEqual(directives.get("AllowTcpForwarding"), ["remote"])
+        self.assertEqual(
+            directives.get("AllowStreamLocalForwarding"),
+            ["no"],
+        )
+        self.assertEqual(directives.get("GatewayPorts"), ["no"])
+        self.assertEqual(
+            directives.get("PermitListen"),
+            ["127.0.0.1:18080"],
+        )
+        self.assertEqual(directives.get("AllowAgentForwarding"), ["no"])
+        self.assertEqual(directives.get("X11Forwarding"), ["no"])
+        self.assertEqual(directives.get("PermitTunnel"), ["no"])
 
     def test_http_contract_rejects_each_alternate_representation(self) -> None:
         contract = (

@@ -110,6 +110,71 @@ class PostHocAnalyzeTest(unittest.TestCase):
         self.assertIs(module.validate_state, original_state)
         self.assertEqual(seen, [("bundle", "f" * 64), ("state", "f" * 64)])
 
+    def test_preflight_replay_can_use_the_bridged_historical_state_digest(
+        self,
+    ) -> None:
+        active = "a" * 64
+        frozen = "f" * 64
+
+        def bundle(*, analyzer_digest: str) -> str:
+            return analyzer_digest
+
+        def state(*, analyzer_digest: str) -> dict[str, str]:
+            return {"analyzerSha256": analyzer_digest}
+
+        module = SimpleNamespace(
+            validate_frozen_bundle=bundle,
+            validate_state=state,
+        )
+        with POSTHOC.bind_frozen_analyzer_digest(module, active, frozen):
+            self.assertEqual(
+                module.validate_frozen_bundle(analyzer_digest=active), frozen
+            )
+            validated_state = module.validate_state(analyzer_digest=active)
+            self.assertEqual(validated_state["analyzerSha256"], frozen)
+            # Preflight replay consumes this already-validated historical field;
+            # it must not recompute the active analyzer's digest.
+            self.assertNotEqual(validated_state["analyzerSha256"], active)
+
+    def test_digest_bridge_cannot_bypass_source_s_binding(self) -> None:
+        active = "a" * 64
+        frozen = "f" * 64
+
+        def bundle(*, analyzer_digest: str) -> str:
+            return analyzer_digest
+
+        def state(
+            *,
+            analyzer_digest: str,
+            bundle_source_revision: str,
+            execution_source_revision: str,
+        ) -> dict[str, str]:
+            if bundle_source_revision != execution_source_revision:
+                raise ValueError("source-S mismatch")
+            return {
+                "analyzerSha256": analyzer_digest,
+                "sourceRevision": execution_source_revision,
+            }
+
+        module = SimpleNamespace(
+            validate_frozen_bundle=bundle,
+            validate_state=state,
+        )
+        with POSTHOC.bind_frozen_analyzer_digest(module, active, frozen):
+            with self.assertRaisesRegex(ValueError, "source-S mismatch"):
+                module.validate_state(
+                    analyzer_digest=active,
+                    bundle_source_revision="1" * 40,
+                    execution_source_revision="2" * 40,
+                )
+            validated = module.validate_state(
+                analyzer_digest=active,
+                bundle_source_revision="1" * 40,
+                execution_source_revision="1" * 40,
+            )
+            self.assertEqual(validated["analyzerSha256"], frozen)
+            self.assertEqual(validated["sourceRevision"], "1" * 40)
+
     def test_analysis_failure_is_wrapped_without_a_traceback(self) -> None:
         error = POSTHOC.PostHocError(
             "active analyzer rejected the historical evidence: failed phase"

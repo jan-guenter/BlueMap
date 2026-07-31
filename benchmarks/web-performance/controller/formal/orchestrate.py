@@ -9,14 +9,17 @@ HTTP load phase is delegated to a frozen external RunPod CPU generator.
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -47,13 +50,109 @@ DEFAULT_KUBECONFIG = Path("/root/.kube/guenter-cloud")
 DEFAULT_PROMETHEUS_URL = (
     "http://rancher-monitoring-prometheus.cattle-monitoring-system.svc:9090"
 )
-DEFAULT_TRAFFIC_BASE_URL = "https://bluemap-test.guenter.cloud"
+DEFAULT_TRAFFIC_MODE = "ssh-l4-traefik"
+TRAFFIC_MODES = ("cloudflare-https", DEFAULT_TRAFFIC_MODE)
+TRAFFIC_BASE_URLS = {
+    "cloudflare-https": "https://bluemap-test.guenter.cloud",
+    "ssh-l4-traefik": "http://bluemap-test.guenter.cloud",
+}
+DEFAULT_TRAFFIC_BASE_URL = TRAFFIC_BASE_URLS[DEFAULT_TRAFFIC_MODE]
+SSH_L4_TRAEFIK_TUNNEL = {
+    "listenHost": "127.0.0.1",
+    "listenPort": 18080,
+    "targetHost": "rke2-traefik.kube-system.svc.cluster.local",
+    "targetPort": 80,
+}
 
 NAMESPACE = "minecraft"
 DATABASE_POD = "bluemap-perf-postgres-0"
 TRAFFIC_SERVICE = "bluemap-perf-public"
 TRAFFIC_SERVICE_PORT = 8100
 CONFIRMATION = "RUN-FROZEN-80-ENTRY-MATRIX"
+PREFLIGHT_CONFIRMATION = "RUN-FROZEN-SSH-L4-PREFLIGHT"
+PREFLIGHT_TRAFFIC_MODE = "ssh-l4-traefik"
+PREFLIGHT_SCHEDULE_SEED = "bluemap-web-performance-ssh-l4-preflight-v1"
+PREFLIGHT_VARIANTS = (
+    "java-new-postgresql",
+    "rust-postgresql",
+    "java-new-postgresql-r3",
+    "rust-postgresql-r3",
+)
+PREFLIGHT_CONTROLS = {
+    "warmupDuration": "30s",
+    "measurementDuration": "2m",
+    "cooldownSeconds": 15,
+    "minimumAchievedRateRatio": 0.99,
+    "preAllocatedVUs": 256,
+    "maxVUs": 512,
+}
+PREFLIGHT_CASES = (
+    {
+        "id": "preflight-large-r1",
+        "profile": "large-object",
+        "rate": 1,
+        "viewers": 15,
+        "markerIntervalSeconds": 10,
+        "latencyP95Milliseconds": 10000,
+        "latencyP99Milliseconds": 20000,
+        "acceptEncoding": "zstd",
+        "storedEncoding": "zstd",
+        "variants": ["java-new-postgresql", "rust-postgresql"],
+    },
+    {
+        "id": "preflight-map-r15",
+        "profile": "map-data-mixed",
+        "rate": 15,
+        "viewers": 15,
+        "markerIntervalSeconds": 10,
+        "latencyP95Milliseconds": 10000,
+        "latencyP99Milliseconds": 20000,
+        "acceptEncoding": "zstd",
+        "storedEncoding": "zstd",
+        "variants": ["java-new-postgresql", "rust-postgresql"],
+    },
+    {
+        "id": "preflight-horizontal-r40",
+        "profile": "map-data-mixed",
+        "rate": 40,
+        "viewers": 40,
+        "markerIntervalSeconds": 10,
+        "latencyP95Milliseconds": 5000,
+        "latencyP99Milliseconds": 10000,
+        "acceptEncoding": "zstd",
+        "storedEncoding": "zstd",
+        "variants": ["java-new-postgresql-r3", "rust-postgresql-r3"],
+    },
+)
+PREFLIGHT_SOURCE_CASE_IDS = (
+    "large-object-r1",
+    "map-mixed-r15",
+    "map-mixed-horizontal-r40",
+)
+PREFLIGHT_RELAY_THRESHOLDS = {
+    "p95CpuLimitRatio": 0.70,
+    "maximumCpuLimitRatio": 0.90,
+    "maximumMemoryLimitRatio": 0.80,
+    "minimumUniqueMetricTimestamps": 6,
+    "maximumUniqueMetricTimestampGapSeconds": 30.0,
+    "maximumMetricAgeSeconds": 60.0,
+    "maximumCoverageGapSeconds": 60.0,
+}
+PREFLIGHT_RELAY_CPU_LIMIT_CORES = 2.0
+PREFLIGHT_RELAY_MEMORY_LIMIT_BYTES = float(2 * 1024**3)
+PREFLIGHT_MAX_HANDOFF_SECONDS = 300.0
+CONTROLLER_SERVICE_ACCOUNT = "bluemap-perf-formal-controller"
+CONTROLLER_JOB_NAME = "bluemap-perf-formal-controller"
+CONTROLLER_REQUIRED_LABELS = {
+    "app.kubernetes.io/name": "bluemap-perf-formal-controller",
+    "app.kubernetes.io/part-of": "bluemap-web-performance",
+}
+PREFLIGHT_TRAEFIK_SERVICE_REGEX = (
+    r"^minecraft-bluemap-perf-public-(?:http|8100)@kubernetes$"
+)
+PREFLIGHT_EVIDENCE_EXCLUDED = frozenset(
+    {"preflight-evidence.json", "preflight-report.json", "SHA256SUMS"}
+)
 
 PROTECTED_RESOURCES = frozenset(
     {
@@ -178,6 +277,16 @@ RESOURCE_NAME = re.compile(
 )
 SERVICE_ACCOUNT_VOLUME_NAME = re.compile(r"^kube-api-access-[a-z0-9]{5}$")
 ADMISSION_POD_SPEC_IDENTITY_VERSION = 1
+LOAD_GENERATOR_CONTROL_KEYS = {
+    "backend",
+    "image",
+    "imageDigest",
+    "sourceRevision",
+}
+LOAD_GENERATOR_IMAGE = re.compile(
+    r"^ghcr\.io/jan-guenter/bluemap-perf-loadgen@"
+    r"(?P<digest>sha256:[0-9a-f]{64})$"
+)
 
 
 def timestamp() -> str:
@@ -191,6 +300,64 @@ def canonical_json(value: Any) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+def validate_load_generator_control(
+    value: Any,
+    benchmark_revision: str,
+    *,
+    label: str = "frozen bundle loadGenerator",
+) -> dict[str, str]:
+    """Validate the immutable source-S load-generator build binding."""
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", benchmark_revision) is None
+        or set(benchmark_revision) == {"0"}
+    ):
+        raise SafetyError("Benchmark revision for loadGenerator is invalid")
+    if not isinstance(value, dict) or set(value) != LOAD_GENERATOR_CONTROL_KEYS:
+        raise SafetyError(f"{label} must contain exactly the four required fields")
+    image = value.get("image")
+    match = LOAD_GENERATOR_IMAGE.fullmatch(image if isinstance(image, str) else "")
+    digest = value.get("imageDigest")
+    if (
+        value.get("backend") != "runpod-ssh"
+        or match is None
+        or digest != match.group("digest")
+        or set(str(digest).removeprefix("sha256:")) == {"0"}
+        or value.get("sourceRevision") != benchmark_revision
+    ):
+        raise SafetyError(
+            f"{label} backend, immutable image, digest, or source revision differs"
+        )
+    return {
+        "backend": value["backend"],
+        "image": image,
+        "imageDigest": digest,
+        "sourceRevision": value["sourceRevision"],
+    }
+
+
+def load_generator_control_sha256(value: dict[str, str]) -> str:
+    return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def validate_load_generator_execution_binding(
+    control: dict[str, str],
+    identity: dict[str, Any],
+) -> str:
+    """Join the frozen bundle to the exact provisioned RunPod identity."""
+    runpod = identity.get("runpod")
+    if (
+        identity.get("backend") != control["backend"]
+        or identity.get("sourceRevision") != control["sourceRevision"]
+        or not isinstance(runpod, dict)
+        or runpod.get("image") != control["image"]
+        or runpod.get("imageDigest") != control["imageDigest"]
+    ):
+        raise SafetyError(
+            "Frozen bundle loadGenerator differs from the frozen RunPod identity"
+        )
+    return load_generator_control_sha256(control)
 
 
 def is_service_account_projection(volume: dict[str, Any]) -> bool:
@@ -299,9 +466,23 @@ def load_runpod_identity(path: Path, formal_run_id: str) -> dict[str, Any]:
     runpod = identity.get("runpod")
     ssh = identity.get("ssh")
     if (
-        identity.get("formatVersion") != 1
+        set(identity)
+        != {
+            "backend",
+            "capturedAt",
+            "formatVersion",
+            "remoteRoot",
+            "runId",
+            "sourceRevision",
+            "runpod",
+            "ssh",
+        }
+        or identity.get("formatVersion") != 1
         or identity.get("backend") != "runpod-ssh"
         or identity.get("runId") != formal_run_id
+        or re.fullmatch(r"[0-9a-f]{40}", identity.get("sourceRevision", ""))
+        is None
+        or set(identity["sourceRevision"]) == {"0"}
         or not isinstance(runpod, dict)
         or not isinstance(ssh, dict)
         or ssh.get("user") != "loadgen"
@@ -314,7 +495,25 @@ def load_runpod_identity(path: Path, formal_run_id: str) -> dict[str, Any]:
     def nonempty_string(value: Any) -> bool:
         return isinstance(value, str) and bool(value)
 
-    for field in ("podId", "machineId", "dataCenterId"):
+    expected_runpod_keys = {
+        "costPerHour",
+        "cpuFlavorId",
+        "dataCenterId",
+        "image",
+        "imageDigest",
+        "machineId",
+        "maxDownloadMbps",
+        "maxUploadMbps",
+        "minDownloadMbps",
+        "minUploadMbps",
+        "podId",
+        "publicIp",
+        "secureCloud",
+        "vcpuCount",
+    }
+    if set(runpod) != expected_runpod_keys:
+        raise SafetyError("RunPod identity runpod object has an invalid shape")
+    for field in ("podId", "machineId", "dataCenterId", "publicIp"):
         if not nonempty_string(runpod.get(field)):
             raise SafetyError(f"RunPod identity runpod.{field} is invalid")
     if (
@@ -342,8 +541,29 @@ def load_runpod_identity(path: Path, formal_run_id: str) -> dict[str, Any]:
     if (
         not isinstance(image_digest, str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None
+        or set(image_digest.removeprefix("sha256:")) == {"0"}
     ):
         raise SafetyError("RunPod identity image digest is invalid")
+    image = runpod.get("image")
+    if (
+        not isinstance(image, str)
+        or LOAD_GENERATOR_IMAGE.fullmatch(image) is None
+        or image != f"ghcr.io/jan-guenter/bluemap-perf-loadgen@{image_digest}"
+    ):
+        raise SafetyError("RunPod identity image and digest differ")
+    cost = runpod.get("costPerHour")
+    if (
+        cost is not None
+        and (
+            isinstance(cost, bool)
+            or not isinstance(cost, (int, float))
+            or not math.isfinite(float(cost))
+            or cost < 0
+        )
+    ):
+        raise SafetyError("RunPod identity runpod.costPerHour is invalid")
+    if set(ssh) != {"host", "hostKey", "hostKeyFingerprint", "port", "user"}:
+        raise SafetyError("RunPod identity ssh object has an invalid shape")
     host = ssh.get("host")
     if (
         not isinstance(host, str)
@@ -366,6 +586,32 @@ def load_runpod_identity(path: Path, formal_run_id: str) -> dict[str, Any]:
     return identity
 
 
+def validate_traffic_controls(
+    *,
+    mode: str,
+    base_url: str,
+    service: str,
+    port: int,
+    requires_edge_bypass: bool,
+) -> None:
+    if mode not in TRAFFIC_MODES:
+        raise SafetyError("Formal traffic mode is invalid")
+    expected_base_url = TRAFFIC_BASE_URLS[mode]
+    if base_url != expected_base_url:
+        raise SafetyError(
+            f"Traffic base URL for {mode} must exactly equal "
+            f"{expected_base_url}"
+        )
+    if service != TRAFFIC_SERVICE or port != TRAFFIC_SERVICE_PORT:
+        raise SafetyError("Traffic Service identity differs from the public router")
+    if not isinstance(requires_edge_bypass, bool):
+        raise SafetyError("Traffic edge-bypass control must be boolean")
+    if mode == "cloudflare-https" and requires_edge_bypass is not True:
+        raise SafetyError("Cloudflare HTTPS traffic requires the edge-bypass proof")
+    if mode == "ssh-l4-traefik" and requires_edge_bypass is not False:
+        raise SafetyError("SSH L4 Traefik traffic cannot claim an edge bypass")
+
+
 def validate_runpod_controls(args: argparse.Namespace) -> dict[str, Any]:
     if args.load_generator_backend != "runpod-ssh":
         raise SafetyError("Formal load generation must use runpod-ssh")
@@ -374,17 +620,13 @@ def validate_runpod_controls(args: argparse.Namespace) -> dict[str, Any]:
         or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", args.formal_run_id) is None
     ):
         raise SafetyError("Formal run ID is invalid")
-    if args.traffic_base_url != DEFAULT_TRAFFIC_BASE_URL:
-        raise SafetyError(
-            f"Traffic base URL must exactly equal {DEFAULT_TRAFFIC_BASE_URL}"
-        )
-    if (
-        args.traffic_service != TRAFFIC_SERVICE
-        or args.traffic_service_port != TRAFFIC_SERVICE_PORT
-    ):
-        raise SafetyError("Traffic Service identity differs from the public router")
-    if not args.require_edge_bypass:
-        raise SafetyError("Formal RunPod traffic requires the edge-bypass proof")
+    validate_traffic_controls(
+        mode=args.traffic_mode,
+        base_url=args.traffic_base_url,
+        service=args.traffic_service,
+        port=args.traffic_service_port,
+        requires_edge_bypass=args.require_edge_bypass,
+    )
     identity_key = args.load_generator_identity_key
     if not identity_key.is_file() or identity_key.is_symlink():
         raise SafetyError(
@@ -396,6 +638,25 @@ def validate_runpod_controls(args: argparse.Namespace) -> dict[str, Any]:
     if identity_key.stat().st_uid != os.getuid():
         raise SafetyError("RunPod SSH key must be owned by the controller user")
     return load_runpod_identity(args.load_generator_identity, args.formal_run_id)
+
+
+def validate_requested_load_generator(args: argparse.Namespace) -> str:
+    """Fail before mutation unless the bundle and provisioned source S agree."""
+    bundle = getattr(args, "frozen_bundle", None)
+    if not isinstance(bundle, dict):
+        raise SafetyError("Frozen bundle was not validated before execution")
+    control = bundle.get("loadGenerator")
+    if not isinstance(control, dict):
+        raise SafetyError("Frozen bundle loadGenerator binding is unavailable")
+    identity = load_runpod_identity(
+        args.load_generator_identity,
+        args.formal_run_id,
+    )
+    digest = validate_load_generator_execution_binding(control, identity)
+    expected = getattr(args, "load_generator_sha256", digest)
+    if expected != digest:
+        raise SafetyError("Frozen load-generator control digest changed")
+    return digest
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -564,6 +825,178 @@ def validate_formal_documents(
     return matrix, schedule
 
 
+def derive_preflight_matrix(formal_matrix: dict[str, Any]) -> dict[str, Any]:
+    """Derive the fixed direct-path smoke matrix from validated formal inputs."""
+
+    variants = formal_matrix.get("variants")
+    if not isinstance(variants, list):
+        raise SafetyError("Formal variants are unavailable for preflight derivation")
+    by_id = {
+        item.get("id"): item
+        for item in variants
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if not set(PREFLIGHT_VARIANTS) <= set(by_id):
+        raise SafetyError("Formal inputs omit a required preflight variant")
+    selected = [copy.deepcopy(by_id[variant_id]) for variant_id in PREFLIGHT_VARIANTS]
+    if any(variant.get("contractMode") != "enhanced" for variant in selected):
+        raise SafetyError("Every preflight variant must use the enhanced contract")
+    formal_cases = formal_matrix.get("cases")
+    if not isinstance(formal_cases, list):
+        raise SafetyError("Formal cases are unavailable for preflight derivation")
+    formal_cases_by_id = {
+        item.get("id"): item
+        for item in formal_cases
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    cases: list[dict[str, Any]] = []
+    for source_id, required in zip(PREFLIGHT_SOURCE_CASE_IDS, PREFLIGHT_CASES):
+        source = formal_cases_by_id.get(source_id)
+        if not isinstance(source, dict):
+            raise SafetyError(f"Formal inputs omit preflight source case {source_id}")
+        source_controls = {
+            key: copy.deepcopy(value)
+            for key, value in source.items()
+            if key not in {"id", "variants"}
+        }
+        required_controls = {
+            key: copy.deepcopy(value)
+            for key, value in required.items()
+            if key not in {"id", "variants"}
+        }
+        if source_controls != required_controls:
+            raise SafetyError(
+                f"Formal source case {source_id} differs from preflight controls"
+            )
+        cases.append(
+            {
+                "id": required["id"],
+                **source_controls,
+                "variants": copy.deepcopy(required["variants"]),
+            }
+        )
+    return {
+        "formatVersion": 3,
+        "benchmarkGitRevision": formal_matrix["benchmarkGitRevision"],
+        "manifestSha256": formal_matrix["manifestSha256"],
+        "mapIds": copy.deepcopy(formal_matrix["mapIds"]),
+        "scheduleSeed": PREFLIGHT_SCHEDULE_SEED,
+        "traceSeed": formal_matrix["traceSeed"],
+        "repetitions": 1,
+        "controls": copy.deepcopy(PREFLIGHT_CONTROLS),
+        "cases": cases,
+        "variants": selected,
+    }
+
+
+def validate_preflight_documents(
+    formal_matrix: dict[str, Any],
+    matrix_path: Path,
+    schedule_path: Path,
+    generator_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate that preserved preflight inputs are the one allowed derivation."""
+
+    run_checked(
+        [
+            sys.executable,
+            str(generator_path),
+            "validate",
+            str(matrix_path),
+            str(schedule_path),
+        ],
+        cwd=REPOSITORY_ROOT,
+    )
+    matrix = load_json(matrix_path)
+    schedule = load_json(schedule_path)
+    expected_matrix = derive_preflight_matrix(formal_matrix)
+    if matrix != expected_matrix:
+        raise SafetyError(
+            "Preserved preflight matrix differs from its fixed derivation"
+        )
+    entries = schedule.get("entries")
+    if (
+        schedule.get("formatVersion") != 3
+        or schedule.get("repetitions") != 1
+        or schedule.get("matrixSha256") != file_sha256(matrix_path)
+        or not isinstance(entries, list)
+        or len(entries) != 6
+        or [entry.get("sequence") for entry in entries] != list(range(1, 7))
+    ):
+        raise SafetyError("Preflight schedule is not the exact six-entry expansion")
+    expected_pairs = {
+        (case["id"], variant_id)
+        for case in PREFLIGHT_CASES
+        for variant_id in case["variants"]
+    }
+    actual_pairs = {
+        (entry.get("matrixCaseId"), entry.get("variantId"))
+        for entry in entries
+        if isinstance(entry, dict)
+    }
+    if actual_pairs != expected_pairs or len(actual_pairs) != 6:
+        raise SafetyError("Preflight schedule case/variant pairs differ")
+    if any(
+        entry.get("contractMode") != "enhanced"
+        or entry.get("acceptEncoding") != "zstd"
+        or entry.get("storedEncoding") != "zstd"
+        or entry.get("warmupDuration") != "30s"
+        or entry.get("measurementDuration") != "2m"
+        or entry.get("cooldownSeconds") != 15
+        for entry in entries
+    ):
+        raise SafetyError("Preflight schedule controls differ from the fixed contract")
+    return matrix, schedule
+
+
+def write_sha256s(directory: Path, names: Sequence[str]) -> None:
+    lines = []
+    for name in names:
+        path = directory / name
+        if not path.is_file() or path.is_symlink():
+            raise SafetyError(f"Cannot hash missing preflight artifact {path}")
+        lines.append(f"{file_sha256(path)}  {name}\n")
+    (directory / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+
+
+def preflight_derived_hashes(inputs_root: Path) -> dict[str, str]:
+    files = {
+        "matrixSha256": "matrix.json",
+        "scheduleSha256": "schedule.json",
+        "provenanceSha256": "provenance.json",
+        "sha256SumsSha256": "SHA256SUMS",
+    }
+    result = {}
+    for key, name in files.items():
+        path = inputs_root / name
+        if not path.is_file() or path.is_symlink():
+            raise SafetyError(f"Preserved preflight input is missing: {path}")
+        result[key] = file_sha256(path)
+    return result
+
+
+def preflight_evidence_inventory(preflight_root: Path) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    for path in sorted(preflight_root.rglob("*")):
+        relative = path.relative_to(preflight_root)
+        if path.is_symlink():
+            raise SafetyError(f"Preflight evidence contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise SafetyError(f"Preflight evidence is not a regular file: {relative}")
+        if len(relative.parts) == 1 and relative.name in PREFLIGHT_EVIDENCE_EXCLUDED:
+            continue
+        files.append(
+            {
+                "path": relative.as_posix(),
+                "sha256": file_sha256(path),
+                "bytes": path.stat().st_size,
+            }
+        )
+    return {"formatVersion": 1, "files": files}
+
+
 def validate_formal_bundle(
     matrix_path: Path,
     schedule_path: Path,
@@ -645,11 +1078,21 @@ def validate_formal_bundle(
         "orchestratorSha256": file_sha256(Path(__file__)),
         "analyzerSha256": file_sha256(ANALYZER),
     }
+    expected_bundle_keys = set(expected_bundle_values) | {"createdAt", "loadGenerator"}
+    if set(bundle) != expected_bundle_keys:
+        raise SafetyError(
+            "Frozen bundle manifest must contain exactly the reviewed bindings"
+        )
+    parsed_timestamp(bundle.get("createdAt"), "Frozen bundle createdAt")
     for field, value in expected_bundle_values.items():
         if bundle.get(field) != value:
             raise SafetyError(
                 f"Frozen bundle {field} does not match the exact formal inputs"
             )
+    bundle["loadGenerator"] = validate_load_generator_control(
+        bundle.get("loadGenerator"),
+        benchmark_revision,
+    )
     return expected_admission, bundle
 
 
@@ -818,6 +1261,495 @@ class Kubectl:
         require_benchmark_name(pod, "metrics Pod")
         path = f"/apis/metrics.k8s.io/v1beta1/namespaces/{NAMESPACE}/pods/{pod}"
         return self.json(["get", "--raw", path])
+
+
+def parse_cpu_cores(value: Any, *, allow_zero: bool = False) -> float:
+    if not isinstance(value, str):
+        raise SafetyError("CPU quantity must be a string")
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(n|u|m)?", value)
+    if match is None:
+        raise SafetyError(f"Unsupported CPU quantity {value!r}")
+    scale = {None: 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9}[match.group(2)]
+    result = float(match.group(1)) * scale
+    if not math.isfinite(result) or result < 0 or (result == 0 and not allow_zero):
+        raise SafetyError("CPU quantity must be finite and nonnegative")
+    return result
+
+
+def parse_memory_bytes(value: Any, *, allow_zero: bool = False) -> float:
+    if not isinstance(value, str):
+        raise SafetyError("Memory quantity must be a string")
+    match = re.fullmatch(
+        r"([0-9]+(?:\.[0-9]+)?)(Ki|Mi|Gi|Ti|K|M|G|T)?",
+        value,
+    )
+    if match is None:
+        raise SafetyError(f"Unsupported memory quantity {value!r}")
+    binary = {"Ki": 1, "Mi": 2, "Gi": 3, "Ti": 4}
+    decimal = {"K": 1, "M": 2, "G": 3, "T": 4}
+    suffix = match.group(2)
+    if suffix in binary:
+        scale = 1024 ** binary[suffix]
+    elif suffix in decimal:
+        scale = 1000 ** decimal[suffix]
+    else:
+        scale = 1
+    result = float(match.group(1)) * scale
+    if not math.isfinite(result) or result < 0 or (result == 0 and not allow_zero):
+        raise SafetyError("Memory quantity must be finite and nonnegative")
+    return result
+
+
+def parsed_timestamp(value: Any, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise SafetyError(f"{label} must be a timestamp string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise SafetyError(f"{label} is malformed") from error
+    if parsed.tzinfo is None:
+        raise SafetyError(f"{label} must include a timezone")
+    return parsed.astimezone(UTC)
+
+
+def validate_metrics_window(value: Any) -> str:
+    if not isinstance(value, str):
+        raise SafetyError("Controller PodMetrics window is invalid")
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m)", value)
+    if match is None:
+        raise SafetyError("Controller PodMetrics window is invalid")
+    amount = float(match.group(1))
+    if not math.isfinite(amount) or amount <= 0:
+        raise SafetyError("Controller PodMetrics window is invalid")
+    return value
+
+
+def nearest_rank(values: Sequence[float], ratio: float) -> float:
+    if not values:
+        raise SafetyError("Cannot calculate a percentile without samples")
+    ordered = sorted(values)
+    index = max(0, math.ceil(ratio * len(ordered)) - 1)
+    return ordered[index]
+
+
+class RelayHeadroomSampler:
+    """Minimal exact-Pod CPU/memory headroom evidence for the SSH relay."""
+
+    def __init__(
+        self,
+        kube: Kubectl,
+        pod_name: str,
+        formal_run_id: str,
+        artifact_root: Path,
+        *,
+        interval_seconds: float = 5.0,
+    ) -> None:
+        if (
+            not isinstance(pod_name, str)
+            or not pod_name.startswith("bluemap-perf-formal-controller-")
+            or RESOURCE_NAME.fullmatch(pod_name) is None
+        ):
+            raise SafetyError("Preflight controller Pod name is unsafe")
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", formal_run_id) is None:
+            raise SafetyError("Preflight formal run ID is unsafe")
+        self.kube = kube
+        self.pod_name = pod_name
+        self.formal_run_id = formal_run_id
+        self.artifact_root = artifact_root
+        self.interval_seconds = interval_seconds
+        self.samples: list[dict[str, Any]] = []
+        self.errors: list[dict[str, Any]] = []
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.started_at: datetime | None = None
+        self.stopped_at: datetime | None = None
+        self.cpu_limit_cores = 0.0
+        self.memory_limit_bytes = 0.0
+        self.pod_uid = ""
+        self.identity: dict[str, Any] | None = None
+
+    def executing_pod_name(self) -> None:
+        downward_name = os.environ.get("BLUEMAP_CONTROLLER_POD_NAME")
+        if downward_name != self.pod_name:
+            raise SafetyError(
+                "Preflight controller Pod differs from the downward-API identity"
+            )
+        hostname = os.environ.get("HOSTNAME")
+        if hostname and hostname != self.pod_name:
+            raise SafetyError(
+                "Preflight controller Pod differs from the container hostname"
+            )
+
+    def current_identity(self) -> tuple[dict[str, Any], float, float]:
+        self.executing_pod_name()
+        pod = self.kube.pod(self.pod_name)
+        pod_metadata = metadata(pod, "Pod", self.pod_name)
+        labels = pod_metadata.get("labels")
+        if (
+            not isinstance(labels, dict)
+            or any(labels.get(key) != value for key, value in CONTROLLER_REQUIRED_LABELS.items())
+            or labels.get("bluemap.guenter.cloud/experiment-id")
+            != self.formal_run_id
+            or not ready(pod)
+        ):
+            raise SafetyError("Preflight controller Pod identity or readiness differs")
+        uid = pod_metadata.get("uid")
+        if not isinstance(uid, str) or not uid:
+            raise SafetyError("Preflight controller Pod UID is unavailable")
+        containers = pod.get("spec", {}).get("containers")
+        service_account = pod.get("spec", {}).get("serviceAccountName")
+        if not isinstance(containers, list):
+            raise SafetyError("Preflight controller Pod containers are unavailable")
+        if service_account != CONTROLLER_SERVICE_ACCOUNT:
+            raise SafetyError("Preflight controller Pod service account differs")
+        owner_references = pod_metadata.get("ownerReferences")
+        owners = (
+            [
+                owner
+                for owner in owner_references
+                if isinstance(owner, dict) and owner.get("controller") is True
+            ]
+            if isinstance(owner_references, list)
+            else []
+        )
+        if len(owners) != 1:
+            raise SafetyError("Preflight controller Pod must have one Job owner")
+        owner = owners[0]
+        if (
+            owner.get("apiVersion") != "batch/v1"
+            or owner.get("kind") != "Job"
+            or owner.get("name") != CONTROLLER_JOB_NAME
+            or not isinstance(owner.get("uid"), str)
+            or not owner["uid"]
+        ):
+            raise SafetyError("Preflight controller Pod Job owner differs")
+        matching = [
+            container
+            for container in containers
+            if isinstance(container, dict) and container.get("name") == "controller"
+        ]
+        if len(matching) != 1:
+            raise SafetyError("Preflight controller container is not unique")
+        limits = matching[0].get("resources", {}).get("limits")
+        if not isinstance(limits, dict):
+            raise SafetyError("Preflight controller container limits are unavailable")
+        cpu_limit_cores = parse_cpu_cores(limits.get("cpu"))
+        memory_limit_bytes = parse_memory_bytes(limits.get("memory"))
+        if (
+            cpu_limit_cores != PREFLIGHT_RELAY_CPU_LIMIT_CORES
+            or memory_limit_bytes != PREFLIGHT_RELAY_MEMORY_LIMIT_BYTES
+        ):
+            raise SafetyError("Preflight controller limits must be exactly 2 CPU/2Gi")
+        identity = {
+            "formatVersion": 1,
+            "namespace": NAMESPACE,
+            "pod": self.pod_name,
+            "podUid": uid,
+            "formalRunId": self.formal_run_id,
+            "container": "controller",
+            "serviceAccountName": service_account,
+            "requiredLabels": {
+                **CONTROLLER_REQUIRED_LABELS,
+                "bluemap.guenter.cloud/experiment-id": self.formal_run_id,
+            },
+            "owner": {
+                "apiVersion": owner["apiVersion"],
+                "kind": owner["kind"],
+                "name": owner["name"],
+                "uid": owner["uid"],
+            },
+            "limits": {
+                "cpuCores": cpu_limit_cores,
+                "memoryBytes": memory_limit_bytes,
+            },
+            "source": "metrics.k8s.io/v1beta1",
+        }
+        return identity, cpu_limit_cores, memory_limit_bytes
+
+    def validate_identity(self) -> None:
+        identity, cpu_limit_cores, memory_limit_bytes = self.current_identity()
+        self.identity = identity
+        self.cpu_limit_cores = cpu_limit_cores
+        self.memory_limit_bytes = memory_limit_bytes
+        self.pod_uid = identity["podUid"]
+        atomic_write_json(
+            self.artifact_root / "relay-identity.json",
+            identity,
+        )
+
+    def validate_current_identity(self) -> None:
+        if self.identity is None:
+            raise SafetyError("Preflight controller Pod identity was not established")
+        identity, _, _ = self.current_identity()
+        if identity != self.identity:
+            raise SafetyError("Preflight controller Pod identity changed")
+
+    def fetch_sample(self) -> dict[str, Any]:
+        requested = datetime.now(UTC)
+        payload = self.kube.metrics(self.pod_name)
+        fetched = datetime.now(UTC)
+        self.validate_current_identity()
+        try:
+            value_metadata = payload.get("metadata")
+            containers = payload.get("containers")
+            if (
+                payload.get("kind") != "PodMetrics"
+                or not isinstance(value_metadata, dict)
+                or value_metadata.get("name") != self.pod_name
+                or value_metadata.get("namespace") != NAMESPACE
+                or not isinstance(containers, list)
+            ):
+                raise SafetyError("Controller PodMetrics identity differs")
+            matching = [
+                container
+                for container in containers
+                if isinstance(container, dict)
+                and container.get("name") == "controller"
+            ]
+            if len(matching) != 1:
+                raise SafetyError("Controller PodMetrics container is not unique")
+            usage = matching[0].get("usage")
+            if not isinstance(usage, dict):
+                raise SafetyError("Controller PodMetrics usage is unavailable")
+            source_timestamp = parsed_timestamp(
+                payload.get("timestamp"),
+                "Controller PodMetrics timestamp",
+            )
+            window = validate_metrics_window(payload.get("window"))
+            metric_age = (fetched - source_timestamp).total_seconds()
+            if metric_age < -5.0:
+                raise SafetyError("Controller PodMetrics timestamp is in the future")
+            cpu_cores = parse_cpu_cores(usage.get("cpu"), allow_zero=True)
+            memory_bytes = parse_memory_bytes(usage.get("memory"), allow_zero=True)
+            sample = {
+                "requestedAt": requested.isoformat().replace("+00:00", "Z"),
+                "fetchedAt": fetched.isoformat().replace("+00:00", "Z"),
+                "metricsTimestamp": source_timestamp.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "window": window,
+                "pod": self.pod_name,
+                "podUid": self.pod_uid,
+                "container": "controller",
+                "cpuCores": cpu_cores,
+                "memoryBytes": memory_bytes,
+                "cpuLimitRatio": cpu_cores / self.cpu_limit_cores,
+                "memoryLimitRatio": memory_bytes / self.memory_limit_bytes,
+                "metricAgeSeconds": max(0.0, metric_age),
+            }
+            return sample
+        except Exception:
+            raise
+
+    def record_sample(self, sample: dict[str, Any]) -> None:
+        self.samples.append(sample)
+        append_event(self.artifact_root / "relay-samples.ndjson", sample)
+
+    def sample_once(self) -> None:
+        requested = datetime.now(UTC)
+        try:
+            self.record_sample(self.fetch_sample())
+        except Exception as error:  # Preserve transient API failures as evidence.
+            event = {
+                "requestedAt": requested.isoformat().replace("+00:00", "Z"),
+                "failedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "error": str(error),
+            }
+            self.errors.append(event)
+            append_event(self.artifact_root / "relay-errors.ndjson", event)
+
+    def run(self) -> None:
+        while not self.stop_event.wait(self.interval_seconds):
+            self.sample_once()
+
+    def start(
+        self,
+        *,
+        readiness_timeout_seconds: int,
+        poll_interval_seconds: float,
+    ) -> None:
+        self.artifact_root.mkdir(parents=True, exist_ok=False)
+        self.validate_identity()
+        (self.artifact_root / "relay-errors.ndjson").write_text("", encoding="utf-8")
+        (self.artifact_root / "relay-samples.ndjson").write_text("", encoding="utf-8")
+        readiness_started = datetime.now(UTC)
+        readiness_errors: list[dict[str, str]] = []
+        deadline = time.monotonic() + readiness_timeout_seconds
+        first_sample: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            try:
+                first_sample = self.fetch_sample()
+                break
+            except (SafetyError, subprocess.SubprocessError, OSError) as error:
+                readiness_errors.append(
+                    {
+                        "failedAt": datetime.now(UTC)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "error": str(error),
+                    }
+                )
+                time.sleep(poll_interval_seconds)
+        readiness_finished = datetime.now(UTC)
+        atomic_write_json(
+            self.artifact_root / "relay-readiness.json",
+            {
+                "formatVersion": 1,
+                "startedAt": readiness_started.isoformat().replace("+00:00", "Z"),
+                "completedAt": readiness_finished.isoformat().replace("+00:00", "Z"),
+                "timeoutSeconds": readiness_timeout_seconds,
+                "pollIntervalSeconds": poll_interval_seconds,
+                "attempts": len(readiness_errors) + (1 if first_sample else 0),
+                "transientErrors": readiness_errors,
+                "ready": first_sample is not None,
+            },
+        )
+        if first_sample is None:
+            raise SafetyError(
+                "Timed out waiting for fresh controller metrics before preflight"
+            )
+        self.started_at = parsed_timestamp(
+            first_sample["fetchedAt"], "first relay fetchedAt"
+        )
+        self.record_sample(first_sample)
+        self.thread = threading.Thread(
+            target=self.run,
+            name="bluemap-preflight-relay-sampler",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def stop(self) -> dict[str, Any]:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=max(15.0, self.interval_seconds * 3))
+            if self.thread.is_alive():
+                raise SafetyError("Relay headroom sampler did not stop")
+        self.sample_once()
+        self.validate_current_identity()
+        self.stopped_at = datetime.now(UTC)
+        return self.report()
+
+    def report(self) -> dict[str, Any]:
+        if self.started_at is None or self.stopped_at is None:
+            raise SafetyError("Relay headroom sampler lifecycle is incomplete")
+        unique_by_timestamp = {
+            sample["metricsTimestamp"]: sample for sample in self.samples
+        }
+        samples = sorted(
+            unique_by_timestamp.values(),
+            key=lambda item: item["metricsTimestamp"],
+        )
+        cpu_ratios = [float(sample["cpuLimitRatio"]) for sample in samples]
+        memory_ratios = [float(sample["memoryLimitRatio"]) for sample in samples]
+        source_timestamps = sorted(
+            parsed_timestamp(
+                sample["metricsTimestamp"], "relay metricsTimestamp"
+            ).timestamp()
+            for sample in samples
+        )
+        maximum_gap = max(
+            (
+                right - left
+                for left, right in zip(
+                    source_timestamps,
+                    source_timestamps[1:],
+                )
+            ),
+            default=0.0,
+        )
+        maximum_age = max(
+            (float(sample["metricAgeSeconds"]) for sample in samples),
+            default=math.inf,
+        )
+        p95_cpu = nearest_rank(cpu_ratios, 0.95) if cpu_ratios else math.inf
+        maximum_cpu = max(cpu_ratios, default=math.inf)
+        maximum_memory = max(memory_ratios, default=math.inf)
+        initial_coverage_gap = (
+            abs(source_timestamps[0] - self.started_at.timestamp())
+            if source_timestamps
+            else math.inf
+        )
+        final_coverage_gap = (
+            abs(self.stopped_at.timestamp() - source_timestamps[-1])
+            if source_timestamps
+            else math.inf
+        )
+        checks = {
+            "noMetricsApiErrors": not self.errors,
+            "minimumUniqueMetricTimestamps": (
+                len(samples)
+                >= PREFLIGHT_RELAY_THRESHOLDS["minimumUniqueMetricTimestamps"]
+            ),
+            "maximumUniqueMetricTimestampGapSeconds": (
+                maximum_gap
+                <= PREFLIGHT_RELAY_THRESHOLDS[
+                    "maximumUniqueMetricTimestampGapSeconds"
+                ]
+            ),
+            "maximumMetricAgeSeconds": (
+                maximum_age
+                <= PREFLIGHT_RELAY_THRESHOLDS["maximumMetricAgeSeconds"]
+            ),
+            "initialCoverageGapSeconds": (
+                initial_coverage_gap
+                <= PREFLIGHT_RELAY_THRESHOLDS["maximumCoverageGapSeconds"]
+            ),
+            "finalCoverageGapSeconds": (
+                final_coverage_gap
+                <= PREFLIGHT_RELAY_THRESHOLDS["maximumCoverageGapSeconds"]
+            ),
+            "p95CpuLimitRatio": (
+                p95_cpu <= PREFLIGHT_RELAY_THRESHOLDS["p95CpuLimitRatio"]
+            ),
+            "maximumCpuLimitRatio": (
+                maximum_cpu
+                <= PREFLIGHT_RELAY_THRESHOLDS["maximumCpuLimitRatio"]
+            ),
+            "maximumMemoryLimitRatio": (
+                maximum_memory
+                <= PREFLIGHT_RELAY_THRESHOLDS["maximumMemoryLimitRatio"]
+            ),
+        }
+        report = {
+            "formatVersion": 1,
+            "passed": all(checks.values()),
+            "startedAt": self.started_at.isoformat().replace("+00:00", "Z"),
+            "stoppedAt": self.stopped_at.isoformat().replace("+00:00", "Z"),
+            "namespace": NAMESPACE,
+            "pod": self.pod_name,
+            "podUid": self.pod_uid,
+            "container": "controller",
+            "source": "metrics.k8s.io/v1beta1",
+            "limits": {
+                "cpuCores": self.cpu_limit_cores,
+                "memoryBytes": self.memory_limit_bytes,
+            },
+            "thresholds": copy.deepcopy(PREFLIGHT_RELAY_THRESHOLDS),
+            "checks": checks,
+            "observed": {
+                "successfulFetches": len(self.samples),
+                "errors": len(self.errors),
+                "uniqueMetricTimestamps": len(samples),
+                "metricWindows": sorted(
+                    {str(sample["window"]) for sample in samples}
+                ),
+                "maximumUniqueMetricTimestampGapSeconds": maximum_gap,
+                "maximumMetricAgeSeconds": maximum_age,
+                "initialCoverageGapSeconds": initial_coverage_gap,
+                "finalCoverageGapSeconds": final_coverage_gap,
+                "p95CpuLimitRatio": p95_cpu,
+                "maximumCpuLimitRatio": maximum_cpu,
+                "maximumMemoryLimitRatio": maximum_memory,
+            },
+            "limitation": (
+                "metrics.k8s.io exposes coarse aggregate controller-container "
+                "CPU and memory only; it cannot attribute usage to the SSH "
+                "relay process or prove bandwidth and CPU-throttling headroom"
+            ),
+        }
+        atomic_write_json(self.artifact_root / "relay-headroom.json", report)
+        return report
 
 
 def require_benchmark_name(name: str, label: str) -> None:
@@ -1288,6 +2220,7 @@ class RunnerOptions:
     prometheus_url: str | None
     load_generator_identity: Path
     load_generator_identity_key: Path
+    traffic_mode: str
     traffic_base_url: str
     traffic_service: str
     traffic_service_port: int
@@ -1305,6 +2238,13 @@ def build_runner_command(
         raise SafetyError("Entry variant and target differ")
     if len(web_pods) != entry.get("replicaCount"):
         raise SafetyError("Runner Pod count does not match the schedule")
+    validate_traffic_controls(
+        mode=options.traffic_mode,
+        base_url=options.traffic_base_url,
+        service=options.traffic_service,
+        port=options.traffic_service_port,
+        requires_edge_bypass=options.require_edge_bypass,
+    )
     command = [
         "bash",
         str(options.runner),
@@ -1394,6 +2334,8 @@ def build_runner_command(
         str(options.load_generator_identity),
         "--load-generator-identity-key",
         str(options.load_generator_identity_key),
+        "--traffic-mode",
+        options.traffic_mode,
         "--traffic-base-url",
         options.traffic_base_url,
         "--traffic-service",
@@ -1460,9 +2402,11 @@ def initial_state(
     admission_identities_path: Path,
     bundle_manifest_path: Path,
     revision: str,
+    load_generator_sha256: str,
     execution_identity: dict[str, Any],
+    preflight_attestation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    state = {
         "formatVersion": 1,
         "createdAt": timestamp(),
         "updatedAt": timestamp(),
@@ -1474,11 +2418,15 @@ def initial_state(
         "orchestratorSha256": file_sha256(Path(__file__)),
         "analyzerSha256": file_sha256(ANALYZER),
         "benchmarkGitRevision": revision,
+        "loadGeneratorSha256": load_generator_sha256,
         "executionIdentity": execution_identity,
         "nextSequence": 1,
         "status": "running",
         "entries": {},
     }
+    if preflight_attestation is not None:
+        state["preflightAttestation"] = preflight_attestation
+    return state
 
 
 def validate_resume_state(
@@ -1490,7 +2438,9 @@ def validate_resume_state(
     admission_identities_path: Path,
     bundle_manifest_path: Path,
     revision: str,
+    load_generator_sha256: str,
     execution_identity: dict[str, Any],
+    preflight_attestation: dict[str, Any] | None = None,
 ) -> None:
     expected = {
         "matrixSha256": file_sha256(matrix_path),
@@ -1501,11 +2451,14 @@ def validate_resume_state(
         "orchestratorSha256": file_sha256(Path(__file__)),
         "analyzerSha256": file_sha256(ANALYZER),
         "benchmarkGitRevision": revision,
+        "loadGeneratorSha256": load_generator_sha256,
         "executionIdentity": execution_identity,
     }
     for field, value in expected.items():
         if state.get(field) != value:
             raise SafetyError(f"Run state {field} no longer matches frozen inputs")
+    if state.get("preflightAttestation") != preflight_attestation:
+        raise SafetyError("Run state preflight attestation no longer matches")
     next_sequence = state.get("nextSequence")
     if not isinstance(next_sequence, int) or not 1 <= next_sequence <= 81:
         raise SafetyError("Run state has an invalid nextSequence")
@@ -1540,10 +2493,16 @@ def execution_identity(args: argparse.Namespace) -> dict[str, Any]:
         ).hexdigest(),
         "formalRunId": args.formal_run_id,
         "traffic": {
+            "mode": args.traffic_mode,
             "baseUrl": args.traffic_base_url,
             "service": args.traffic_service,
             "port": args.traffic_service_port,
             "requiresEdgeBypass": args.require_edge_bypass,
+            "tunnel": (
+                dict(SSH_L4_TRAEFIK_TUNNEL)
+                if args.traffic_mode == "ssh-l4-traefik"
+                else None
+            ),
         },
         "runner": str(args.runner.resolve()),
         "runnerSha256": file_sha256(args.runner.resolve()),
@@ -1692,10 +2651,27 @@ def quiesce_all(
         )
 
 
+def global_lock_path(run_root: Path) -> Path:
+    canonical_parent = (BENCHMARK_ROOT / "artifacts" / "formal-runs").resolve()
+    if run_root.resolve().parent != canonical_parent:
+        raise SafetyError("Run root is outside the canonical formal-runs directory")
+    return canonical_parent / ".active-formal-run.lock"
+
+
 def acquire_global_lock(run_root: Path) -> Any:
-    lock_path = run_root.parent / ".active-formal-run.lock"
+    lock_path = global_lock_path(run_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock = lock_path.open("a+", encoding="utf-8")
+    if lock_path.is_symlink():
+        raise SafetyError(f"Global orchestrator lock is a symlink: {lock_path}")
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+            0o600,
+        )
+    except OSError as error:
+        raise SafetyError(f"Cannot safely open global lock {lock_path}: {error}") from error
+    lock = os.fdopen(descriptor, "a+", encoding="utf-8")
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
@@ -1719,6 +2695,8 @@ def acquire_global_lock(run_root: Path) -> Any:
 
 
 def validate_run_root(path: Path) -> Path:
+    if path.is_symlink():
+        raise SafetyError("Run root must not be a symlink")
     run_root = path.resolve()
     ignored_artifact_root = (BENCHMARK_ROOT / "artifacts").resolve()
     try:
@@ -1730,6 +2708,12 @@ def validate_run_root(path: Path) -> Path:
         ) from error
     if run_root == ignored_artifact_root:
         raise SafetyError("Run root must be a dedicated child artifact directory")
+    canonical_parent = (ignored_artifact_root / "formal-runs").resolve()
+    if run_root.parent != canonical_parent:
+        raise SafetyError(
+            "Run root must be an immediate child of the canonical "
+            f"formal-runs directory {canonical_parent}"
+        )
     return run_root
 
 
@@ -1737,13 +2721,18 @@ def execute_schedule(
     matrix: dict[str, Any],
     schedule: dict[str, Any],
     args: argparse.Namespace,
+    *,
+    confirmation: str = CONFIRMATION,
+    allowed_existing_names: frozenset[str] = frozenset(),
+    preflight_attestation: dict[str, Any] | None = None,
 ) -> None:
-    if args.confirm != CONFIRMATION:
+    if args.confirm != confirmation:
         raise SafetyError(
-            f"--confirm must exactly equal {CONFIRMATION!r} for cluster mutation"
+            f"--confirm must exactly equal {confirmation!r} for cluster mutation"
         )
     validate_repository_freeze(matrix["benchmarkGitRevision"], args.runner)
     validate_benchmark_python(args.benchmark_python)
+    load_generator_sha256 = validate_requested_load_generator(args)
     run_execution_identity = execution_identity(args)
     kube = Kubectl(args.kubeconfig)
     run_root = validate_run_root(args.run_root)
@@ -1769,13 +2758,21 @@ def execute_schedule(
                 admission_identities_path=args.runtime_admission_identities,
                 bundle_manifest_path=args.bundle_manifest,
                 revision=matrix["benchmarkGitRevision"],
+                load_generator_sha256=load_generator_sha256,
                 execution_identity=run_execution_identity,
+                preflight_attestation=preflight_attestation,
             )
         else:
             if args.resume:
                 raise SafetyError("--resume was requested but no run state exists")
-            if run_root.exists() and any(run_root.iterdir()):
-                raise SafetyError(f"New run root is not empty: {run_root}")
+            if run_root.exists():
+                existing = {item.name for item in run_root.iterdir()}
+                unexpected = existing - allowed_existing_names
+                if unexpected:
+                    raise SafetyError(
+                        f"New run root contains unexpected entries: "
+                        f"{sorted(unexpected)}"
+                    )
             run_root.mkdir(parents=True, exist_ok=True)
             result_root.mkdir()
             logs_root.mkdir()
@@ -1786,7 +2783,9 @@ def execute_schedule(
                 args.runtime_admission_identities,
                 args.bundle_manifest,
                 matrix["benchmarkGitRevision"],
+                load_generator_sha256,
                 run_execution_identity,
+                preflight_attestation,
             )
             atomic_write_json(state_path, state)
 
@@ -1801,6 +2800,7 @@ def execute_schedule(
             prometheus_url=None if args.no_prometheus else args.prometheus_url,
             load_generator_identity=args.load_generator_identity,
             load_generator_identity_key=args.load_generator_identity_key,
+            traffic_mode=args.traffic_mode,
             traffic_base_url=args.traffic_base_url,
             traffic_service=args.traffic_service,
             traffic_service_port=args.traffic_service_port,
@@ -1999,6 +2999,553 @@ def execute_schedule(
         run_lock.close()
 
 
+def assess_preflight_state(
+    state: dict[str, Any],
+    schedule: dict[str, Any],
+) -> dict[str, Any]:
+    entries = schedule.get("entries")
+    state_entries = state.get("entries")
+    failures: list[str] = []
+    completed: list[dict[str, Any]] = []
+    if state.get("status") != "completed":
+        failures.append("preflight execution status is not completed")
+    if state.get("nextSequence") != 7:
+        failures.append("preflight execution cursor is not 7")
+    if state.get("cleanupError") is not None:
+        failures.append("exact candidate quiesce reported a cleanup error")
+    if not isinstance(entries, list) or len(entries) != 6:
+        raise SafetyError("Preflight assessor requires the exact six-entry schedule")
+    if not isinstance(state_entries, dict) or set(state_entries) != {
+        str(sequence) for sequence in range(1, 7)
+    }:
+        failures.append("preflight state does not contain exactly entries 1..6")
+        state_entries = state_entries if isinstance(state_entries, dict) else {}
+    for entry in entries:
+        sequence = entry["sequence"]
+        actual = state_entries.get(str(sequence))
+        if not isinstance(actual, dict):
+            failures.append(f"preflight entry {sequence} is missing")
+            continue
+        expected_identity = {
+            "entryId": entry["entryId"],
+            "runnerCaseId": entry["runnerCaseId"],
+            "variantId": entry["variantId"],
+        }
+        for key, expected in expected_identity.items():
+            if actual.get(key) != expected:
+                failures.append(f"preflight entry {sequence} {key} differs")
+        if actual.get("status") != "completed":
+            failures.append(f"preflight entry {sequence} is not completed")
+        if actual.get("result") != "passed":
+            failures.append(f"preflight entry {sequence} did not pass")
+        if actual.get("runnerExitStatus") != 0:
+            failures.append(f"preflight entry {sequence} runner exit is nonzero")
+        completed.append(
+            {
+                "sequence": sequence,
+                **expected_identity,
+                "status": actual.get("status"),
+                "result": actual.get("result"),
+                "runnerExitStatus": actual.get("runnerExitStatus"),
+            }
+        )
+    return {
+        "passed": not failures,
+        "failures": failures,
+        "entries": completed,
+    }
+
+
+def validate_preflight_state_identity(
+    state: dict[str, Any],
+    matrix_path: Path,
+    schedule_path: Path,
+    args: argparse.Namespace,
+    expected_execution_identity: dict[str, Any],
+) -> None:
+    expected = {
+        "formatVersion": 1,
+        "matrixSha256": file_sha256(matrix_path),
+        "scheduleSha256": file_sha256(schedule_path),
+        "manifestSha256": file_sha256(args.manifest),
+        "runtimeAdmissionIdentitiesSha256": file_sha256(
+            args.runtime_admission_identities
+        ),
+        "bundleManifestSha256": file_sha256(args.bundle_manifest),
+        "orchestratorSha256": file_sha256(Path(__file__)),
+        "analyzerSha256": file_sha256(ANALYZER),
+        "benchmarkGitRevision": load_json(matrix_path)["benchmarkGitRevision"],
+        "loadGeneratorSha256": args.load_generator_sha256,
+        "executionIdentity": expected_execution_identity,
+    }
+    for key, value in expected.items():
+        if state.get(key) != value:
+            raise SafetyError(f"Preflight state {key} no longer matches")
+    if "preflightAttestation" in state:
+        raise SafetyError("Preflight execution cannot consume another preflight")
+
+
+def validate_relay_headroom_report(
+    relay: dict[str, Any],
+    controller_pod: str,
+) -> None:
+    expected_checks = {
+        "noMetricsApiErrors",
+        "minimumUniqueMetricTimestamps",
+        "maximumUniqueMetricTimestampGapSeconds",
+        "maximumMetricAgeSeconds",
+        "initialCoverageGapSeconds",
+        "finalCoverageGapSeconds",
+        "p95CpuLimitRatio",
+        "maximumCpuLimitRatio",
+        "maximumMemoryLimitRatio",
+    }
+    checks = relay.get("checks")
+    limits = relay.get("limits")
+    observed = relay.get("observed")
+    if (
+        relay.get("formatVersion") != 1
+        or relay.get("passed") is not True
+        or relay.get("namespace") != NAMESPACE
+        or relay.get("pod") != controller_pod
+        or not isinstance(relay.get("podUid"), str)
+        or not relay["podUid"]
+        or relay.get("container") != "controller"
+        or relay.get("source") != "metrics.k8s.io/v1beta1"
+        or limits
+        != {
+            "cpuCores": PREFLIGHT_RELAY_CPU_LIMIT_CORES,
+            "memoryBytes": PREFLIGHT_RELAY_MEMORY_LIMIT_BYTES,
+        }
+        or relay.get("thresholds") != PREFLIGHT_RELAY_THRESHOLDS
+        or not isinstance(checks, dict)
+        or set(checks) != expected_checks
+        or any(value is not True for value in checks.values())
+        or not isinstance(observed, dict)
+    ):
+        raise SafetyError("Relay headroom report identity or checks are invalid")
+
+    def number(key: str) -> float:
+        value = observed.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SafetyError(f"Relay headroom observed {key} is invalid")
+        result = float(value)
+        if not math.isfinite(result) or result < 0:
+            raise SafetyError(f"Relay headroom observed {key} is invalid")
+        return result
+
+    if number("errors") != 0:
+        raise SafetyError("Relay headroom sampling recorded an API error")
+    windows = observed.get("metricWindows")
+    if (
+        not isinstance(windows, list)
+        or not windows
+        or windows != sorted(set(windows))
+    ):
+        raise SafetyError("Relay headroom metric windows are invalid")
+    for window in windows:
+        validate_metrics_window(window)
+    if number("uniqueMetricTimestamps") < PREFLIGHT_RELAY_THRESHOLDS[
+        "minimumUniqueMetricTimestamps"
+    ]:
+        raise SafetyError("Relay headroom has insufficient unique samples")
+    for observed_key, threshold_key in (
+        (
+            "maximumUniqueMetricTimestampGapSeconds",
+            "maximumUniqueMetricTimestampGapSeconds",
+        ),
+        ("maximumMetricAgeSeconds", "maximumMetricAgeSeconds"),
+        ("initialCoverageGapSeconds", "maximumCoverageGapSeconds"),
+        ("finalCoverageGapSeconds", "maximumCoverageGapSeconds"),
+        ("p95CpuLimitRatio", "p95CpuLimitRatio"),
+        ("maximumCpuLimitRatio", "maximumCpuLimitRatio"),
+        ("maximumMemoryLimitRatio", "maximumMemoryLimitRatio"),
+    ):
+        if number(observed_key) > PREFLIGHT_RELAY_THRESHOLDS[threshold_key]:
+            raise SafetyError(f"Relay headroom observed {observed_key} exceeded")
+
+
+def preflight_root_for_formal(run_root: Path) -> Path:
+    formal_root = validate_run_root(run_root)
+    return formal_root.with_name(f"{formal_root.name}-preflight")
+
+
+def preflight_report_reference(formal_run_root: Path) -> str:
+    formal_root = validate_run_root(formal_run_root)
+    return f"../{formal_root.name}-preflight/preflight-report.json"
+
+
+def require_new_preflight_root(path: Path) -> Path:
+    preflight_root = validate_run_root(path)
+    if preflight_root.exists() or path.is_symlink():
+        raise SafetyError(
+            "Preflight is non-resumable and its artifact root already exists"
+        )
+    return preflight_root
+
+
+def execute_preflight(
+    formal_matrix: dict[str, Any],
+    formal_schedule: dict[str, Any],
+    args: argparse.Namespace,
+) -> Path:
+    if args.confirm != PREFLIGHT_CONFIRMATION:
+        raise SafetyError(
+            f"--confirm must exactly equal {PREFLIGHT_CONFIRMATION!r} "
+            "for preflight mutation"
+        )
+    if (
+        args.traffic_mode != PREFLIGHT_TRAFFIC_MODE
+        or args.traffic_base_url != TRAFFIC_BASE_URLS[PREFLIGHT_TRAFFIC_MODE]
+        or args.require_edge_bypass
+    ):
+        raise SafetyError("Preflight is restricted to the direct SSH L4 Traefik path")
+    validate_repository_freeze(formal_matrix["benchmarkGitRevision"], args.runner)
+    validate_benchmark_python(args.benchmark_python)
+    load_generator_sha256 = validate_requested_load_generator(args)
+    run_identity = execution_identity(args)
+    preflight_root = require_new_preflight_root(args.run_root)
+    inputs_root = preflight_root / "inputs"
+    inputs_root.mkdir(parents=True)
+    matrix_path = inputs_root / "matrix.json"
+    schedule_path = inputs_root / "schedule.json"
+    provenance_path = inputs_root / "provenance.json"
+    atomic_write_json(matrix_path, derive_preflight_matrix(formal_matrix))
+    run_checked(
+        [
+            sys.executable,
+            str(args.generator),
+            "generate",
+            str(matrix_path),
+            str(schedule_path),
+        ],
+        cwd=REPOSITORY_ROOT,
+    )
+    matrix, schedule = validate_preflight_documents(
+        formal_matrix,
+        matrix_path,
+        schedule_path,
+        args.generator,
+    )
+    if {
+        entry["runnerCaseId"] for entry in schedule["entries"]
+    } & {
+        entry["runnerCaseId"] for entry in formal_schedule["entries"]
+    }:
+        raise SafetyError("Preflight and formal runner case IDs overlap")
+    provenance = {
+        "formatVersion": 1,
+        "kind": "ssh-l4-traefik-preflight-inputs",
+        "formalRunId": args.formal_run_id,
+        "benchmarkGitRevision": formal_matrix["benchmarkGitRevision"],
+        "sourceFormalInputs": {
+            "matrixSha256": file_sha256(args.matrix),
+            "scheduleSha256": file_sha256(args.schedule),
+            "runtimeAdmissionIdentitiesSha256": file_sha256(
+                args.runtime_admission_identities
+            ),
+            "bundleManifestSha256": file_sha256(args.bundle_manifest),
+            "manifestSha256": file_sha256(args.manifest),
+        },
+        "derivedInputs": {
+            "matrixSha256": file_sha256(matrix_path),
+            "scheduleSha256": file_sha256(schedule_path),
+        },
+        "traffic": copy.deepcopy(run_identity["traffic"]),
+        "loadGeneratorIdentitySha256": run_identity[
+            "loadGeneratorIdentitySha256"
+        ],
+        "loadGeneratorSha256": load_generator_sha256,
+        "orchestratorSha256": file_sha256(Path(__file__)),
+        "generatorSha256": file_sha256(args.generator),
+    }
+    atomic_write_json(provenance_path, provenance)
+    write_sha256s(inputs_root, ("matrix.json", "schedule.json", "provenance.json"))
+    derived_hashes = preflight_derived_hashes(inputs_root)
+
+    formal_matrix_path = args.matrix
+    formal_schedule_path = args.schedule
+    args.matrix = matrix_path
+    args.schedule = schedule_path
+    args.resume = False
+    observability_root = preflight_root / "observability"
+    sampler = RelayHeadroomSampler(
+        Kubectl(args.kubeconfig),
+        args.controller_pod,
+        args.formal_run_id,
+        observability_root,
+    )
+    sampler.start(
+        readiness_timeout_seconds=args.metrics_timeout_seconds,
+        poll_interval_seconds=args.poll_interval_seconds,
+    )
+    relay_report: dict[str, Any] | None = None
+    execution_error: BaseException | None = None
+    try:
+        execute_schedule(
+            matrix,
+            schedule,
+            args,
+            confirmation=PREFLIGHT_CONFIRMATION,
+            allowed_existing_names=frozenset({"inputs", "observability"}),
+        )
+    except BaseException as error:
+        execution_error = error
+    try:
+        relay_report = sampler.stop()
+    except BaseException as error:
+        if execution_error is None:
+            execution_error = error
+        else:
+            print(
+                f"WARNING: relay sampler also failed: {error}",
+                file=sys.stderr,
+            )
+    finally:
+        args.matrix = formal_matrix_path
+        args.schedule = formal_schedule_path
+    if execution_error is not None:
+        raise execution_error
+    if relay_report is None:
+        raise SafetyError("Relay headroom report was not produced")
+
+    traefik_limitation = {
+        "formatVersion": 1,
+        "available": False,
+        "gating": False,
+        "metric": "traefik_service_requests_total",
+        "serviceLabelRegex": PREFLIGHT_TRAEFIK_SERVICE_REGEX,
+        "reason": (
+            "The configured rancher-monitoring Prometheus has no Traefik "
+            "series. Traefik's separate three-replica metrics Service "
+            "load-balances one endpoint per scrape, so a complete counter "
+            "delta cannot be proven without expanding scope. Exact k6 "
+            "status/error checks remain the request-scoped 5xx gate."
+        ),
+    }
+    atomic_write_json(
+        observability_root / "traefik-prometheus-limitation.json",
+        traefik_limitation,
+    )
+    state = load_json(preflight_root / "state.json")
+    validate_preflight_state_identity(
+        state,
+        matrix_path,
+        schedule_path,
+        args,
+        run_identity,
+    )
+    validate_relay_headroom_report(relay_report, args.controller_pod)
+    assessment = assess_preflight_state(state, schedule)
+    passed = assessment["passed"] and relay_report.get("passed") is True
+    failures = list(assessment["failures"])
+    if relay_report.get("passed") is not True:
+        failures.append("controller SSH relay CPU/memory headroom gate failed")
+    evidence_path = preflight_root / "preflight-evidence.json"
+    atomic_write_json(
+        evidence_path,
+        preflight_evidence_inventory(preflight_root),
+    )
+    report = {
+        "formatVersion": 1,
+        "kind": "ssh-l4-traefik-preflight",
+        "passed": passed,
+        "completedAt": timestamp(),
+        "formalRunId": args.formal_run_id,
+        "benchmarkGitRevision": formal_matrix["benchmarkGitRevision"],
+        "sourceFormalInputs": provenance["sourceFormalInputs"],
+        "derivedInputs": derived_hashes,
+        "traffic": provenance["traffic"],
+        "loadGeneratorIdentitySha256": provenance[
+            "loadGeneratorIdentitySha256"
+        ],
+        "loadGeneratorSha256": provenance["loadGeneratorSha256"],
+        "orchestratorSha256": provenance["orchestratorSha256"],
+        "generatorSha256": provenance["generatorSha256"],
+        "evidenceManifestSha256": file_sha256(evidence_path),
+        "controllerRelay": {
+            "pod": relay_report["pod"],
+            "podUid": relay_report["podUid"],
+            "headroomSha256": file_sha256(
+                observability_root / "relay-headroom.json"
+            ),
+            "passed": relay_report["passed"],
+        },
+        "traefikPrometheus": traefik_limitation,
+        "entries": assessment["entries"],
+        "failures": failures,
+    }
+    report_path = preflight_root / "preflight-report.json"
+    atomic_write_json(report_path, report)
+    write_sha256s(
+        preflight_root,
+        ("preflight-evidence.json", "preflight-report.json"),
+    )
+    if not passed:
+        raise SafetyError("Preflight failed: " + "; ".join(failures))
+    return report_path
+
+
+def validate_preflight_report(
+    formal_matrix: dict[str, Any],
+    formal_schedule: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if (
+        args.traffic_mode != PREFLIGHT_TRAFFIC_MODE
+        or args.traffic_base_url != TRAFFIC_BASE_URLS[PREFLIGHT_TRAFFIC_MODE]
+        or args.require_edge_bypass
+    ):
+        raise SafetyError(
+            "The formal run must use the direct traffic identity proven by preflight"
+        )
+    raw_report_path = args.preflight_report
+    if raw_report_path.is_symlink():
+        raise SafetyError("Formal run requires a non-symlink preflight report")
+    report_path = raw_report_path.resolve()
+    expected_path = preflight_root_for_formal(args.run_root) / "preflight-report.json"
+    if (
+        report_path != expected_path
+        or not report_path.is_file()
+        or report_path.is_symlink()
+    ):
+        raise SafetyError("Formal run requires its exact sibling preflight report")
+    report = load_json(report_path)
+    report_completed = parsed_timestamp(
+        report.get("completedAt"), "Preflight report completedAt"
+    )
+    report_age = (datetime.now(UTC) - report_completed).total_seconds()
+    if report_age < -5.0 or report_age > PREFLIGHT_MAX_HANDOFF_SECONDS:
+        raise SafetyError("Preflight report is stale for the formal handoff")
+    preflight_root = report_path.parent
+    evidence_path = preflight_root / "preflight-evidence.json"
+    evidence = load_json(evidence_path)
+    if evidence != preflight_evidence_inventory(preflight_root):
+        raise SafetyError("Preflight raw-evidence inventory no longer matches")
+    matrix_path = preflight_root / "inputs" / "matrix.json"
+    schedule_path = preflight_root / "inputs" / "schedule.json"
+    _, schedule = validate_preflight_documents(
+        formal_matrix,
+        matrix_path,
+        schedule_path,
+        args.generator,
+    )
+    if {
+        entry["runnerCaseId"] for entry in schedule["entries"]
+    } & {
+        entry["runnerCaseId"] for entry in formal_schedule["entries"]
+    }:
+        raise SafetyError("Preflight and formal runner case IDs overlap")
+    state = load_json(preflight_root / "state.json")
+    direct_args = copy.copy(args)
+    direct_args.traffic_mode = PREFLIGHT_TRAFFIC_MODE
+    direct_args.traffic_base_url = TRAFFIC_BASE_URLS[PREFLIGHT_TRAFFIC_MODE]
+    direct_args.require_edge_bypass = False
+    expected_preflight_execution = execution_identity(direct_args)
+    validate_preflight_state_identity(
+        state,
+        matrix_path,
+        schedule_path,
+        args,
+        expected_preflight_execution,
+    )
+    assessment = assess_preflight_state(state, schedule)
+    relay_path = preflight_root / "observability" / "relay-headroom.json"
+    relay = load_json(relay_path)
+    validate_relay_headroom_report(relay, args.controller_pod)
+    relay_identity = load_json(
+        preflight_root / "observability" / "relay-identity.json"
+    )
+    current_relay_identity, _, _ = RelayHeadroomSampler(
+        Kubectl(args.kubeconfig),
+        args.controller_pod,
+        args.formal_run_id,
+        preflight_root / "observability",
+    ).current_identity()
+    if current_relay_identity != relay_identity:
+        raise SafetyError("Preflight relay Pod identity is no longer current")
+    state_completed = parsed_timestamp(
+        state.get("completedAt"), "Preflight state completedAt"
+    )
+    state_created = parsed_timestamp(
+        state.get("createdAt"), "Preflight state createdAt"
+    )
+    relay_started = parsed_timestamp(
+        relay.get("startedAt"), "Preflight relay startedAt"
+    )
+    relay_stopped = parsed_timestamp(
+        relay.get("stoppedAt"), "Preflight relay stoppedAt"
+    )
+    if not (
+        relay_started
+        <= state_created
+        <= state_completed
+        <= relay_stopped
+        <= report_completed
+    ):
+        raise SafetyError("Preflight completion chronology differs")
+    load_generator_identity = validate_runpod_controls(args)
+    expected_source = {
+        "matrixSha256": file_sha256(args.matrix),
+        "scheduleSha256": file_sha256(args.schedule),
+        "runtimeAdmissionIdentitiesSha256": file_sha256(
+            args.runtime_admission_identities
+        ),
+        "bundleManifestSha256": file_sha256(args.bundle_manifest),
+        "manifestSha256": file_sha256(args.manifest),
+    }
+    expected_derived = preflight_derived_hashes(preflight_root / "inputs")
+    expected_traffic = {
+        "mode": PREFLIGHT_TRAFFIC_MODE,
+        "baseUrl": TRAFFIC_BASE_URLS[PREFLIGHT_TRAFFIC_MODE],
+        "service": TRAFFIC_SERVICE,
+        "port": TRAFFIC_SERVICE_PORT,
+        "requiresEdgeBypass": False,
+        "tunnel": copy.deepcopy(SSH_L4_TRAEFIK_TUNNEL),
+    }
+    if (
+        report.get("formatVersion") != 1
+        or report.get("kind") != "ssh-l4-traefik-preflight"
+        or report.get("passed") is not True
+        or report.get("formalRunId") != args.formal_run_id
+        or report.get("benchmarkGitRevision")
+        != formal_matrix["benchmarkGitRevision"]
+        or report.get("sourceFormalInputs") != expected_source
+        or report.get("derivedInputs") != expected_derived
+        or report.get("traffic") != expected_traffic
+        or report.get("loadGeneratorIdentitySha256")
+        != hashlib.sha256(canonical_json(load_generator_identity)).hexdigest()
+        or report.get("loadGeneratorSha256") != args.load_generator_sha256
+        or report.get("orchestratorSha256") != file_sha256(Path(__file__))
+        or report.get("generatorSha256") != file_sha256(args.generator)
+        or report.get("evidenceManifestSha256") != file_sha256(evidence_path)
+        or report.get("entries") != assessment["entries"]
+        or report.get("failures") != []
+        or not assessment["passed"]
+        or relay.get("passed") is not True
+        or report.get("controllerRelay")
+        != {
+            "pod": args.controller_pod,
+            "podUid": relay.get("podUid"),
+            "headroomSha256": file_sha256(relay_path),
+            "passed": True,
+        }
+    ):
+        raise SafetyError("Preflight report no longer proves the exact passed run")
+    return {
+        "formatVersion": 1,
+        "report": preflight_report_reference(args.run_root),
+        "reportSha256": file_sha256(report_path),
+        "matrixSha256": expected_derived["matrixSha256"],
+        "scheduleSha256": expected_derived["scheduleSha256"],
+        "evidenceManifestSha256": file_sha256(evidence_path),
+        "controllerPod": args.controller_pod,
+        "controllerPodUid": relay["podUid"],
+        "traffic": expected_traffic,
+        "loadGeneratorSha256": args.load_generator_sha256,
+    }
+
+
 def add_document_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     parser.add_argument("--schedule", type=Path, default=DEFAULT_SCHEDULE)
@@ -2047,6 +3594,11 @@ def add_runpod_arguments(
             if required
             else Path("/opt/bluemap-runtime/credentials/id_ed25519")
         ),
+    )
+    parser.add_argument(
+        "--traffic-mode",
+        choices=TRAFFIC_MODES,
+        default=DEFAULT_TRAFFIC_MODE,
     )
     parser.add_argument(
         "--traffic-base-url",
@@ -2121,6 +3673,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     add_document_arguments(run_parser)
     run_parser.add_argument("--run-root", type=Path, required=True)
+    run_parser.add_argument("--preflight-report", type=Path, required=True)
+    run_parser.add_argument("--controller-pod", required=True)
     run_parser.add_argument("--confirm", required=True)
     run_parser.add_argument("--resume", action="store_true")
     run_parser.add_argument(
@@ -2150,6 +3704,47 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=2.0,
     )
     add_runpod_arguments(run_parser, required=True)
+
+    preflight_parser = subparsers.add_parser(
+        "preflight",
+        help=(
+            "execute the non-resumable six-entry direct-path preflight "
+            "against the allowlisted Deployments"
+        ),
+    )
+    add_document_arguments(preflight_parser)
+    preflight_parser.add_argument("--run-root", type=Path, required=True)
+    preflight_parser.add_argument("--controller-pod", required=True)
+    preflight_parser.add_argument("--confirm", required=True)
+    preflight_parser.add_argument(
+        "--benchmark-python",
+        type=Path,
+        default=Path(os.environ.get("BENCHMARK_PYTHON", sys.executable)),
+    )
+    preflight_parser.add_argument(
+        "--kubeconfig", type=Path, default=DEFAULT_KUBECONFIG
+    )
+    preflight_parser.add_argument(
+        "--prometheus-url",
+        default=DEFAULT_PROMETHEUS_URL,
+    )
+    preflight_parser.add_argument("--no-prometheus", action="store_true")
+    preflight_parser.add_argument(
+        "--transition-timeout-seconds",
+        type=int,
+        default=300,
+    )
+    preflight_parser.add_argument(
+        "--metrics-timeout-seconds",
+        type=int,
+        default=180,
+    )
+    preflight_parser.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        default=2.0,
+    )
+    add_runpod_arguments(preflight_parser, required=True)
     return parser.parse_args(argv)
 
 
@@ -2189,6 +3784,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.bundle_manifest,
             matrix["benchmarkGitRevision"],
         )
+        args.load_generator_sha256 = load_generator_control_sha256(
+            args.frozen_bundle["loadGenerator"]
+        )
+        if args.command in {"preflight", "run"}:
+            # This source-S gate is intentionally before run-root creation,
+            # Kubernetes reads, global locking, and candidate scaling.
+            validate_requested_load_generator(args)
         if args.command in {"validate", "dry-run"}:
             if not args.documents_only:
                 validate_repository_freeze(
@@ -2210,6 +3812,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 args.runtime_admission_identities
                             ),
                             "bundleManifestSha256": file_sha256(args.bundle_manifest),
+                            "loadGenerator": args.frozen_bundle["loadGenerator"],
+                            "loadGeneratorSha256": args.load_generator_sha256,
                             "orchestratorSha256": file_sha256(Path(__file__)),
                             "clusterContacted": False,
                         },
@@ -2229,11 +3833,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 prometheus_url=(None if args.no_prometheus else args.prometheus_url),
                 load_generator_identity=args.load_generator_identity,
                 load_generator_identity_key=args.load_generator_identity_key,
+                traffic_mode=args.traffic_mode,
                 traffic_base_url=args.traffic_base_url,
                 traffic_service=args.traffic_service,
                 traffic_service_port=args.traffic_service_port,
                 formal_run_id=args.formal_run_id,
-                require_edge_bypass=True,
+                require_edge_bypass=(args.traffic_mode == "cloudflare-https"),
             )
             plan = {
                 "formatVersion": 1,
@@ -2256,6 +3861,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.runtime_admission_identities
                     ),
                     "orchestratorSha256": file_sha256(Path(__file__)),
+                    "loadGenerator": args.frozen_bundle["loadGenerator"],
+                    "loadGeneratorSha256": args.load_generator_sha256,
                 },
                 "protectedResourcesNeverPassedToKubernetes": sorted(
                     PROTECTED_RESOURCES
@@ -2272,7 +3879,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             or not 0.1 <= args.poll_interval_seconds <= 30
         ):
             raise SafetyError("Run timeouts or polling interval are unsafe")
-        execute_schedule(matrix, schedule, args)
+        if args.command == "preflight":
+            report_path = execute_preflight(matrix, schedule, args)
+            print(report_path)
+            return 0
+        preflight_attestation = validate_preflight_report(matrix, schedule, args)
+        execute_schedule(
+            matrix,
+            schedule,
+            args,
+            preflight_attestation=preflight_attestation,
+        )
         return 0
     except (SafetyError, OSError, KeyError, TypeError, ValueError) as error:
         print(f"FORMAL ORCHESTRATION REFUSED: {error}", file=sys.stderr)

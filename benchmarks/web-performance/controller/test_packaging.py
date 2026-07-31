@@ -135,12 +135,16 @@ class ControllerSourceTests(unittest.TestCase):
     def test_controller_uses_only_runpod_ssh_for_load_generation(self) -> None:
         entrypoint = read_text(ENTRYPOINT)
         required = (
+            "python \"$ORCHESTRATOR\" preflight",
+            "--confirm RUN-FROZEN-SSH-L4-PREFLIGHT",
+            "--preflight-report",
+            "--controller-pod",
             "--load-generator-backend runpod-ssh",
             "--load-generator-identity",
             "--load-generator-identity-key",
+            "--traffic-mode",
             "--traffic-base-url",
             "--formal-run-id",
-            "--require-edge-bypass",
         )
         for fragment in required:
             with self.subTest(fragment=fragment):
@@ -173,6 +177,25 @@ class ControllerSourceTests(unittest.TestCase):
                     f"controller packaging must not generate traffic locally or "
                     f"inside the Kubernetes cluster ({fragment!r})",
                 )
+        self.assertIn('readonly DEFAULT_TRAFFIC_MODE=ssh-l4-traefik', entrypoint)
+        self.assertIn(
+            '[[ "$TRAFFIC_MODE" == "ssh-l4-traefik" ]]',
+            entrypoint,
+        )
+        preflight = 'run_child "${preflight_command[@]}"'
+        formal = 'run_child "${orchestrator_command[@]}"'
+        self.assertEqual(entrypoint.count(preflight), 1)
+        self.assertEqual(entrypoint.count(formal), 1)
+        self.assertLess(entrypoint.index(preflight), entrypoint.index(formal))
+        between = entrypoint[
+            entrypoint.index(preflight) : entrypoint.index(formal)
+        ]
+        self.assertIn("if ((preflight_status != 0)); then", between)
+        self.assertIn(
+            '[[ "$termination_requested" == false ]] || exit 143',
+            between,
+        )
+        self.assertNotIn("--resume", entrypoint)
 
     def test_termination_cannot_launch_or_resume_a_formal_run(self) -> None:
         entrypoint = read_text(ENTRYPOINT)
@@ -494,6 +517,19 @@ class FormalControllerManifestTests(unittest.TestCase):
         cls.pvc = one_resource(
             cls.documents, "PersistentVolumeClaim", "bluemap-perf-formal-artifacts"
         )
+        cls.runtime = one_resource(
+            cls.documents,
+            "ConfigMap",
+            "bluemap-perf-formal-controller-runtime",
+        )
+
+    def test_manifest_defaults_to_direct_ssh_l4_traefik_traffic(self) -> None:
+        data = self.runtime.get("data", {})
+        self.assertEqual(data.get("BLUEMAP_TRAFFIC_MODE"), "ssh-l4-traefik")
+        self.assertEqual(
+            data.get("BLUEMAP_TRAFFIC_BASE_URL"),
+            "http://bluemap-test.guenter.cloud",
+        )
 
     def test_manifest_uses_namespaced_controller_identity_only(self) -> None:
         forbidden_kinds = {"ClusterRole", "ClusterRoleBinding", "Secret"}
@@ -580,6 +616,11 @@ class FormalControllerManifestTests(unittest.TestCase):
             "300-second cleanup waits, and a 260-second margin",
         )
         controller = spec.get("containers", [])[0]
+        self.assertEqual(
+            controller.get("resources", {}).get("limits"),
+            {"cpu": "2", "memory": "2Gi"},
+            "relay headroom ratios require the exact admitted controller limits",
+        )
         pod_name_env = [
             item
             for item in controller.get("env", [])

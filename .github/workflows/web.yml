@@ -316,6 +316,8 @@ jobs:
         with:
           context: .
           file: benchmarks/web-performance/runpod/Dockerfile
+          build-args: |
+            BLUEMAP_SOURCE_REVISION=${{ github.sha }}
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.metadata.outputs.tags }}

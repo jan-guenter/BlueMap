@@ -124,7 +124,8 @@ metadata:
 data:
   BLUEMAP_BENCHMARK_REVISION: "0000000000000000000000000000000000000000"
   BLUEMAP_FORMAL_RUN_ID: "replace-with-formal-run-id"
-  BLUEMAP_TRAFFIC_BASE_URL: "https://bluemap-test.guenter.cloud"
+  BLUEMAP_TRAFFIC_MODE: "ssh-l4-traefik"
+  BLUEMAP_TRAFFIC_BASE_URL: "http://bluemap-test.guenter.cloud"
   BLUEMAP_PROMETHEUS_URL: "http://rancher-monitoring-prometheus.cattle-monitoring-system.svc:9090"
   BLUEMAP_CONTROLLER_IMAGE_DIGEST: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 ---

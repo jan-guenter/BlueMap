@@ -52,6 +52,28 @@ def load_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def validate_load_generator(value: Any, git_revision: str) -> dict[str, str]:
+    keys = {"backend", "image", "imageDigest", "sourceRevision"}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise BundleError("Bundle loadGenerator must contain exactly four fields")
+    image = value.get("image")
+    match = re.fullmatch(
+        r"ghcr\.io/jan-guenter/bluemap-perf-loadgen@"
+        r"(?P<digest>sha256:[0-9a-f]{64})",
+        image if isinstance(image, str) else "",
+    )
+    digest = value.get("imageDigest")
+    if (
+        value.get("backend") != "runpod-ssh"
+        or match is None
+        or digest != match.group("digest")
+        or set(str(digest).removeprefix("sha256:")) == {"0"}
+        or value.get("sourceRevision") != git_revision
+    ):
+        raise BundleError("Bundle loadGenerator does not bind the current source S")
+    return {key: value[key] for key in ("backend", "image", "imageDigest", "sourceRevision")}
+
+
 def revision() -> str:
     result = subprocess.run(
         ["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "--verify", "HEAD^{commit}"],
@@ -156,6 +178,29 @@ def publish(source_root: Path, manifest_path: Path) -> None:
         value = load_object(required_sources[name])
         if value.get("benchmarkGitRevision") != git_revision:
             raise BundleError(f"{name} targets another benchmark revision")
+
+    bundle = load_object(required_sources["bundle-manifest.json"])
+    expected_bundle = {
+        "formatVersion": 1,
+        "benchmarkGitRevision": git_revision,
+        "matrixSha256": sha256(required_sources["matrix.json"]),
+        "scheduleSha256": sha256(required_sources["schedule.json"]),
+        "runtimeAdmissionIdentitiesSha256": sha256(
+            required_sources["runtime-admission-identities.json"]
+        ),
+        "controllerLockSha256": sha256(CONTROL_LOCK),
+        "orchestratorSha256": sha256(FORMAL_DIR / "orchestrate.py"),
+        "freezerSha256": sha256(FORMAL_DIR / "freeze.py"),
+        "analyzerSha256": sha256(FORMAL_DIR / "analyze.py"),
+    }
+    if set(bundle) != set(expected_bundle) | {"createdAt", "loadGenerator"}:
+        raise BundleError(
+            "Bundle manifest must contain exactly the reviewed bindings"
+        )
+    for field, expected in expected_bundle.items():
+        if bundle.get(field) != expected:
+            raise BundleError(f"Bundle {field} differs from fresh freeze inputs")
+    validate_load_generator(bundle.get("loadGenerator"), git_revision)
 
     subprocess.run(
         [
