@@ -248,7 +248,7 @@ def duration_seconds(value: Any, label: str) -> float:
     return int(match.group(1)) * factor
 
 
-def timestamp_epoch(value: Any, label: str) -> float:
+def parse_timestamp(value: Any, label: str) -> datetime:
     if not isinstance(value, str) or not value:
         raise AnalysisFailure(f"{label} must be an ISO-8601 timestamp")
     try:
@@ -257,7 +257,11 @@ def timestamp_epoch(value: Any, label: str) -> float:
         raise AnalysisFailure(f"{label} is not a valid ISO-8601 timestamp") from error
     if parsed.tzinfo is None:
         raise AnalysisFailure(f"{label} must include a timezone")
-    result = parsed.timestamp()
+    return parsed
+
+
+def timestamp_epoch(value: Any, label: str) -> float:
+    result = parse_timestamp(value, label).timestamp()
     if not math.isfinite(result):
         raise AnalysisFailure(f"{label} is not a finite timestamp")
     return result
@@ -1514,9 +1518,10 @@ def recompute_runpod_capacity(
     memory_bytes = [float(samples[0]["memoryCurrentBytes"])]
     previous = samples[0]
     for current in samples[1:]:
-        elapsed = timestamp_epoch(
-            current["capturedAt"], "RunPod resource capturedAt"
-        ) - timestamp_epoch(previous["capturedAt"], "RunPod resource capturedAt")
+        elapsed = (
+            parse_timestamp(current["capturedAt"], "RunPod resource capturedAt")
+            - parse_timestamp(previous["capturedAt"], "RunPod resource capturedAt")
+        ).total_seconds()
         if elapsed <= 0:
             raise AnalysisFailure(
                 "RunPod resource telemetry timestamps are not increasing"
@@ -1642,8 +1647,10 @@ def validate_runpod_capacity_artifact(
         and observed["networkMbps"]["transmitP95Ratio"]
         <= limits["maximumP95NetworkRatio"]
     )
-    if capacity.get("passed") is not expected_passed or not expected_passed:
-        raise AnalysisFailure(f"{label}: RunPod load generator failed its capacity gate")
+    if capacity.get("passed") is not expected_passed:
+        raise AnalysisFailure(
+            f"{label}: reported RunPod capacity result does not recompute"
+        )
     return {
         "limits": limits,
         "capacity": {
@@ -1657,8 +1664,71 @@ def validate_runpod_capacity_artifact(
         "observed": observed,
         "telemetrySha256": sha256_file(telemetry_path),
         "artifactSha256": sha256_file(capacity_path),
-        "passed": True,
+        "passed": expected_passed,
     }
+
+
+def validate_runpod_capacity_phases(
+    repetition: Path,
+    frozen: dict[str, Any],
+    runtime_identity: dict[str, Any],
+    entry: dict[str, Any],
+    timing: dict[str, Any],
+    case_result: str,
+) -> dict[str, dict[str, Any]]:
+    phases = ("warmup", "measurement")
+    phase_windows = timing["phaseWindows"]
+    available = {phase for phase in phases if phase in phase_windows}
+    if case_result == "passed" and available != set(phases):
+        missing = ", ".join(phase for phase in phases if phase not in available)
+        raise AnalysisFailure(
+            f"{entry['entryId']}: passed result lacks RunPod capacity "
+            f"phase evidence: {missing}"
+        )
+
+    capacity: dict[str, dict[str, Any]] = {}
+    for phase in phases:
+        phase_dir = repetition / phase
+        telemetry_path = phase_dir / "load-generator-resources.ndjson"
+        capacity_path = phase_dir / "load-generator-capacity.json"
+        if phase not in available:
+            if any(
+                path.exists() or path.is_symlink()
+                for path in (telemetry_path, capacity_path)
+            ):
+                raise AnalysisFailure(
+                    f"{entry['entryId']}: {phase} RunPod capacity evidence "
+                    "exists without a phase window"
+                )
+            continue
+        if telemetry_path.is_symlink() or capacity_path.is_symlink():
+            raise AnalysisFailure(
+                f"{entry['entryId']}: {phase} RunPod capacity evidence is a symlink"
+            )
+        capacity[phase] = validate_runpod_capacity_artifact(
+            phase_dir,
+            frozen,
+            runtime_identity,
+            f"{entry['entryId']}: {phase}",
+            phase_windows[phase],
+            duration_seconds(
+                entry[f"{phase}Duration"],
+                f"{entry['entryId']}: {phase} duration",
+            ),
+        )
+
+    stable_capacity = [
+        {
+            "limits": evidence["limits"],
+            "capacity": evidence["capacity"],
+        }
+        for evidence in capacity.values()
+    ]
+    if any(control != stable_capacity[0] for control in stable_capacity[1:]):
+        raise AnalysisFailure(
+            f"{entry['entryId']}: RunPod capacity controls differ between phases"
+        )
+    return capacity
 
 
 def workload_control_identity(
@@ -1667,6 +1737,7 @@ def workload_control_identity(
     entry: dict[str, Any],
     execution_identity: dict[str, Any],
     timing: dict[str, Any],
+    case_result: str,
 ) -> dict[str, Any]:
     entry_id = entry["entryId"]
     namespace = workload.get("namespace")
@@ -1727,10 +1798,9 @@ def workload_control_identity(
         load_generator.get("identity"),
         f"{entry_id}: workload loadGeneratorIdentity",
     )
-    if (
-        generator_identity != execution_identity["loadGeneratorIdentity"]
-        or canonical_sha256(generator_identity)
-        != execution_identity["loadGeneratorIdentitySha256"]
+    if not equal_json_numbers(
+        generator_identity,
+        execution_identity["loadGeneratorIdentity"],
     ):
         raise AnalysisFailure(
             f"{entry_id}: frozen RunPod generator differs from execution identity"
@@ -1898,32 +1968,14 @@ def workload_control_identity(
             f"{entry_id}: RunPod identity captures do not bracket the runner case"
         )
     repetition = case_dir / "repetitions" / "01"
-    capacity = {
-        phase: validate_runpod_capacity_artifact(
-            repetition / phase,
-            generator_identity,
-            live_before,
-            f"{entry_id}: {phase}",
-            timing["phaseWindows"].get(phase),
-            duration_seconds(
-                entry[f"{phase}Duration"],
-                f"{entry_id}: {phase} duration",
-            ),
-        )
-        for phase in ("warmup", "measurement")
-    }
-    stable_capacity = {
-        phase: {
-            "limits": evidence["limits"],
-            "capacity": evidence["capacity"],
-            "passed": evidence["passed"],
-        }
-        for phase, evidence in capacity.items()
-    }
-    if stable_capacity["warmup"] != stable_capacity["measurement"]:
-        raise AnalysisFailure(
-            f"{entry_id}: RunPod capacity controls differ between phases"
-        )
+    capacity = validate_runpod_capacity_phases(
+        repetition,
+        generator_identity,
+        live_before,
+        entry,
+        timing,
+        case_result,
+    )
     return {
         "namespace": namespace,
         "origin": {
@@ -1944,7 +1996,9 @@ def workload_control_identity(
         "databasePodIdentity": database_pod_identity,
         "loadGeneratorBackend": "runpod-ssh",
         "loadGeneratorIdentity": generator_identity,
-        "loadGeneratorIdentitySha256": canonical_sha256(generator_identity),
+        "loadGeneratorIdentitySha256": execution_identity[
+            "loadGeneratorIdentitySha256"
+        ],
         "loadGeneratorRuntimeIdentity": stable_before,
         "loadGeneratorCapacity": capacity,
         "nodes": nodes,
@@ -3179,6 +3233,10 @@ def read_exit_status(path: Path) -> int | None:
         return None
 
 
+def is_finished_phase(current_phase: str | None, completed: int) -> bool:
+    return current_phase == f"repetition-{completed:02d}/finished"
+
+
 def empty_file(path: Path) -> bool:
     return path.is_file() and path.stat().st_size == 0
 
@@ -3496,12 +3554,21 @@ def analyze_case(
         "prometheus": database_prometheus,
     }
     preferred = preferred_resource(prometheus_web, resource.get("web"))
+    control_identity = workload_control_identity(
+        case_dir,
+        workload,
+        entry,
+        execution_identity,
+        timing,
+        result["result"],
+    )
+    load_generator_capacity = control_identity["loadGeneratorCapacity"]
 
     gates = {
         "runnerResult": result["result"] == "passed",
         "completedRepetition": completed == 1,
         "runtimeIdentity": runtime_passed,
-        "finishedPhase": current_phase == "repetition-00/finished",
+        "finishedPhase": is_finished_phase(current_phase, completed),
         "contractLog": contract_log_present,
         "warmupPhaseWindow": "warmup" in windows,
         "measurementPhaseWindow": "measurement" in windows,
@@ -3514,6 +3581,12 @@ def analyze_case(
         "latency": latency is True,
         "measurementSummary": summary is not None,
         "measurementRawOutput": raw_present,
+        "warmupLoadGeneratorCapacity": (
+            load_generator_capacity.get("warmup", {}).get("passed") is True
+        ),
+        "measurementLoadGeneratorCapacity": (
+            load_generator_capacity.get("measurement", {}).get("passed") is True
+        ),
         "metricsSampler": not sampler_failed,
         "resourceErrorsEmpty": resource_errors_empty,
         "kubernetesWebMetrics": bool(
@@ -3552,7 +3625,7 @@ def analyze_case(
     metrics_complete = measurement_metrics_available(summary, entry)
     http_evidence = bool(
         runtime_passed
-        and current_phase == "repetition-00/finished"
+        and gates["finishedPhase"]
         and contract_log_present
         and "warmup" in windows
         and "measurement" in windows
@@ -3563,6 +3636,8 @@ def analyze_case(
         and warmup_arrival_valid
         and measurement_arrival_valid
         and latency_identity_valid
+        and gates["warmupLoadGeneratorCapacity"]
+        and gates["measurementLoadGeneratorCapacity"]
         and metrics_complete
         and not endpoint_failed
         and stable_diffs
@@ -3692,13 +3767,7 @@ def analyze_case(
         "gates": gates,
         "failedGates": failed_gates,
         "inputSha256": checksums,
-        "controlIdentity": workload_control_identity(
-            case_dir,
-            workload,
-            entry,
-            execution_identity,
-            timing,
-        ),
+        "controlIdentity": control_identity,
         "timing": timing,
         "metrics": metrics,
     }
@@ -3917,12 +3986,53 @@ def validate_run_chronology(
     }
 
 
+def summarize_runpod_capacity_control_continuity(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    phases = {"warmup", "measurement"}
+    controls_by_phase: dict[str, dict[str, Any]] = {}
+    stable_control: dict[str, Any] | None = None
+    evidence_count = 0
+    all_passed = True
+    for row in rows:
+        capacity = row["controlIdentity"]["loadGeneratorCapacity"]
+        if not isinstance(capacity, dict) or not set(capacity) <= phases:
+            raise AnalysisFailure(
+                "RunPod load-generator capacity evidence is malformed"
+            )
+        if row["result"] == "passed" and set(capacity) != phases:
+            raise AnalysisFailure(
+                "passed result lacks complete RunPod load-generator capacity evidence"
+            )
+        for phase, evidence in capacity.items():
+            control = {
+                "limits": evidence["limits"],
+                "capacity": evidence["capacity"],
+            }
+            if stable_control is None:
+                stable_control = control
+            elif control != stable_control:
+                raise AnalysisFailure(
+                    "RunPod load-generator capacity controls changed across cases "
+                    "or phases"
+                )
+            controls_by_phase[phase] = control
+            evidence_count += 1
+            all_passed = all_passed and evidence["passed"] is True
+    return {
+        "controls": controls_by_phase,
+        "casePhaseEvidenceCount": evidence_count,
+        "allPassed": evidence_count > 0 and all_passed,
+    }
+
+
 def validate_run_control_continuity(
     rows: list[dict[str, Any]], state: dict[str, Any]
 ) -> dict[str, Any]:
     execution = validate_execution_identity(state["executionIdentity"])
     controls = [row["controlIdentity"] for row in rows]
     first = controls[0]
+    capacity_continuity = summarize_runpod_capacity_control_continuity(rows)
     for row, control in zip(rows, controls, strict=True):
         if control["namespace"] != execution["namespace"]:
             raise AnalysisFailure("workload namespaces differ from execution identity")
@@ -3961,32 +4071,6 @@ def validate_run_control_continuity(
         ):
             raise AnalysisFailure(
                 "RunPod load-generator identity changed across the run"
-            )
-        capacity_controls = {
-            phase: {
-                "limits": evidence["limits"],
-                "capacity": evidence["capacity"],
-                "passed": evidence["passed"],
-            }
-            for phase, evidence in control["loadGeneratorCapacity"].items()
-        }
-        first_capacity_controls = {
-            phase: {
-                "limits": evidence["limits"],
-                "capacity": evidence["capacity"],
-                "passed": evidence["passed"],
-            }
-            for phase, evidence in first["loadGeneratorCapacity"].items()
-        }
-        if (
-            set(capacity_controls) != {"warmup", "measurement"}
-            or capacity_controls != first_capacity_controls
-            or capacity_controls["warmup"]
-            != capacity_controls["measurement"]
-        ):
-            raise AnalysisFailure(
-                "RunPod load-generator capacity controls changed across cases "
-                "or phases"
             )
         if control["traffic"] != first["traffic"]:
             raise AnalysisFailure("public traffic identity changed across the run")
@@ -4055,24 +4139,7 @@ def validate_run_control_continuity(
         "loadGeneratorRuntimeIdentity": first[
             "loadGeneratorRuntimeIdentity"
         ],
-        "loadGeneratorCapacity": {
-            "controls": {
-                phase: {
-                    "limits": evidence["limits"],
-                    "capacity": evidence["capacity"],
-                    "passed": evidence["passed"],
-                }
-                for phase, evidence in first["loadGeneratorCapacity"].items()
-            },
-            "casePhaseEvidenceCount": sum(
-                len(control["loadGeneratorCapacity"]) for control in controls
-            ),
-            "allPassed": all(
-                evidence["passed"]
-                for control in controls
-                for evidence in control["loadGeneratorCapacity"].values()
-            ),
-        },
+        "loadGeneratorCapacity": capacity_continuity,
         "traffic": first["traffic"],
         "nodes": first["nodes"],
         "runtime": first["runtime"],
@@ -4086,6 +4153,8 @@ def validate_run_control_continuity(
 def apply_block_noise_comparability(
     rows: list[dict[str, Any]], control_identity: dict[str, Any]
 ) -> dict[str, Any]:
+    for row in rows:
+        row["preBlockMetricEligibility"] = dict(row["metricEligibility"])
     prometheus = control_identity["observability"]["prometheus"]
     if not prometheus["enabled"]:
         return {
@@ -4203,6 +4272,15 @@ def apply_block_noise_comparability(
         "maximumAllowedSpreadCores": spread_limit,
         "excludedCaseBlocks": excluded_case_blocks,
         "caseBlocks": case_block_reports,
+    }
+
+
+def metric_eligibility_counts(
+    rows: list[dict[str, Any]], field: str
+) -> dict[str, int]:
+    return {
+        key: sum(row[field][key] is True for row in rows)
+        for key in ("http", "webResource", "webPrometheus")
     }
 
 
@@ -4740,6 +4818,10 @@ def analyze(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     control_identity = validate_run_control_continuity(rows, state)
     chronology = validate_run_chronology(run_root, schedule, state, rows)
     noise_comparability = apply_block_noise_comparability(rows, control_identity)
+    pre_block_metric_eligible = metric_eligibility_counts(
+        rows, "preBlockMetricEligibility"
+    )
+    metric_eligible = metric_eligibility_counts(rows, "metricEligibility")
 
     failed = [
         {"entryId": row["entryId"], "failedGates": row["failedGates"]}
@@ -4778,13 +4860,9 @@ def analyze(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "stateStatus": state["status"],
             "scheduledEntries": EXPECTED_ENTRIES,
             "resultEntries": len(rows),
-            "eligibleEntries": sum(
-                row["metricEligibility"]["http"] for row in rows
-            ),
-            "metricEligibleEntries": {
-                key: sum(row["metricEligibility"][key] for row in rows)
-                for key in ("http", "webResource", "webPrometheus")
-            },
+            "eligibleEntries": metric_eligible["http"],
+            "preBlockMetricEligibleEntries": pre_block_metric_eligible,
+            "metricEligibleEntries": metric_eligible,
             "failedGateEntries": len(failed),
             "warnings": run_warnings,
             "cleanupError": state.get("cleanupError"),

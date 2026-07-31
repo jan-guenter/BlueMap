@@ -26,6 +26,20 @@ from support import (  # noqa: E402
 
 
 class RunPodAnalyzerTests(unittest.TestCase):
+    def test_finished_phase_tracks_completed_repetition_count(self) -> None:
+        self.assertTrue(
+            analyze.is_finished_phase("repetition-00/finished", completed=0)
+        )
+        self.assertTrue(
+            analyze.is_finished_phase("repetition-01/finished", completed=1)
+        )
+        self.assertFalse(
+            analyze.is_finished_phase("repetition-00/finished", completed=1)
+        )
+        self.assertFalse(
+            analyze.is_finished_phase("repetition-01/finished", completed=0)
+        )
+
     def test_public_ingress_is_exact_and_stable(self) -> None:
         ingress = {
             "resource": {
@@ -205,7 +219,34 @@ class RunPodAnalyzerTests(unittest.TestCase):
         self.assertEqual(evidence["capacity"]["vcpuCount"], 8)
         self.assertEqual(evidence["observed"], observed)
 
-    def test_capacity_gate_rejects_saturated_generator_even_when_reported_false(
+    def test_capacity_uses_exact_subsecond_timestamp_differences(self) -> None:
+        samples = runpod_samples()
+        for sample, offset in zip(samples, (0.0, 1.011, 2.025), strict=True):
+            sample["capturedAt"] = iso(offset)
+
+        observed = analyze.recompute_runpod_capacity(
+            samples,
+            runpod_identity(),
+            runpod_runtime_identity(),
+        )
+
+        self.assertEqual(observed["maximumSampleGapSeconds"], 1.014)
+
+    def test_semantic_json_equality_accepts_integral_float_round_trip(self) -> None:
+        python_identity = runpod_identity()
+        python_identity["runpod"]["maxDownloadMbps"] = 1000.0
+        python_identity["runpod"]["maxUploadMbps"] = 500.0
+        jq_identity = copy.deepcopy(python_identity)
+        jq_identity["runpod"]["maxDownloadMbps"] = 1000
+        jq_identity["runpod"]["maxUploadMbps"] = 500
+
+        self.assertNotEqual(
+            analyze.canonical_sha256(python_identity),
+            analyze.canonical_sha256(jq_identity),
+        )
+        self.assertTrue(analyze.equal_json_numbers(python_identity, jq_identity))
+
+    def test_capacity_gate_reports_saturated_generator_as_failed_evidence(
         self,
     ) -> None:
         frozen = runpod_identity()
@@ -222,9 +263,32 @@ class RunPodAnalyzerTests(unittest.TestCase):
                 runtime_identity=runtime,
                 passed=False,
             )
+            evidence = analyze.validate_runpod_capacity_artifact(
+                phase_dir,
+                frozen,
+                runtime,
+                "measurement",
+                (START_EPOCH, START_EPOCH + 10),
+                10.0,
+            )
+        self.assertFalse(evidence["passed"])
+
+    def test_capacity_rejects_reported_result_that_does_not_recompute(self) -> None:
+        frozen = runpod_identity()
+        runtime = runpod_runtime_identity()
+        samples = runpod_samples(saturated=True)
+        with tempfile.TemporaryDirectory() as directory:
+            phase_dir = Path(directory) / "measurement"
+            write_capacity_phase(
+                phase_dir,
+                samples,
+                identity=frozen,
+                runtime_identity=runtime,
+                passed=True,
+            )
             with self.assertRaisesRegex(
                 analyze.AnalysisFailure,
-                "failed its capacity gate",
+                "reported RunPod capacity result does not recompute",
             ):
                 analyze.validate_runpod_capacity_artifact(
                     phase_dir,
@@ -293,6 +357,234 @@ class RunPodAnalyzerTests(unittest.TestCase):
                     (START_EPOCH - 30, START_EPOCH - 20),
                     10.0,
                 )
+
+    def test_failed_warmup_may_omit_never_started_measurement_capacity(
+        self,
+    ) -> None:
+        frozen = runpod_identity()
+        runtime = runpod_runtime_identity()
+        entry = {
+            "entryId": "failed-warmup-entry",
+            "warmupDuration": "10s",
+            "measurementDuration": "10s",
+        }
+        timing = {
+            "phaseWindows": {"warmup": (START_EPOCH, START_EPOCH + 10)}
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repetition = Path(directory) / "repetitions" / "01"
+            write_capacity_phase(
+                repetition / "warmup",
+                runpod_samples(),
+                identity=frozen,
+                runtime_identity=runtime,
+            )
+            evidence = analyze.validate_runpod_capacity_phases(
+                repetition,
+                frozen,
+                runtime,
+                entry,
+                timing,
+                "failed",
+            )
+
+        self.assertEqual(set(evidence), {"warmup"})
+        self.assertTrue(evidence["warmup"]["passed"])
+
+    def test_passed_result_requires_both_capacity_phases(self) -> None:
+        entry = {
+            "entryId": "incomplete-passed-entry",
+            "warmupDuration": "10s",
+            "measurementDuration": "10s",
+        }
+        timing = {
+            "phaseWindows": {"warmup": (START_EPOCH, START_EPOCH + 10)}
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                analyze.AnalysisFailure,
+                "passed result lacks RunPod capacity phase evidence: measurement",
+            ):
+                analyze.validate_runpod_capacity_phases(
+                    Path(directory),
+                    runpod_identity(),
+                    runpod_runtime_identity(),
+                    entry,
+                    timing,
+                    "passed",
+                )
+
+    def test_started_phase_still_requires_capacity_evidence(self) -> None:
+        entry = {
+            "entryId": "missing-started-phase-entry",
+            "warmupDuration": "10s",
+            "measurementDuration": "10s",
+        }
+        timing = {
+            "phaseWindows": {
+                "warmup": (START_EPOCH, START_EPOCH + 10),
+                "measurement": (START_EPOCH + 10, START_EPOCH + 20),
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            repetition = Path(directory)
+            write_capacity_phase(
+                repetition / "warmup",
+                runpod_samples(),
+                identity=runpod_identity(),
+                runtime_identity=runpod_runtime_identity(),
+            )
+            with self.assertRaisesRegex(
+                analyze.AnalysisFailure,
+                "RunPod resource telemetry is missing",
+            ):
+                analyze.validate_runpod_capacity_phases(
+                    repetition,
+                    runpod_identity(),
+                    runpod_runtime_identity(),
+                    entry,
+                    timing,
+                    "failed",
+                )
+
+    def test_capacity_continuity_accepts_missing_failed_phase_only(self) -> None:
+        evidence = {
+            "limits": CAPACITY_LIMITS,
+            "capacity": {
+                "vcpuCount": 8,
+                "memoryCapacityBytes": 16_000_000_000,
+                "minimumDownloadMbps": 500,
+                "minimumUploadMbps": 100,
+            },
+            "passed": True,
+        }
+        failed_row = {
+            "result": "failed",
+            "controlIdentity": {
+                "loadGeneratorCapacity": {"warmup": copy.deepcopy(evidence)}
+            },
+        }
+        passed_row = {
+            "result": "passed",
+            "controlIdentity": {
+                "loadGeneratorCapacity": {
+                    "warmup": copy.deepcopy(evidence),
+                    "measurement": copy.deepcopy(evidence),
+                }
+            },
+        }
+
+        continuity = analyze.summarize_runpod_capacity_control_continuity(
+            [failed_row, passed_row]
+        )
+
+        self.assertEqual(set(continuity["controls"]), {"warmup", "measurement"})
+        self.assertEqual(continuity["casePhaseEvidenceCount"], 3)
+        self.assertTrue(continuity["allPassed"])
+
+        failed_capacity = copy.deepcopy(passed_row)
+        failed_capacity["result"] = "failed"
+        failed_capacity["controlIdentity"]["loadGeneratorCapacity"][
+            "measurement"
+        ]["passed"] = False
+        failed_continuity = (
+            analyze.summarize_runpod_capacity_control_continuity(
+                [failed_row, failed_capacity]
+            )
+        )
+        self.assertFalse(failed_continuity["allPassed"])
+
+        changed = copy.deepcopy(passed_row)
+        changed["controlIdentity"]["loadGeneratorCapacity"]["measurement"][
+            "capacity"
+        ]["vcpuCount"] = 4
+        with self.assertRaisesRegex(
+            analyze.AnalysisFailure,
+            "capacity controls changed",
+        ):
+            analyze.summarize_runpod_capacity_control_continuity(
+                [failed_row, changed]
+            )
+
+        incomplete_passed = copy.deepcopy(failed_row)
+        incomplete_passed["result"] = "passed"
+        with self.assertRaisesRegex(
+            analyze.AnalysisFailure,
+            "passed result lacks complete",
+        ):
+            analyze.summarize_runpod_capacity_control_continuity(
+                [incomplete_passed]
+            )
+
+    def test_block_noise_preserves_pre_block_metric_eligibility(self) -> None:
+        rows = []
+        for block in range(1, 6):
+            eligibility = {
+                "http": True,
+                "webResource": block != 3,
+                "webPrometheus": True,
+            }
+            rows.append(
+                {
+                    "entryId": f"case/variant/block-{block}",
+                    "caseId": "case",
+                    "variantId": "variant",
+                    "block": block,
+                    "eligibleForFormalComparison": True,
+                    "metricEligibility": eligibility,
+                    "failedGates": [],
+                    "gates": {},
+                    "metrics": {
+                        "nodeNoise": {
+                            "enabled": True,
+                            "available": True,
+                            "passed": block != 2,
+                            "repetitions": [
+                                {
+                                    "nodes": [
+                                        {
+                                            "node": "node-a",
+                                            "meanCores": 1.0,
+                                            "maximumCores": 1.25,
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    },
+                }
+            )
+        control_identity = {
+            "nodes": ["node-a"],
+            "observability": {
+                "prometheus": {
+                    "enabled": True,
+                    "maximumNonTargetNodeCpuRangeCores": 0.5,
+                }
+            },
+        }
+
+        result = analyze.apply_block_noise_comparability(rows, control_identity)
+
+        self.assertEqual(result["excludedCaseBlocks"], [{"caseId": "case", "block": 2}])
+        self.assertEqual(
+            rows[1]["preBlockMetricEligibility"],
+            {"http": True, "webResource": True, "webPrometheus": True},
+        )
+        self.assertEqual(
+            rows[1]["metricEligibility"],
+            {"http": False, "webResource": False, "webPrometheus": False},
+        )
+        self.assertEqual(
+            analyze.metric_eligibility_counts(
+                rows, "preBlockMetricEligibility"
+            ),
+            {"http": 5, "webResource": 4, "webPrometheus": 5},
+        )
+        self.assertEqual(
+            analyze.metric_eligibility_counts(rows, "metricEligibility"),
+            {"http": 4, "webResource": 3, "webPrometheus": 4},
+        )
 
     def test_kubernetes_sampler_rejects_legacy_loadgen_role(self) -> None:
         workload = {
