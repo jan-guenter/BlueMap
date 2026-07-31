@@ -8,16 +8,42 @@ The provisioner supplies an ephemeral Ed25519 public key through
 `BLUEMAP_RUNPOD_SSH_PUBLIC_KEY`. Password authentication, root login,
 local TCP forwarding, Unix-socket forwarding, agent forwarding, X11
 forwarding, tunnelling, and user-controlled SSH environment variables are
-disabled. The only permitted TCP forwarding mode is a controller-created
-remote forward listening on RunPod loopback at `127.0.0.1:18080`.
-`GatewayPorts no` and `PermitListen 127.0.0.1:18080` prevent that listener
-from becoming a general-purpose or publicly reachable proxy. The private key
-is never sent to RunPod, and the RunPod API still exposes only SSH port 22.
+disabled. HAProxy owns a loopback-only frontend at `127.0.0.1:18080` and uses
+fixed `static-rr` TCP fanout to exactly eight loopback lanes on ports `18081`
+through `18088`. The controller creates one independent remote SSH forward
+for each lane. `GatewayPorts no` and an exact `PermitListen` allowlist for
+`127.0.0.1:18081` through `127.0.0.1:18088` prevent the lanes from becoming a
+general-purpose or publicly reachable proxy. SSH is not permitted to claim
+the HAProxy frontend. The private key is never sent to RunPod, and the RunPod
+API still exposes only SSH port 22.
 
-The restricted listener is reserved for the direct L4 benchmark route. It
-lets k6 retain `bluemap-test.guenter.cloud` as the URL host while the
-controller carries opaque HTTP bytes to the cluster's internal Traefik
-service. Consequently both `Host: bluemap-test.guenter.cloud` and
+The eight-lane fanout is deliberately fixed and fail-closed. HAProxy performs
+no health checks, retries, redispatch, or adaptive backend removal. If any
+independent SSH lane stops carrying traffic, requests fail instead of silently
+continuing with a different transport topology. The image entrypoint
+supervises HAProxy and sshd together and terminates the container if either
+service exits.
+
+Every k6 command session is coupled to an stdin lease whose only write-capable
+descriptor is owned by the controller helper itself. A nonce-bound startup
+handshake is consumed before launch, and a liveness probe arms the EOF watcher
+before the workload barrier is released. The wrapper supervises that watcher
+for the entire workload and fails closed if it exits other than for a recorded
+lease event or the wrapper's deliberate stop. Every SSH child also has a checked
+parent-death KILL signal, so helper loss cannot leave lane processes holding the
+controller output pipe open. A verified process-group launch barrier closes the
+fork-to-`setsid` race, and both the remote timeout and a separate helper
+wall-clock deadline are bounded. The remote wrapper sends TERM,
+escalates to KILL, confirms that the process group is empty, reaps its watcher
+and resource sampler, and atomically publishes a nonce-bound session receipt.
+A global active-phase lock is released only after that terminal proof exists;
+confirmation also requires the lock to be absent. Existing output paths or a
+stale lock block later work instead of allowing replay or overlapping traffic.
+
+The HAProxy frontend is reserved for the direct L4 benchmark route. It lets k6
+retain `bluemap-test.guenter.cloud` as the URL host while the controller
+carries opaque HTTP bytes over all eight SSH lanes to the cluster's internal
+Traefik service. Consequently both `Host: bluemap-test.guenter.cloud` and
 `Accept-Encoding: zstd` reach Traefik without Cloudflare HTTP processing.
 
 The formal run freezes and records:

@@ -131,17 +131,35 @@ frozen RunPod CPU machine. Neither the Job nor the workstation is a benchmark
 request source.
 
 The canonical Job uses only `ssh-l4-traefik` and
-`http://bluemap-test.guenter.cloud` over a fixed SSH L4 tunnel
-(`127.0.0.1:18080` to
-`rke2-traefik.kube-system.svc.cluster.local:80`). It still exercises the same
+`http://bluemap-test.guenter.cloud` through a fixed eight-lane SSH L4 topology.
+RunPod HAProxy listens only on `127.0.0.1:18080` and uses TCP `static-rr` over
+independent reverse forwards on `127.0.0.1:18081` through `:18088`, all targeting
+`rke2-traefik.kube-system.svc.cluster.local:80`. It still exercises the same
 Traefik host rule and `bluemap-perf-public:8100` mux, but makes no edge-bypass
-claim. Its tunnel endpoints are hardcoded controller identity, not runtime
-configuration. These are the checked-in ConfigMap defaults:
+claim. All eight lanes are required: they are independently established,
+probed before and after each phase, and supervised while k6 runs. A lane loss
+terminates the phase instead of degrading to a different topology. The
+frontend, lanes, target, balancing policy, and per-phase health evidence are
+hardcoded and checked offline, not runtime configuration. These are the
+checked-in ConfigMap defaults:
 
 ```yaml
 BLUEMAP_TRAFFIC_MODE: "ssh-l4-traefik"
 BLUEMAP_TRAFFIC_BASE_URL: "http://bluemap-test.guenter.cloud"
 ```
+
+The command SSH connection is bound to a dedicated held-open stdin lease owned
+directly by the controller helper. Its remote wrapper starts timeout and k6
+only after a nonce-bound lease handshake, an armed watcher liveness check, and
+a verified process-group barrier. The wrapper continues supervising that
+watcher until the phase ends. Parent-death KILL supervision covers the
+command connection and every lane. The wrapper holds a global active-phase lock.
+EOF, controller termination, a helper deadline, or a lane failure drives TERM,
+a bounded KILL escalation, process-group absence verification, and a fresh
+nonce-bound per-phase receipt. The next phase cannot acquire the lock until
+that receipt is terminal and the lock has been released; existing output,
+unavailable proof, or inconsistent proof makes the runner exit without
+`result.json`, so the orchestrator enters its fatal/quiesce path.
 
 The runner and dry-run tooling retain `cloudflare-https` for separate
 diagnostic work, but the mandatory preflight and its following 80-entry formal
@@ -159,7 +177,8 @@ identities. The fixed cases are:
 - `map-data-mixed` at rate 40 for the three-replica Java and Rust candidates.
 
 Each entry uses a 30-second warm-up, two-minute measurement, 15-second
-cool-down, and zstd storage/accept encoding. The derived matrix, generated
+cool-down, zstd storage/accept encoding, and an exact 100% scheduled-iteration
+completion gate. The derived matrix, generated
 six-entry schedule, provenance, checksums, per-case evidence, and final report
 are preserved under the sibling `<run-id>-preflight` artifact directory. The
 formal `run` subcommand independently reloads and validates that exact passed
@@ -179,8 +198,10 @@ the first valid sample. Any later sampling error fails the gate. The Pod name
 must match both its downward-API value and container hostname, and its run
 label, ServiceAccount, Job owner, UID, readiness, and fixed 2 CPU/2 GiB limits
 are persisted and revalidated. The gate also requires fresh and continuous
-unique samples, p95 CPU at most 70% of the limit, maximum CPU at most 90%, and
-maximum memory at most 80%. This is deliberately described as a coarse
+unique samples with at most a 45-second gap, p95 CPU at most 70% of the limit,
+maximum CPU at most 90%, and maximum memory at most 80%. A structurally valid
+failed gate is checksummed and preserved before preflight stops; it can never
+authorize the formal run. This is deliberately described as a coarse
 container CPU/memory headroom gate: metrics-server cannot attribute usage to
 the SSH relay process and provides neither bandwidth nor CPU-throttling proof.
 Rancher's Prometheus currently exposes no `traefik_*` series, while scraping

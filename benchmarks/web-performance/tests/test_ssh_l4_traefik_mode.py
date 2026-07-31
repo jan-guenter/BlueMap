@@ -46,18 +46,27 @@ class SshL4TraefikModeTests(unittest.TestCase):
             'die "ssh-l4-traefik traffic forbids --require-edge-bypass"',
             runner,
         )
-        self.assertIn('exec-traefik-forward "$@"', runner)
-        self.assertIn('loadgen_k6_exec "${phase_command[@]}"', runner)
+        self.assertIn('exec-traefik-forward \\\n', runner)
+        self.assertIn('--transport-output "$transport_output"', runner)
+        self.assertIn('            -- \\\n            "$@"', runner)
+        self.assertIn(
+            'loadgen_k6_exec "$remote_transport" "${phase_command[@]}"',
+            runner,
+        )
         self.assertIn('-e "ACCEPT_ENCODING=$ACCEPT_ENCODING"', runner)
         self.assertIn('-e "STORED_ENCODING=$STORED_ENCODING"', runner)
 
-        for key, value in (
-            ("listenHost", '"127.0.0.1"'),
-            ("listenPort", "18080"),
-            ("targetHost", '"rke2-traefik.kube-system.svc.cluster.local"'),
-            ("targetPort", "80"),
-        ):
-            self.assertIn(f"{key}: {value}", runner)
+        self.assertIn('balancer: "haproxy-tcp-static-rr"', runner)
+        self.assertIn('frontend: {', runner)
+        self.assertIn('tunnelCount: 8', runner)
+        for port in range(18081, 18089):
+            self.assertIn(f'listenPort: {port}', runner)
+        self.assertIn(
+            'targetHost: "rke2-traefik.kube-system.svc.cluster.local"',
+            runner,
+        )
+        self.assertIn('targetPort: 80', runner)
+        self.assertIn('healthPolicy: "all-required"', runner)
 
     def test_k6_uses_fixed_host_mapping_and_rejects_edge_headers(self) -> None:
         script = (BENCHMARK_ROOT / "k6" / "bluemap.js").read_text(
@@ -192,18 +201,108 @@ class SshL4TraefikModeTests(unittest.TestCase):
                 script,
             )
 
-    def test_helper_has_one_fixed_reverse_forward(self) -> None:
+    def test_helper_has_eight_fixed_independent_reverse_forwards(self) -> None:
         helper = (TOOLS / "runpod_loadgen.sh").read_text(encoding="utf-8")
-        forward = (
-            "127.0.0.1:18080:"
-            "rke2-traefik.kube-system.svc.cluster.local:80"
-        )
 
-        self.assertEqual(helper.count(forward), 1)
+        self.assertIn(
+            'FORWARD_PORTS=(18081 18082 18083 18084 18085 18086 18087 18088)',
+            helper,
+        )
+        self.assertIn('FORWARD_LISTEN_HOST="127.0.0.1"', helper)
+        self.assertIn(
+            'FORWARD_TARGET_HOST="rke2-traefik.kube-system.svc.cluster.local"',
+            helper,
+        )
+        self.assertIn('FORWARD_TARGET_PORT=80', helper)
         self.assertIn("-o ExitOnForwardFailure=yes", helper)
+        self.assertIn("-o ControlMaster=no", helper)
+        self.assertIn("-o ControlPath=none", helper)
+        self.assertIn("-N -T", helper)
+        self.assertIn('lane_count="${#FORWARD_PORTS[@]}"', helper)
+        self.assertGreaterEqual(
+            helper.count('for ((i = 0; i < lane_count; i++)); do'),
+            5,
+        )
+        self.assertIn('forward_pids[i]=$!', helper)
+        self.assertIn('for pid in "${forward_pids[@]}"; do', helper)
+        self.assertIn(
+            'ssh "${ssh_options[@]}" "$user@$host" "${quoted# }" \\\n'
+            '            < "$command_lease_fifo" {command_lease_fd}>&- &',
+            helper,
+        )
+        self.assertIn('exec {command_lease_fd}<>"$command_lease_fifo"', helper)
+        self.assertGreaterEqual(helper.count("setpriv --pdeathsig KILL"), 3)
+        self.assertIn("bluemap-phase-lease-v1", helper)
+        self.assertNotIn('sleep 2147483647', helper)
+        self.assertIn('close_command_lease "lane-failure"', helper)
+        self.assertIn('if ! confirm_command_session; then', helper)
+        self.assertIn('command_terminated_for_lane_failure=true', helper)
+        self.assertIn('return "$TRANSPORT_FAILURE_EXIT"', helper)
         self.assertIn("exec-traefik-forward)", helper)
         self.assertNotIn("--forward-listen", helper)
         self.assertNotIn("--forward-target", helper)
+        self.assertNotIn(
+            "127.0.0.1:18080:rke2-traefik.kube-system.svc.cluster.local:80",
+            helper,
+        )
+
+    def test_helper_requires_transport_evidence_output_and_http_200_probes(self) -> None:
+        helper_path = TOOLS / "runpod_loadgen.sh"
+        helper = helper_path.read_text(encoding="utf-8")
+        help_result = subprocess.run(
+            ["bash", str(helper_path), "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertIn(
+            "--transport-output /artifacts/PATH.json -- COMMAND", help_result.stdout
+        )
+        self.assertIn(
+            '[[ "$1" == "--transport-output" ]]',
+            helper,
+        )
+        self.assertIn('validate_remote_path "$transport_output"', helper)
+        self.assertIn('[[ "$1" == "--" ]]', helper)
+        self.assertIn("--write-out '%{http_code}'", helper)
+        self.assertIn("--header 'Host: bluemap-test.guenter.cloud'", helper)
+        self.assertIn(
+            '"http://${FORWARD_LISTEN_HOST}:${FORWARD_PORTS[$index]}/"',
+            helper,
+        )
+        self.assertIn('[[ "$status" == "200" ]]', helper)
+
+    def test_helper_emits_exact_fail_closed_transport_schema(self) -> None:
+        helper = (TOOLS / "runpod_loadgen.sh").read_text(encoding="utf-8")
+
+        for literal in (
+            'kind: "ssh-l4-traefik-transport"',
+            'formatVersion: 1',
+            'mode: "ssh-l4-traefik"',
+            'balancer: "haproxy-tcp-static-rr"',
+            'frontend: {host: "127.0.0.1", port: 18080}',
+            'tunnelCount: $tunnelCount',
+            'healthPolicy: "all-required"',
+            'allRequired: true',
+            'commandExitStatus:',
+            'failure: ($failure | nullable)',
+            'passed: $passed',
+        ):
+            with self.subTest(literal=literal):
+                self.assertIn(literal, helper)
+
+        self.assertIn('lane_state_temp="$(mktemp)"', helper)
+        self.assertIn('jq -s \\', helper)
+        self.assertIn('backends: ($lanes | map({', helper)
+        self.assertIn('lanes: $lanes', helper)
+        self.assertNotIn('--argjson l1StartAttempted', helper)
+        self.assertNotIn('--argjson l2StartAttempted', helper)
+        self.assertEqual(helper.count("httpStatus:"), 2)
+        self.assertEqual(helper.count('mode: "ssh-l4-traefik"'), 1)
+        self.assertIn("listenPort: $listenPort", helper)
+        self.assertIn("preProbe:", helper)
+        self.assertIn("postProbe:", helper)
 
     def test_shell_scripts_parse(self) -> None:
         for script in ("run_origin_case.sh", "runpod_loadgen.sh"):

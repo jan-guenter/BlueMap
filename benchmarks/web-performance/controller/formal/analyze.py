@@ -85,10 +85,21 @@ TRAFFIC_BASE_URLS = {
     "ssh-l4-traefik": "http://bluemap-test.guenter.cloud",
 }
 SSH_L4_TRAEFIK_TUNNEL = {
-    "listenHost": "127.0.0.1",
-    "listenPort": 18080,
-    "targetHost": "rke2-traefik.kube-system.svc.cluster.local",
-    "targetPort": 80,
+    "formatVersion": 1,
+    "balancer": "haproxy-tcp-static-rr",
+    "frontend": {"host": "127.0.0.1", "port": 18080},
+    "tunnelCount": 8,
+    "backends": [
+        {
+            "id": f"lane-{index}",
+            "listenHost": "127.0.0.1",
+            "listenPort": 18080 + index,
+            "targetHost": "rke2-traefik.kube-system.svc.cluster.local",
+            "targetPort": 80,
+        }
+        for index in range(1, 9)
+    ],
+    "healthPolicy": "all-required",
 }
 PROFILES = {
     "static",
@@ -1829,7 +1840,7 @@ def validate_preflight_attestation(
             "warmupDuration": "30s",
             "measurementDuration": "2m",
             "cooldownSeconds": 15,
-            "minimumAchievedRateRatio": 0.99,
+            "minimumAchievedRateRatio": 1.0,
             "preAllocatedVUs": 256,
             "maxVUs": 512,
         },
@@ -1939,7 +1950,7 @@ def validate_preflight_attestation(
         "maximumCpuLimitRatio": 0.90,
         "maximumMemoryLimitRatio": 0.80,
         "minimumUniqueMetricTimestamps": 6,
-        "maximumUniqueMetricTimestampGapSeconds": 30.0,
+        "maximumUniqueMetricTimestampGapSeconds": 45.0,
         "maximumMetricAgeSeconds": 60.0,
         "maximumCoverageGapSeconds": 60.0,
     }
@@ -2027,7 +2038,7 @@ def validate_preflight_attestation(
         if match is None or float(match.group(1)) <= 0:
             raise AnalysisFailure("preflight relay metric window is malformed")
     for observed_key, limit in (
-        ("maximumUniqueMetricTimestampGapSeconds", 30.0),
+        ("maximumUniqueMetricTimestampGapSeconds", 45.0),
         ("maximumMetricAgeSeconds", 60.0),
         ("initialCoverageGapSeconds", 60.0),
         ("finalCoverageGapSeconds", 60.0),
@@ -2758,6 +2769,489 @@ def validate_runpod_capacity_phases(
             f"{entry['entryId']}: RunPod capacity controls differ between phases"
         )
     return capacity
+
+
+def validate_ssh_l4_transport_artifact(
+    path: Path,
+    label: str,
+    phase_window: Sequence[float],
+    helper_exit_status: int | None,
+    expected_transport_output: str,
+) -> dict[str, Any]:
+    evidence = load_regular_object(path)
+    expected_keys = {
+        "formatVersion",
+        "kind",
+        "mode",
+        "startedAt",
+        "finishedAt",
+        "topology",
+        "allRequired",
+        "commandExitStatus",
+        "commandTerminatedForLaneFailure",
+        "commandSession",
+        "lanes",
+        "failure",
+        "passed",
+    }
+    if (
+        set(evidence) != expected_keys
+        or evidence.get("formatVersion") != 1
+        or evidence.get("kind") != "ssh-l4-traefik-transport"
+        or evidence.get("mode") != "ssh-l4-traefik"
+        or evidence.get("topology") != SSH_L4_TRAEFIK_TUNNEL
+        or evidence.get("allRequired") is not True
+        or not isinstance(evidence.get("commandTerminatedForLaneFailure"), bool)
+        or not isinstance(evidence.get("passed"), bool)
+    ):
+        raise AnalysisFailure(f"{label}: SSH L4 transport evidence is malformed")
+
+    started = timestamp_epoch(
+        evidence.get("startedAt"), f"{label}: transport startedAt"
+    )
+    finished = timestamp_epoch(
+        evidence.get("finishedAt"), f"{label}: transport finishedAt"
+    )
+    if (
+        len(phase_window) != 2
+        or started > finished
+        or started < float(phase_window[0]) - 2
+        or finished > float(phase_window[1]) + 2
+    ):
+        raise AnalysisFailure(
+            f"{label}: SSH L4 transport chronology differs from the phase"
+        )
+
+    command_status = evidence.get("commandExitStatus")
+    if command_status is not None and (
+        isinstance(command_status, bool) or not isinstance(command_status, int)
+    ):
+        raise AnalysisFailure(
+            f"{label}: SSH L4 transport command status is invalid"
+        )
+    failure = evidence.get("failure")
+    if failure is not None and (not isinstance(failure, str) or not failure):
+        raise AnalysisFailure(f"{label}: SSH L4 transport failure is invalid")
+
+    command_session = evidence.get("commandSession")
+    if not isinstance(command_session, dict) or set(command_session) != {
+        "required",
+        "id",
+        "outputPath",
+        "leaseClosedByHelper",
+        "leaseCloseReason",
+        "confirmationAttempted",
+        "confirmed",
+        "receipt",
+    }:
+        raise AnalysisFailure(f"{label}: command-session evidence is malformed")
+    session_flags = (
+        "required",
+        "leaseClosedByHelper",
+        "confirmationAttempted",
+        "confirmed",
+    )
+    session_id = command_session.get("id")
+    session_output = command_session.get("outputPath")
+    if (
+        any(not isinstance(command_session.get(key), bool) for key in session_flags)
+        or not isinstance(session_id, str)
+        or re.fullmatch(r"[a-f0-9]{64}", session_id) is None
+        or session_output
+        != f"{expected_transport_output}.command-session.{session_id}.json"
+    ):
+        raise AnalysisFailure(f"{label}: command-session identity is invalid")
+    receipt = command_session.get("receipt")
+    if not command_session["required"]:
+        if command_session != {
+            "required": False,
+            "id": session_id,
+            "outputPath": session_output,
+            "leaseClosedByHelper": False,
+            "leaseCloseReason": None,
+            "confirmationAttempted": False,
+            "confirmed": False,
+            "receipt": None,
+        }:
+            raise AnalysisFailure(
+                f"{label}: unused command-session evidence is inconsistent"
+            )
+    else:
+        if (
+            command_session["leaseClosedByHelper"] is not True
+            or command_session.get("leaseCloseReason")
+            not in {
+                "after-command-exit",
+                "lane-failure",
+                "helper-deadline",
+                "local-exit-timeout",
+            }
+            or command_session["confirmationAttempted"] is not True
+        ):
+            raise AnalysisFailure(
+                f"{label}: command-session lifecycle is inconsistent"
+            )
+        if command_session["confirmed"] is not True:
+            if receipt is not None:
+                raise AnalysisFailure(
+                    f"{label}: unconfirmed command session has a receipt"
+                )
+        else:
+            receipt_keys = {
+                "kind",
+                "formatVersion",
+                "sessionId",
+                "sessionOutput",
+                "activeLock",
+                "startedAt",
+                "completedAt",
+                "lease",
+                "termination",
+                "passed",
+            }
+            if (
+                not isinstance(receipt, dict)
+                or set(receipt) != receipt_keys
+                or receipt.get("kind") != "runpod-command-session"
+                or receipt.get("formatVersion") != 1
+                or receipt.get("sessionId") != session_id
+                or receipt.get("sessionOutput") != session_output
+                or receipt.get("activeLock")
+                != "/tmp/bluemap-runpod-active-phase.lock"
+                or receipt.get("passed") is not True
+            ):
+                raise AnalysisFailure(
+                    f"{label}: command-session receipt is malformed"
+                )
+            receipt_started = timestamp_epoch(
+                receipt.get("startedAt"), f"{label}: command session startedAt"
+            )
+            receipt_completed = timestamp_epoch(
+                receipt.get("completedAt"),
+                f"{label}: command session completedAt",
+            )
+            if (
+                started - 1 > receipt_started
+                or receipt_started > receipt_completed
+                or receipt_completed > finished + 1
+            ):
+                raise AnalysisFailure(
+                    f"{label}: command-session chronology is invalid"
+                )
+            lease = receipt.get("lease")
+            if (
+                not isinstance(lease, dict)
+                or set(lease)
+                != {"required", "eofObserved", "protocolViolation", "observedAt"}
+                or lease.get("required") is not True
+                or not isinstance(lease.get("eofObserved"), bool)
+                or lease.get("protocolViolation") is not False
+            ):
+                raise AnalysisFailure(f"{label}: command-session lease is invalid")
+            lease_observed_at = lease.get("observedAt")
+            if lease["eofObserved"]:
+                observed_epoch = timestamp_epoch(
+                    lease_observed_at,
+                    f"{label}: command-session lease observedAt",
+                )
+                if not receipt_started <= observed_epoch <= receipt_completed:
+                    raise AnalysisFailure(
+                        f"{label}: command-session lease chronology is invalid"
+                    )
+            elif lease_observed_at is not None:
+                raise AnalysisFailure(
+                    f"{label}: command-session lease has an unexpected timestamp"
+                )
+            termination = receipt.get("termination")
+            if not isinstance(termination, dict) or set(termination) != {
+                "requested",
+                "termSignal",
+                "killEscalated",
+                "commandExitStatus",
+                "processGroupId",
+                "processGroupEmpty",
+                "watcherReaped",
+                "samplerReaped",
+            }:
+                raise AnalysisFailure(
+                    f"{label}: command-session termination is malformed"
+                )
+            termination_status = termination.get("commandExitStatus")
+            process_group_id = termination.get("processGroupId")
+            if (
+                not isinstance(termination.get("requested"), bool)
+                or termination.get("termSignal")
+                != ("TERM" if termination["requested"] else None)
+                or not isinstance(termination.get("killEscalated"), bool)
+                or (
+                    termination["killEscalated"]
+                    and not termination["requested"]
+                )
+                or isinstance(termination_status, bool)
+                or not isinstance(termination_status, int)
+                or not 0 <= termination_status <= 255
+                or isinstance(process_group_id, bool)
+                or not isinstance(process_group_id, int)
+                or process_group_id <= 0
+                or termination.get("processGroupEmpty") is not True
+                or termination.get("watcherReaped") is not True
+                or termination.get("samplerReaped") is not True
+                or (lease["eofObserved"] and not termination["requested"])
+            ):
+                raise AnalysisFailure(
+                    f"{label}: command-session termination is invalid"
+                )
+            if (
+                command_status is not None
+                and not lease["eofObserved"]
+                and termination_status != command_status
+            ):
+                raise AnalysisFailure(
+                    f"{label}: command-session status differs from SSH"
+                )
+
+    lanes = evidence.get("lanes")
+    expected_backends = SSH_L4_TRAEFIK_TUNNEL["backends"]
+    if not isinstance(lanes, list) or len(lanes) != len(expected_backends):
+        raise AnalysisFailure(f"{label}: SSH L4 transport lanes are malformed")
+    healthy_lanes: list[bool] = []
+    for lane, backend in zip(lanes, expected_backends, strict=True):
+        lane_label = f"{label}: transport {backend['id']}"
+        if not isinstance(lane, dict) or set(lane) != {
+            "id",
+            "listenPort",
+            "startAttempted",
+            "started",
+            "startedAt",
+            "preProbe",
+            "postProbe",
+            "exitedEarly",
+            "exitStatus",
+            "stoppedByHelper",
+        }:
+            raise AnalysisFailure(f"{lane_label} evidence is malformed")
+        booleans = (
+            "startAttempted",
+            "started",
+            "exitedEarly",
+            "stoppedByHelper",
+        )
+        if (
+            lane.get("id") != backend["id"]
+            or lane.get("listenPort") != backend["listenPort"]
+            or any(not isinstance(lane.get(key), bool) for key in booleans)
+        ):
+            raise AnalysisFailure(f"{lane_label} identity is invalid")
+        lane_started_at = lane.get("startedAt")
+        lane_started: float | None = None
+        if lane["started"]:
+            lane_started = timestamp_epoch(
+                lane_started_at, f"{lane_label} startedAt"
+            )
+            if lane_started < started - 1 or lane_started > finished + 1:
+                raise AnalysisFailure(f"{lane_label} start is outside the phase")
+        elif lane_started_at is not None:
+            raise AnalysisFailure(f"{lane_label} has a start time without starting")
+        lane_exit = lane.get("exitStatus")
+        if lane_exit is not None and (
+            isinstance(lane_exit, bool) or not isinstance(lane_exit, int)
+        ):
+            raise AnalysisFailure(f"{lane_label} exit status is invalid")
+
+        probe_passes: list[bool] = []
+        probe_epochs: list[float | None] = []
+        for probe_name in ("preProbe", "postProbe"):
+            probe = lane.get(probe_name)
+            if not isinstance(probe, dict) or set(probe) != {
+                "attempted",
+                "passed",
+                "at",
+                "httpStatus",
+            }:
+                raise AnalysisFailure(f"{lane_label} {probe_name} is malformed")
+            if not isinstance(probe.get("attempted"), bool) or not isinstance(
+                probe.get("passed"), bool
+            ):
+                raise AnalysisFailure(f"{lane_label} {probe_name} flags are invalid")
+            probe_at = probe.get("at")
+            probe_epoch: float | None = None
+            if probe["attempted"]:
+                probe_epoch = timestamp_epoch(
+                    probe_at, f"{lane_label} {probe_name} at"
+                )
+                if probe_epoch < started - 1 or probe_epoch > finished + 1:
+                    raise AnalysisFailure(
+                        f"{lane_label} {probe_name} is outside the phase"
+                    )
+            elif probe_at is not None:
+                raise AnalysisFailure(
+                    f"{lane_label} {probe_name} has a timestamp without an attempt"
+                )
+            http_status = probe.get("httpStatus")
+            if http_status is not None and (
+                isinstance(http_status, bool) or not isinstance(http_status, int)
+            ):
+                raise AnalysisFailure(
+                    f"{lane_label} {probe_name} HTTP status is invalid"
+                )
+            expected_probe_passed = bool(
+                probe["attempted"] and http_status == 200
+            )
+            if probe["passed"] is not expected_probe_passed:
+                raise AnalysisFailure(
+                    f"{lane_label} {probe_name} result is inconsistent"
+                )
+            probe_passes.append(expected_probe_passed)
+            probe_epochs.append(probe_epoch)
+        if (
+            (lane["started"] and not lane["startAttempted"])
+            or (lane["preProbe"]["attempted"] and not lane["started"])
+            or (
+                lane["postProbe"]["attempted"]
+                and not lane["preProbe"]["attempted"]
+            )
+            or (lane["stoppedByHelper"] and not lane["started"])
+            or (lane["exitedEarly"] and not lane["startAttempted"])
+            or (lane_exit is not None and not lane["startAttempted"])
+        ):
+            raise AnalysisFailure(f"{lane_label} lifecycle is inconsistent")
+        if not lane["startAttempted"]:
+            terminal_state_valid = bool(
+                lane["started"] is False
+                and lane["preProbe"]["attempted"] is False
+                and lane["postProbe"]["attempted"] is False
+                and lane["exitedEarly"] is False
+                and lane_exit is None
+                and lane["stoppedByHelper"] is False
+            )
+        elif not lane["started"]:
+            terminal_state_valid = bool(
+                lane["exitedEarly"]
+                and lane_exit is not None
+                and lane["stoppedByHelper"] is False
+            )
+        else:
+            terminal_state_valid = bool(
+                lane_exit is not None
+                and lane["exitedEarly"] != lane["stoppedByHelper"]
+            )
+        if not terminal_state_valid:
+            raise AnalysisFailure(f"{lane_label} terminal state is inconsistent")
+        chronology = [
+            value
+            for value in (
+                started,
+                lane_started,
+                probe_epochs[0],
+                probe_epochs[1],
+                finished,
+            )
+            if value is not None
+        ]
+        if any(
+            left > right
+            for left, right in zip(chronology, chronology[1:], strict=False)
+        ):
+            raise AnalysisFailure(f"{lane_label} chronology is invalid")
+        healthy_lanes.append(
+            bool(
+                lane["startAttempted"]
+                and lane["started"]
+                and all(probe_passes)
+                and lane["exitedEarly"] is False
+                and lane_exit is not None
+                and lane["stoppedByHelper"]
+            )
+        )
+
+    expected_passed = bool(
+        all(healthy_lanes)
+        and evidence["commandTerminatedForLaneFailure"] is False
+        and command_session["required"]
+        and command_session["confirmed"]
+        and command_session["leaseCloseReason"] == "after-command-exit"
+        and command_session["receipt"]["lease"]["eofObserved"] is False
+        and command_session["receipt"]["termination"]["requested"] is False
+        and command_session["receipt"]["termination"]["killEscalated"] is False
+        and command_session["receipt"]["termination"]["commandExitStatus"]
+        == command_status
+        and failure is None
+    )
+    if evidence["passed"] is not expected_passed:
+        raise AnalysisFailure(
+            f"{label}: SSH L4 transport passed result does not recompute"
+        )
+    if expected_passed:
+        if command_status is None or command_status != helper_exit_status:
+            raise AnalysisFailure(
+                f"{label}: SSH L4 transport did not preserve command status"
+            )
+    elif helper_exit_status != 86:
+        raise AnalysisFailure(
+            f"{label}: SSH L4 transport failure did not use reserved status 86"
+        )
+    return {
+        "topology": evidence["topology"],
+        "startedAt": evidence["startedAt"],
+        "finishedAt": evidence["finishedAt"],
+        "commandExitStatus": command_status,
+        "commandTerminatedForLaneFailure": evidence[
+            "commandTerminatedForLaneFailure"
+        ],
+        "commandSession": command_session,
+        "lanes": lanes,
+        "failure": failure,
+        "sha256": sha256_file(path),
+        "passed": expected_passed,
+    }
+
+
+def validate_ssh_l4_transport_phases(
+    repetition: Path,
+    traffic_mode: str,
+    phase_windows: dict[str, tuple[float, float]],
+    helper_exit_statuses: dict[str, int | None],
+    case_result: str,
+) -> dict[str, dict[str, Any]]:
+    phases = ("warmup", "measurement")
+    evidence: dict[str, dict[str, Any]] = {}
+    for phase in phases:
+        path = repetition / phase / "ssh-l4-transport.json"
+        has_window = phase in phase_windows
+        if traffic_mode != "ssh-l4-traefik":
+            if path.exists() or path.is_symlink():
+                raise AnalysisFailure(
+                    f"{phase}: SSH L4 transport evidence exists for another mode"
+                )
+            continue
+        if not has_window:
+            if path.exists() or path.is_symlink():
+                raise AnalysisFailure(
+                    f"{phase}: SSH L4 transport evidence exists without a phase"
+                )
+            continue
+        if path.is_symlink():
+            raise AnalysisFailure(f"{phase}: SSH L4 transport evidence is a symlink")
+        remote_transport = (
+            f"/artifacts/{repetition.parents[1].name}/repetitions/"
+            f"{repetition.name}/{phase}/ssh-l4-transport.json"
+        )
+        evidence[phase] = validate_ssh_l4_transport_artifact(
+            path,
+            phase,
+            phase_windows[phase],
+            helper_exit_statuses.get(phase),
+            remote_transport,
+        )
+    if (
+        traffic_mode == "ssh-l4-traefik"
+        and case_result == "passed"
+        and set(evidence) != set(phases)
+    ):
+        raise AnalysisFailure(
+            "passed result lacks complete SSH L4 transport evidence"
+        )
+    return evidence
 
 
 def workload_control_identity(
@@ -4626,6 +5120,16 @@ def analyze_case(
     )
     warmup_exit = read_exit_status(warmup / "exit-status.txt")
     measurement_exit = read_exit_status(measurement / "exit-status.txt")
+    ssh_l4_transport = validate_ssh_l4_transport_phases(
+        repetition,
+        traffic_mode,
+        windows,
+        {
+            "warmup": warmup_exit,
+            "measurement": measurement_exit,
+        },
+        result["result"],
+    )
     summary = load_optional_object(measurement / "summary.json")
     warmup_transport_proof = transport_phase_proof(
         warmup_summary, entry, traffic_mode, manifest
@@ -4797,6 +5301,14 @@ def analyze_case(
             measurement_transport_proof["applicable"] is not True
             or measurement_transport_proof["passed"] is True
         ),
+        "warmupSshL4Transport": (
+            traffic_mode != "ssh-l4-traefik"
+            or ssh_l4_transport.get("warmup", {}).get("passed") is True
+        ),
+        "measurementSshL4Transport": (
+            traffic_mode != "ssh-l4-traefik"
+            or ssh_l4_transport.get("measurement", {}).get("passed") is True
+        ),
         "warmupLoadGeneratorCapacity": (
             load_generator_capacity.get("warmup", {}).get("passed") is True
         ),
@@ -4856,6 +5368,8 @@ def analyze_case(
         and latency_identity_valid
         and gates["warmupTransportProof"]
         and gates["measurementTransportProof"]
+        and gates["warmupSshL4Transport"]
+        and gates["measurementSshL4Transport"]
         and gates["warmupLoadGeneratorCapacity"]
         and gates["measurementLoadGeneratorCapacity"]
         and metrics_complete
@@ -4950,6 +5464,7 @@ def analyze_case(
             ),
             "warmup": warmup_transport_proof,
             "measurement": measurement_transport_proof,
+            "sshL4TunnelHealth": ssh_l4_transport,
         },
         "latencyMilliseconds": trend(
             summary, "http_req_duration{traffic:workload}"

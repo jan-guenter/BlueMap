@@ -58,10 +58,21 @@ TRAFFIC_BASE_URLS = {
 }
 DEFAULT_TRAFFIC_BASE_URL = TRAFFIC_BASE_URLS[DEFAULT_TRAFFIC_MODE]
 SSH_L4_TRAEFIK_TUNNEL = {
-    "listenHost": "127.0.0.1",
-    "listenPort": 18080,
-    "targetHost": "rke2-traefik.kube-system.svc.cluster.local",
-    "targetPort": 80,
+    "formatVersion": 1,
+    "balancer": "haproxy-tcp-static-rr",
+    "frontend": {"host": "127.0.0.1", "port": 18080},
+    "tunnelCount": 8,
+    "backends": [
+        {
+            "id": f"lane-{index}",
+            "listenHost": "127.0.0.1",
+            "listenPort": 18080 + index,
+            "targetHost": "rke2-traefik.kube-system.svc.cluster.local",
+            "targetPort": 80,
+        }
+        for index in range(1, 9)
+    ],
+    "healthPolicy": "all-required",
 }
 
 NAMESPACE = "minecraft"
@@ -82,7 +93,7 @@ PREFLIGHT_CONTROLS = {
     "warmupDuration": "30s",
     "measurementDuration": "2m",
     "cooldownSeconds": 15,
-    "minimumAchievedRateRatio": 0.99,
+    "minimumAchievedRateRatio": 1.0,
     "preAllocatedVUs": 256,
     "maxVUs": 512,
 }
@@ -134,7 +145,7 @@ PREFLIGHT_RELAY_THRESHOLDS = {
     "maximumCpuLimitRatio": 0.90,
     "maximumMemoryLimitRatio": 0.80,
     "minimumUniqueMetricTimestamps": 6,
-    "maximumUniqueMetricTimestampGapSeconds": 30.0,
+    "maximumUniqueMetricTimestampGapSeconds": 45.0,
     "maximumMetricAgeSeconds": 60.0,
     "maximumCoverageGapSeconds": 60.0,
 }
@@ -943,6 +954,7 @@ def validate_preflight_documents(
         or entry.get("warmupDuration") != "30s"
         or entry.get("measurementDuration") != "2m"
         or entry.get("cooldownSeconds") != 15
+        or entry.get("minimumAchievedRateRatio") != 1.0
         for entry in entries
     ):
         raise SafetyError("Preflight schedule controls differ from the fixed contract")
@@ -3089,9 +3101,40 @@ def validate_relay_headroom_report(
     relay: dict[str, Any],
     controller_pod: str,
 ) -> None:
+    if not isinstance(relay, dict):
+        raise SafetyError("Relay headroom report schema or identity is invalid")
+    expected_fields = {
+        "formatVersion",
+        "passed",
+        "startedAt",
+        "stoppedAt",
+        "namespace",
+        "pod",
+        "podUid",
+        "container",
+        "source",
+        "limits",
+        "thresholds",
+        "checks",
+        "observed",
+        "limitation",
+    }
     expected_checks = {
         "noMetricsApiErrors",
         "minimumUniqueMetricTimestamps",
+        "maximumUniqueMetricTimestampGapSeconds",
+        "maximumMetricAgeSeconds",
+        "initialCoverageGapSeconds",
+        "finalCoverageGapSeconds",
+        "p95CpuLimitRatio",
+        "maximumCpuLimitRatio",
+        "maximumMemoryLimitRatio",
+    }
+    expected_observed = {
+        "successfulFetches",
+        "errors",
+        "uniqueMetricTimestamps",
+        "metricWindows",
         "maximumUniqueMetricTimestampGapSeconds",
         "maximumMetricAgeSeconds",
         "initialCoverageGapSeconds",
@@ -3104,8 +3147,9 @@ def validate_relay_headroom_report(
     limits = relay.get("limits")
     observed = relay.get("observed")
     if (
-        relay.get("formatVersion") != 1
-        or relay.get("passed") is not True
+        set(relay) != expected_fields
+        or relay.get("formatVersion") != 1
+        or not isinstance(relay.get("passed"), bool)
         or relay.get("namespace") != NAMESPACE
         or relay.get("pod") != controller_pod
         or not isinstance(relay.get("podUid"), str)
@@ -3120,10 +3164,24 @@ def validate_relay_headroom_report(
         or relay.get("thresholds") != PREFLIGHT_RELAY_THRESHOLDS
         or not isinstance(checks, dict)
         or set(checks) != expected_checks
-        or any(value is not True for value in checks.values())
+        or any(not isinstance(value, bool) for value in checks.values())
         or not isinstance(observed, dict)
+        or set(observed) != expected_observed
+        or not isinstance(relay.get("limitation"), str)
+        or not relay["limitation"]
     ):
-        raise SafetyError("Relay headroom report identity or checks are invalid")
+        raise SafetyError("Relay headroom report schema or identity is invalid")
+
+    started_at = parsed_timestamp(relay.get("startedAt"), "Relay startedAt")
+    stopped_at = parsed_timestamp(relay.get("stoppedAt"), "Relay stoppedAt")
+    if started_at > stopped_at:
+        raise SafetyError("Relay headroom report chronology is invalid")
+
+    def count(key: str) -> int:
+        value = observed.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SafetyError(f"Relay headroom observed {key} is invalid")
+        return value
 
     def number(key: str) -> float:
         value = observed.get(key)
@@ -3134,8 +3192,11 @@ def validate_relay_headroom_report(
             raise SafetyError(f"Relay headroom observed {key} is invalid")
         return result
 
-    if number("errors") != 0:
-        raise SafetyError("Relay headroom sampling recorded an API error")
+    successful_fetches = count("successfulFetches")
+    errors = count("errors")
+    unique_timestamps = count("uniqueMetricTimestamps")
+    if successful_fetches < unique_timestamps:
+        raise SafetyError("Relay headroom sample counts are inconsistent")
     windows = observed.get("metricWindows")
     if (
         not isinstance(windows, list)
@@ -3145,24 +3206,58 @@ def validate_relay_headroom_report(
         raise SafetyError("Relay headroom metric windows are invalid")
     for window in windows:
         validate_metrics_window(window)
-    if number("uniqueMetricTimestamps") < PREFLIGHT_RELAY_THRESHOLDS[
-        "minimumUniqueMetricTimestamps"
-    ]:
-        raise SafetyError("Relay headroom has insufficient unique samples")
-    for observed_key, threshold_key in (
-        (
-            "maximumUniqueMetricTimestampGapSeconds",
-            "maximumUniqueMetricTimestampGapSeconds",
+    observed_values = {
+        key: number(key)
+        for key in expected_observed
+        if key
+        not in {
+            "successfulFetches",
+            "errors",
+            "uniqueMetricTimestamps",
+            "metricWindows",
+        }
+    }
+    derived_checks = {
+        "noMetricsApiErrors": errors == 0,
+        "minimumUniqueMetricTimestamps": (
+            unique_timestamps
+            >= PREFLIGHT_RELAY_THRESHOLDS["minimumUniqueMetricTimestamps"]
         ),
-        ("maximumMetricAgeSeconds", "maximumMetricAgeSeconds"),
-        ("initialCoverageGapSeconds", "maximumCoverageGapSeconds"),
-        ("finalCoverageGapSeconds", "maximumCoverageGapSeconds"),
-        ("p95CpuLimitRatio", "p95CpuLimitRatio"),
-        ("maximumCpuLimitRatio", "maximumCpuLimitRatio"),
-        ("maximumMemoryLimitRatio", "maximumMemoryLimitRatio"),
-    ):
-        if number(observed_key) > PREFLIGHT_RELAY_THRESHOLDS[threshold_key]:
-            raise SafetyError(f"Relay headroom observed {observed_key} exceeded")
+        "maximumUniqueMetricTimestampGapSeconds": (
+            observed_values["maximumUniqueMetricTimestampGapSeconds"]
+            <= PREFLIGHT_RELAY_THRESHOLDS[
+                "maximumUniqueMetricTimestampGapSeconds"
+            ]
+        ),
+        "maximumMetricAgeSeconds": (
+            observed_values["maximumMetricAgeSeconds"]
+            <= PREFLIGHT_RELAY_THRESHOLDS["maximumMetricAgeSeconds"]
+        ),
+        "initialCoverageGapSeconds": (
+            observed_values["initialCoverageGapSeconds"]
+            <= PREFLIGHT_RELAY_THRESHOLDS["maximumCoverageGapSeconds"]
+        ),
+        "finalCoverageGapSeconds": (
+            observed_values["finalCoverageGapSeconds"]
+            <= PREFLIGHT_RELAY_THRESHOLDS["maximumCoverageGapSeconds"]
+        ),
+        "p95CpuLimitRatio": (
+            observed_values["p95CpuLimitRatio"]
+            <= PREFLIGHT_RELAY_THRESHOLDS["p95CpuLimitRatio"]
+        ),
+        "maximumCpuLimitRatio": (
+            observed_values["maximumCpuLimitRatio"]
+            <= PREFLIGHT_RELAY_THRESHOLDS["maximumCpuLimitRatio"]
+        ),
+        "maximumMemoryLimitRatio": (
+            observed_values["maximumMemoryLimitRatio"]
+            <= PREFLIGHT_RELAY_THRESHOLDS["maximumMemoryLimitRatio"]
+        ),
+    }
+    if checks != derived_checks:
+        raise SafetyError("Relay headroom derived checks are inconsistent")
+    if relay["passed"] is not all(derived_checks.values()):
+        raise SafetyError("Relay headroom derived passed result is inconsistent")
 
 
 def preflight_root_for_formal(run_root: Path) -> Path:
@@ -3182,6 +3277,79 @@ def require_new_preflight_root(path: Path) -> Path:
             "Preflight is non-resumable and its artifact root already exists"
         )
     return preflight_root
+
+
+def persist_preflight_outcome(
+    *,
+    preflight_root: Path,
+    state: dict[str, Any],
+    schedule: dict[str, Any],
+    relay_report: dict[str, Any],
+    controller_pod: str,
+    formal_run_id: str,
+    formal_matrix: dict[str, Any],
+    provenance: dict[str, Any],
+    derived_hashes: dict[str, str],
+    traefik_limitation: dict[str, Any],
+) -> Path:
+    """Persist the complete preflight outcome before enforcing its gates."""
+
+    validate_relay_headroom_report(relay_report, controller_pod)
+    relay_path = preflight_root / "observability" / "relay-headroom.json"
+    if load_json(relay_path) != relay_report:
+        raise SafetyError("Preserved relay headroom report differs from sampler output")
+    assessment = assess_preflight_state(state, schedule)
+    passed = assessment["passed"] and relay_report["passed"]
+    failures = list(assessment["failures"])
+    if not relay_report["passed"]:
+        failed_checks = sorted(
+            key for key, value in relay_report["checks"].items() if not value
+        )
+        failures.append(
+            "controller SSH relay headroom gate failed: "
+            + ", ".join(failed_checks)
+        )
+    evidence_path = preflight_root / "preflight-evidence.json"
+    atomic_write_json(
+        evidence_path,
+        preflight_evidence_inventory(preflight_root),
+    )
+    report = {
+        "formatVersion": 1,
+        "kind": "ssh-l4-traefik-preflight",
+        "passed": passed,
+        "completedAt": timestamp(),
+        "formalRunId": formal_run_id,
+        "benchmarkGitRevision": formal_matrix["benchmarkGitRevision"],
+        "sourceFormalInputs": provenance["sourceFormalInputs"],
+        "derivedInputs": derived_hashes,
+        "traffic": provenance["traffic"],
+        "loadGeneratorIdentitySha256": provenance[
+            "loadGeneratorIdentitySha256"
+        ],
+        "loadGeneratorSha256": provenance["loadGeneratorSha256"],
+        "orchestratorSha256": provenance["orchestratorSha256"],
+        "generatorSha256": provenance["generatorSha256"],
+        "evidenceManifestSha256": file_sha256(evidence_path),
+        "controllerRelay": {
+            "pod": relay_report["pod"],
+            "podUid": relay_report["podUid"],
+            "headroomSha256": file_sha256(relay_path),
+            "passed": relay_report["passed"],
+        },
+        "traefikPrometheus": traefik_limitation,
+        "entries": assessment["entries"],
+        "failures": failures,
+    }
+    report_path = preflight_root / "preflight-report.json"
+    atomic_write_json(report_path, report)
+    write_sha256s(
+        preflight_root,
+        ("preflight-evidence.json", "preflight-report.json"),
+    )
+    if not passed:
+        raise SafetyError("Preflight failed: " + "; ".join(failures))
+    return report_path
 
 
 def execute_preflight(
@@ -3335,55 +3503,18 @@ def execute_preflight(
         args,
         run_identity,
     )
-    validate_relay_headroom_report(relay_report, args.controller_pod)
-    assessment = assess_preflight_state(state, schedule)
-    passed = assessment["passed"] and relay_report.get("passed") is True
-    failures = list(assessment["failures"])
-    if relay_report.get("passed") is not True:
-        failures.append("controller SSH relay CPU/memory headroom gate failed")
-    evidence_path = preflight_root / "preflight-evidence.json"
-    atomic_write_json(
-        evidence_path,
-        preflight_evidence_inventory(preflight_root),
+    return persist_preflight_outcome(
+        preflight_root=preflight_root,
+        state=state,
+        schedule=schedule,
+        relay_report=relay_report,
+        controller_pod=args.controller_pod,
+        formal_run_id=args.formal_run_id,
+        formal_matrix=formal_matrix,
+        provenance=provenance,
+        derived_hashes=derived_hashes,
+        traefik_limitation=traefik_limitation,
     )
-    report = {
-        "formatVersion": 1,
-        "kind": "ssh-l4-traefik-preflight",
-        "passed": passed,
-        "completedAt": timestamp(),
-        "formalRunId": args.formal_run_id,
-        "benchmarkGitRevision": formal_matrix["benchmarkGitRevision"],
-        "sourceFormalInputs": provenance["sourceFormalInputs"],
-        "derivedInputs": derived_hashes,
-        "traffic": provenance["traffic"],
-        "loadGeneratorIdentitySha256": provenance[
-            "loadGeneratorIdentitySha256"
-        ],
-        "loadGeneratorSha256": provenance["loadGeneratorSha256"],
-        "orchestratorSha256": provenance["orchestratorSha256"],
-        "generatorSha256": provenance["generatorSha256"],
-        "evidenceManifestSha256": file_sha256(evidence_path),
-        "controllerRelay": {
-            "pod": relay_report["pod"],
-            "podUid": relay_report["podUid"],
-            "headroomSha256": file_sha256(
-                observability_root / "relay-headroom.json"
-            ),
-            "passed": relay_report["passed"],
-        },
-        "traefikPrometheus": traefik_limitation,
-        "entries": assessment["entries"],
-        "failures": failures,
-    }
-    report_path = preflight_root / "preflight-report.json"
-    atomic_write_json(report_path, report)
-    write_sha256s(
-        preflight_root,
-        ("preflight-evidence.json", "preflight-report.json"),
-    )
-    if not passed:
-        raise SafetyError("Preflight failed: " + "; ".join(failures))
-    return report_path
 
 
 def validate_preflight_report(

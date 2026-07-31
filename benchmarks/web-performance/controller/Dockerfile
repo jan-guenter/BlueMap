@@ -35,7 +35,8 @@ RUN set -eux; \
         git \
         jq \
         openssh-client \
-        tini; \
+        tini \
+        util-linux; \
     curl --fail --location --silent --show-error \
         "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
         --output /usr/local/bin/kubectl; \
@@ -81,6 +82,7 @@ COPY --chown=12345:12345 \
 
 RUN set -eux; \
     chmod 0555 /usr/local/bin/bluemap-formal-controller; \
+    command -v setpriv >/dev/null; \
     chmod 0444 /etc/bluemap-controller/kubeconfig; \
     chmod 0444 /usr/local/lib/bluemap-controller/validate_frozen_bundle.py; \
     bash -n /usr/local/bin/bluemap-formal-controller; \

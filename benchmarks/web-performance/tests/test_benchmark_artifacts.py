@@ -1288,10 +1288,23 @@ class OriginRunnerStaticTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, helper)
         self.assertIn("BLUEMAP_PHASE_TIMEOUT_SECONDS", phase)
+        self.assertIn("BLUEMAP_PHASE_SESSION_ID", phase)
+        self.assertIn("BLUEMAP_PHASE_SESSION_OUTPUT", phase)
+        self.assertIn("/tmp/bluemap-runpod-active-phase.lock", phase)
+        self.assertIn("setsid bash -ceu", phase)
+        self.assertIn("exec timeout", phase)
+        self.assertIn("processGroupEmpty", phase)
+        self.assertIn("lease_eof_observed", phase)
         self.assertIn("bluemap-runpod-sample-resources", phase)
         self.assertIn("--kill-after=30s", phase)
         self.assertIn(".runtime.cpu.effectiveVcpuCount == $vcpuCount", helper)
         self.assertIn(".runpod.cpuFlavorId == \"cpu5c\"", helper)
+        self.assertIn("command-session-unconfirmed", helper)
+        self.assertIn("command_session_confirmed", helper)
+        self.assertIn('exec {command_lease_fd}<>"$command_lease_fifo"', helper)
+        self.assertIn("setpriv --pdeathsig KILL", helper)
+        self.assertIn("bluemap-phase-lease-v1", helper)
+        self.assertNotIn("sleep 2147483647", helper)
         dockerfile = (
             BENCHMARK_ROOT / "runpod" / "Dockerfile"
         ).read_text(encoding="utf-8")
@@ -1557,7 +1570,7 @@ class OriginRunnerStaticTests(unittest.TestCase):
             self.assertNotEqual(newline.returncode, 0)
             self.assertIn("identity is malformed", newline.stderr)
 
-    def test_runpod_sshd_permits_only_the_fixed_remote_listener(self) -> None:
+    def test_runpod_sshd_permits_only_the_fixed_remote_lanes(self) -> None:
         dockerfile = (
             BENCHMARK_ROOT / "runpod" / "Dockerfile"
         ).read_text(encoding="utf-8")
@@ -1579,7 +1592,16 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertEqual(directives.get("GatewayPorts"), ["no"])
         self.assertEqual(
             directives.get("PermitListen"),
-            ["127.0.0.1:18080"],
+            [
+                " ".join(
+                    f"127.0.0.1:{port}"
+                    for port in range(18081, 18089)
+                )
+            ],
+        )
+        self.assertNotIn(
+            "127.0.0.1:18080",
+            directives.get("PermitListen", []),
         )
         self.assertEqual(directives.get("AllowAgentForwarding"), ["no"])
         self.assertEqual(directives.get("X11Forwarding"), ["no"])

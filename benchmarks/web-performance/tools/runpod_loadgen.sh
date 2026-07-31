@@ -6,12 +6,17 @@ die() {
     exit 1
 }
 
+timestamp_utc() {
+    date -u +'%Y-%m-%dT%H:%M:%S.%3NZ'
+}
+
 usage() {
     cat <<'EOF'
 Usage:
   runpod_loadgen.sh --identity FILE --identity-key FILE validate
   runpod_loadgen.sh --identity FILE --identity-key FILE exec COMMAND [ARG...]
-  runpod_loadgen.sh --identity FILE --identity-key FILE exec-traefik-forward COMMAND [ARG...]
+  runpod_loadgen.sh --identity FILE --identity-key FILE exec-traefik-forward \
+    --transport-output /artifacts/PATH.json -- COMMAND [ARG...]
   runpod_loadgen.sh --identity FILE --identity-key FILE copy-to LOCAL REMOTE
   runpod_loadgen.sh --identity FILE --identity-key FILE copy-from REMOTE LOCAL
 
@@ -22,6 +27,19 @@ EOF
 
 IDENTITY_FILE=""
 IDENTITY_KEY=""
+TRANSPORT_FAILURE_EXIT=86
+TRANSPORT_EVIDENCE_FAILURE_EXIT=87
+FORWARD_TARGET_HOST="rke2-traefik.kube-system.svc.cluster.local"
+FORWARD_TARGET_PORT=80
+FORWARD_LISTEN_HOST="127.0.0.1"
+FORWARD_PORTS=(18081 18082 18083 18084 18085 18086 18087 18088)
+transport_temp=""
+lane_state_temp=""
+command_session_temp=""
+command_lease_dir=""
+command_lease_fd=""
+command_pid=""
+forward_pids=()
 
 while (($# > 0)); do
     case "$1" in
@@ -54,6 +72,7 @@ key_mode="$(stat -c '%a' "$IDENTITY_KEY")"
 key_owner="$(stat -c '%u' "$IDENTITY_KEY")"
 [[ "$key_owner" == "$(id -u)" ]] ||
     die "--identity-key must be owned by the current user"
+command -v setpriv >/dev/null || die "setpriv is required for child supervision"
 
 jq -e '
     . as $root
@@ -109,10 +128,72 @@ expected_cpu_flavor="$(jq -r '.runpod.cpuFlavorId' "$IDENTITY_FILE")"
 expected_vcpu_count="$(jq -r '.runpod.vcpuCount' "$IDENTITY_FILE")"
 
 known_hosts="$(mktemp)"
+helper_pid="$$"
+parent_bound_exec() {
+    # The supervision wrapper is expanded only by its child Bash.
+    # shellcheck disable=SC2016
+    setpriv --pdeathsig KILL bash -ceu '
+        expected_parent="$1"
+        shift
+        [[ "$PPID" == "$expected_parent" ]] || exit 125
+        exec "$@"
+    ' bash "$helper_pid" "$@"
+}
+
+terminate_child() {
+    local pid="${1:-}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null || true
+        for _ in {1..20}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.05
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+}
+
+monitor_pause() {
+    if [[ "$command_lease_fd" =~ ^[0-9]+$ ]]; then
+        sleep 0.1 {command_lease_fd}>&-
+    else
+        sleep 0.1
+    fi
+}
+
 cleanup() {
+    local pid
+    # Closing the dedicated stdin lease is the cancellation request. Give the
+    # remote phase wrapper time to terminate and reap its complete process
+    # group before falling back to stopping only the local SSH client.
+    if [[ "$command_lease_fd" =~ ^[0-9]+$ ]]; then
+        exec {command_lease_fd}>&-
+        command_lease_fd=""
+    fi
+    if [[ "$command_pid" =~ ^[0-9]+$ ]] && kill -0 "$command_pid" 2>/dev/null; then
+        for _ in {1..350}; do
+            kill -0 "$command_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+    fi
+    terminate_child "$command_pid"
+    for pid in "${forward_pids[@]}"; do
+        terminate_child "$pid"
+    done
     rm -f -- "$known_hosts"
+    [[ -z "$transport_temp" ]] || rm -f -- "$transport_temp"
+    [[ -z "$lane_state_temp" ]] || rm -f -- "$lane_state_temp"
+    [[ -z "$command_session_temp" ]] || rm -f -- "$command_session_temp"
+    if [[ -n "$command_lease_dir" ]]; then
+        rm -f -- "$command_lease_dir/stdin"
+        rmdir -- "$command_lease_dir" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 printf '[%s]:%s %s\n' "$host" "$port" "$host_key" > "$known_hosts"
 chmod 0600 "$known_hosts"
 
@@ -121,6 +202,8 @@ ssh_options=(
     -i "$IDENTITY_KEY"
     -o BatchMode=yes
     -o ConnectTimeout=15
+    -o ControlMaster=no
+    -o ControlPath=none
     -o IdentitiesOnly=yes
     -o PasswordAuthentication=no
     -o ServerAliveCountMax=3
@@ -152,32 +235,632 @@ remote_exec() {
     done
     # The command is intentionally quoted by printf %q for the remote shell.
     # shellcheck disable=SC2029
-    ssh "${ssh_options[@]}" "$user@$host" "${quoted# }"
+    parent_bound_exec ssh \
+        "${ssh_options[@]}" "$user@$host" "${quoted# }"
 }
 
 remote_exec_traefik_forward() {
-    (($# > 0)) || die "Remote command is empty"
+    (($# > 1)) || die "Transport output and remote command are required"
+    local transport_output="$1"
+    shift
+    validate_remote_path "$transport_output"
+
+    local command_session_id
+    command_session_id="$(head -c 64 /dev/urandom | sha256sum | cut -d ' ' -f 1)"
+    [[ "$command_session_id" =~ ^[a-f0-9]{64}$ ]] ||
+        die "Could not generate a unique command-session identity"
+    local command_session_output="${transport_output}.command-session.${command_session_id}.json"
+    validate_remote_path "$command_session_output"
+
+    # Outputs are immutable per invocation. Refuse an existing path before
+    # opening any tunnel so a prior receipt can never be replayed as proof for
+    # this command session.
+    # shellcheck disable=SC2016
+    remote_exec bash -ceu '
+        [[ ! -e /tmp/bluemap-runpod-active-phase.lock &&
+            ! -L /tmp/bluemap-runpod-active-phase.lock ]]
+        for path do
+            [[ ! -e "$path" && ! -L "$path" ]]
+        done
+    ' bash "$transport_output" "$command_session_output" ||
+        die "Transport or command-session output already exists"
+
+    local phase_timeout_seconds=""
+    local phase_timeout_count=0
+    local phase_argument
+    for phase_argument in "$@"; do
+        if [[ "$phase_argument" =~ ^BLUEMAP_PHASE_TIMEOUT_SECONDS=([1-9][0-9]*)$ ]]; then
+            phase_timeout_seconds="${BASH_REMATCH[1]}"
+            ((phase_timeout_count += 1))
+        fi
+    done
+    [[ "$phase_timeout_count" == 1 && "$phase_timeout_seconds" -le 86400 ]] ||
+        die "The remote phase command must contain one bounded BLUEMAP_PHASE_TIMEOUT_SECONDS assignment"
+
     local quoted=""
     local argument
-    for argument in "$@"; do
+    local -a session_command=(
+        env
+        "BLUEMAP_PHASE_SESSION_ID=$command_session_id"
+        "BLUEMAP_PHASE_SESSION_OUTPUT=$command_session_output"
+        "$@"
+    )
+    for argument in "${session_command[@]}"; do
         printf -v quoted '%s %q' "$quoted" "$argument"
     done
-    # This purpose-built reverse forward has no user-controlled listen or target.
-    # ExitOnForwardFailure prevents k6 from starting without the intended path.
-    # shellcheck disable=SC2029
-    ssh \
-        "${ssh_options[@]}" \
-        -o ExitOnForwardFailure=yes \
-        -R \
-        127.0.0.1:18080:rke2-traefik.kube-system.svc.cluster.local:80 \
-        "$user@$host" \
-        "${quoted# }"
+
+    local started_at finished_at failure=""
+    local command_exit_status=""
+    local command_terminated_for_lane_failure=false
+    local command_started=false
+    local command_lease_closed=false
+    local command_lease_close_reason=""
+    local command_session_confirmation_attempted=false
+    local command_session_confirmed=false
+    local command_session_receipt_json=null
+    local transport_passed=false
+    local lane_failure_index=""
+    local command_deadline_expired=false
+    local command_deadline_epoch=""
+    local lane_count="${#FORWARD_PORTS[@]}"
+    local i
+    local -a start_attempted=()
+    local -a started=()
+    local -a lane_started_at=()
+    local -a pre_attempted=()
+    local -a pre_passed=()
+    local -a pre_status=()
+    local -a pre_at=()
+    local -a post_attempted=()
+    local -a post_passed=()
+    local -a post_status=()
+    local -a post_at=()
+    local -a exited_early=()
+    local -a exit_status=()
+    local -a stopped_by_helper=()
+
+    forward_pids=()
+    for ((i = 0; i < lane_count; i++)); do
+        forward_pids[i]=""
+        start_attempted[i]=false
+        started[i]=false
+        lane_started_at[i]=""
+        pre_attempted[i]=false
+        pre_passed[i]=false
+        pre_status[i]=""
+        pre_at[i]=""
+        post_attempted[i]=false
+        post_passed[i]=false
+        post_status[i]=""
+        post_at[i]=""
+        exited_early[i]=false
+        exit_status[i]=""
+        stopped_by_helper[i]=false
+    done
+
+    started_at="$(timestamp_utc)"
+
+    observe_lane_exit() {
+        local index="$1"
+        local pid="${forward_pids[$index]}"
+        [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+        if wait "$pid"; then
+            exit_status[index]=0
+        else
+            exit_status[index]=$?
+        fi
+        forward_pids[index]=""
+        exited_early[index]=true
+    }
+
+    stop_lane() {
+        local index="$1"
+        local pid="${forward_pids[$index]}"
+        [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+        if kill -0 "$pid" 2>/dev/null; then
+            stopped_by_helper[index]=true
+            kill -TERM "$pid" 2>/dev/null || true
+            for _ in {1..20}; do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.05
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+        else
+            exited_early[index]=true
+            [[ -n "$failure" ]] ||
+                failure="lane-$((index + 1))-exited-before-helper-stop"
+        fi
+        if wait "$pid"; then
+            exit_status[index]=0
+        else
+            exit_status[index]=$?
+        fi
+        forward_pids[index]=""
+    }
+
+    probe_lane() {
+        local index="$1"
+        local phase="$2"
+        local attempts="$3"
+        local status=""
+        local attempt
+        local probe_output
+        probe_output="$(mktemp)"
+        if [[ "$phase" == "pre" ]]; then
+            pre_attempted[index]=true
+        else
+            post_attempted[index]=true
+        fi
+        for ((attempt = 1; attempt <= attempts; attempt++)); do
+            if ! kill -0 "${forward_pids[$index]}" 2>/dev/null; then
+                observe_lane_exit "$index"
+                break
+            fi
+            : > "$probe_output"
+            if remote_exec \
+                curl --silent --show-error --connect-timeout 3 --max-time 10 \
+                --output /dev/null --write-out '%{http_code}' \
+                --header 'Host: bluemap-test.guenter.cloud' \
+                "http://${FORWARD_LISTEN_HOST}:${FORWARD_PORTS[$index]}/" \
+                >"$probe_output" 2>/dev/null; then
+                status="$(<"$probe_output")"
+            else
+                status=""
+            fi
+            [[ "$status" =~ ^[1-5][0-9][0-9]$ ]] || status=""
+            if [[ "$status" == "200" ]]; then
+                break
+            fi
+            ((attempt == attempts)) || sleep 0.25
+        done
+        if [[ "$phase" == "pre" ]]; then
+            pre_at[index]="$(timestamp_utc)"
+            pre_status[index]="$status"
+            [[ "$status" == "200" ]] && pre_passed[index]=true
+        else
+            post_at[index]="$(timestamp_utc)"
+            post_status[index]="$status"
+            [[ "$status" == "200" ]] && post_passed[index]=true
+        fi
+        rm -f -- "$probe_output"
+        [[ "$status" == "200" ]]
+    }
+
+    close_command_lease() {
+        local reason="$1"
+        if [[ "$command_lease_fd" =~ ^[0-9]+$ ]]; then
+            exec {command_lease_fd}>&-
+            command_lease_fd=""
+        fi
+        command_lease_closed=true
+        command_lease_close_reason="$reason"
+    }
+
+    await_command_exit() {
+        local observed_exit=false
+        local state=""
+        local _pid="${command_pid:-}"
+        [[ "$_pid" =~ ^[0-9]+$ ]] || return 1
+        for _ in {1..350}; do
+            if [[ ! -r "/proc/$_pid/stat" ]]; then
+                observed_exit=true
+                break
+            fi
+            read -r _ _ state _ < "/proc/$_pid/stat" || true
+            if [[ "$state" == Z* ]]; then
+                observed_exit=true
+                break
+            fi
+            monitor_pause
+        done
+        [[ "$observed_exit" == true ]] || return 1
+        if wait "$_pid"; then
+            command_exit_status=0
+        else
+            command_exit_status=$?
+        fi
+        command_pid=""
+        return 0
+    }
+
+    confirm_command_session() {
+        command_session_confirmation_attempted=true
+        command_session_temp="$(mktemp)"
+        # The script is intentionally expanded only by Bash on RunPod.
+        # shellcheck disable=SC2016
+        if ! remote_exec \
+            bash -ceu '
+                path="$1"
+                session_id="$2"
+                for _ in $(seq 1 350); do
+                    if [[ -s "$path" &&
+                        ! -e /tmp/bluemap-runpod-active-phase.lock &&
+                        ! -L /tmp/bluemap-runpod-active-phase.lock ]]; then
+                        break
+                    fi
+                    sleep 0.1
+                done
+                [[ -s "$path" && ! -L "$path" ]]
+                [[ ! -e /tmp/bluemap-runpod-active-phase.lock &&
+                    ! -L /tmp/bluemap-runpod-active-phase.lock ]]
+                pgid="$(jq -er ".termination.processGroupId" "$path")"
+                [[ "$pgid" =~ ^[1-9][0-9]*$ ]]
+                if kill -0 -- "-$pgid" 2>/dev/null; then
+                    exit 1
+                fi
+                jq -e --arg sessionId "$session_id" \
+                    ".sessionId == \$sessionId and .termination.processGroupEmpty == true" \
+                    "$path" >/dev/null
+                cat -- "$path"
+            ' bash "$command_session_output" "$command_session_id" \
+            > "$command_session_temp"; then
+            return 1
+        fi
+        if ! jq -e \
+            --arg sessionId "$command_session_id" \
+            --arg sessionOutput "$command_session_output" \
+            --arg helperStatus "$command_exit_status" \
+            '
+            def exact_keys($expected):
+                (keys | sort) == ($expected | sort);
+            def nullable_int: if . == "" then null else tonumber end;
+            exact_keys([
+                "kind", "formatVersion", "sessionId", "sessionOutput",
+                "activeLock", "startedAt", "completedAt", "lease",
+                "termination", "passed"
+            ])
+            and .kind == "runpod-command-session"
+            and .formatVersion == 1
+            and .sessionId == $sessionId
+            and .sessionOutput == $sessionOutput
+            and .activeLock == "/tmp/bluemap-runpod-active-phase.lock"
+            and ((.startedAt | type) == "string" and (.startedAt | length) > 0)
+            and ((.completedAt | type) == "string" and (.completedAt | length) > 0)
+            and .startedAt <= .completedAt
+            and (.lease | exact_keys([
+                "required", "eofObserved", "protocolViolation", "observedAt"
+            ]))
+            and .lease.required == true
+            and (.lease.eofObserved | type) == "boolean"
+            and .lease.protocolViolation == false
+            and (
+                if .lease.eofObserved
+                then ((.lease.observedAt | type) == "string"
+                    and (.lease.observedAt | length) > 0)
+                else .lease.observedAt == null
+                end
+            )
+            and (.termination | exact_keys([
+                "requested", "termSignal", "killEscalated",
+                "commandExitStatus", "processGroupId", "processGroupEmpty",
+                "watcherReaped", "samplerReaped"
+            ]))
+            and (.termination.requested | type) == "boolean"
+            and .termination.termSignal == (
+                if .termination.requested then "TERM" else null end
+            )
+            and (.termination.killEscalated | type) == "boolean"
+            and (if .termination.killEscalated
+                then .termination.requested else true end)
+            and ((.termination.commandExitStatus | type) == "number"
+                and .termination.commandExitStatus
+                    == (.termination.commandExitStatus | floor)
+                and .termination.commandExitStatus >= 0
+                and .termination.commandExitStatus <= 255)
+            and ((.termination.processGroupId | type) == "number"
+                and .termination.processGroupId
+                    == (.termination.processGroupId | floor)
+                and .termination.processGroupId > 0)
+            and .termination.processGroupEmpty == true
+            and .termination.watcherReaped == true
+            and .termination.samplerReaped == true
+            and .passed == true
+            and (if .lease.eofObserved
+                then .termination.requested == true else true end)
+            and (
+                ($helperStatus | nullable_int) == null
+                or .lease.eofObserved
+                or .termination.commandExitStatus
+                    == ($helperStatus | nullable_int)
+            )
+            ' "$command_session_temp" >/dev/null; then
+            return 1
+        fi
+        command_session_receipt_json="$(jq -c . "$command_session_temp")"
+        command_session_confirmed=true
+        if jq -e '.lease.eofObserved == true' "$command_session_temp" >/dev/null &&
+            [[ -z "$failure" ]]; then
+            failure="command-session-disconnected"
+        elif jq -e '.termination.requested == true' \
+            "$command_session_temp" >/dev/null && [[ -z "$failure" ]]; then
+            failure="command-session-termination-requested"
+        fi
+        rm -f -- "$command_session_temp"
+        command_session_temp=""
+        return 0
+    }
+
+    # Each lane is a separate SSH transport. There is deliberately no SSH
+    # multiplexing, dynamic lane count, caller-selected port, or fallback.
+    for ((i = 0; i < lane_count; i++)); do
+        start_attempted[i]=true
+        # The supervision wrapper is expanded only by its child Bash.
+        # shellcheck disable=SC2016
+        setpriv --pdeathsig KILL bash -ceu '
+            expected_parent="$1"
+            shift
+            [[ "$PPID" == "$expected_parent" ]] || exit 125
+            exec "$@"
+        ' bash "$helper_pid" \
+            ssh \
+                "${ssh_options[@]}" \
+                -o ExitOnForwardFailure=yes \
+                -N -T \
+                -R "${FORWARD_LISTEN_HOST}:${FORWARD_PORTS[$i]}:${FORWARD_TARGET_HOST}:${FORWARD_TARGET_PORT}" \
+                "$user@$host" &
+        forward_pids[i]=$!
+        if kill -0 "${forward_pids[$i]}" 2>/dev/null; then
+            started[i]=true
+            lane_started_at[i]="$(timestamp_utc)"
+        else
+            observe_lane_exit "$i"
+            failure="lane-$((i + 1))-start-failed"
+            break
+        fi
+        if ! probe_lane "$i" pre 20; then
+            failure="lane-$((i + 1))-pre-probe-failed"
+            break
+        fi
+    done
+
+    if [[ -z "$failure" ]]; then
+        # The helper itself owns the only write-capable descriptor for this
+        # FIFO. The command SSH child explicitly closes that inherited
+        # descriptor and opens stdin read-only. Therefore helper death closes
+        # the lease even after SIGKILL and forces EOF on the remote wrapper.
+        command_lease_dir="$(mktemp -d)"
+        local command_lease_fifo="$command_lease_dir/stdin"
+        mkfifo -m 0600 -- "$command_lease_fifo"
+        exec {command_lease_fd}<>"$command_lease_fifo"
+        # shellcheck disable=SC2029
+        # The supervision wrapper is expanded only by its child Bash.
+        # shellcheck disable=SC2016
+        setpriv --pdeathsig KILL bash -ceu '
+            expected_parent="$1"
+            shift
+            [[ "$PPID" == "$expected_parent" ]] || exit 125
+            exec "$@"
+        ' bash "$helper_pid" \
+            ssh "${ssh_options[@]}" "$user@$host" "${quoted# }" \
+            < "$command_lease_fifo" {command_lease_fd}>&- &
+        command_pid=$!
+        command_started=true
+        if ! printf 'bluemap-phase-lease-v1:%s\n' "$command_session_id" \
+            >&"$command_lease_fd"; then
+            die "Could not send the command lease handshake"
+        fi
+        command_deadline_epoch="$((EPOCHSECONDS + phase_timeout_seconds + 60))"
+
+        while kill -0 "$command_pid" 2>/dev/null; do
+            lane_failure_index=""
+            if ((EPOCHSECONDS >= command_deadline_epoch)); then
+                command_deadline_expired=true
+                failure="command-session-helper-deadline"
+                close_command_lease "helper-deadline"
+                break
+            fi
+            for ((i = 0; i < lane_count; i++)); do
+                if ! kill -0 "${forward_pids[$i]}" 2>/dev/null; then
+                    lane_failure_index="$i"
+                    break
+                fi
+            done
+            [[ -z "$lane_failure_index" ]] || break
+            monitor_pause
+        done
+
+        if [[ "$command_deadline_expired" == true ]]; then
+            if ! await_command_exit; then
+                failure="command-session-helper-deadline-termination-unconfirmed"
+            fi
+        elif [[ -n "$lane_failure_index" ]]; then
+            observe_lane_exit "$lane_failure_index"
+            failure="lane-$((lane_failure_index + 1))-exited-during-command"
+            command_terminated_for_lane_failure=true
+            close_command_lease "lane-failure"
+            if ! await_command_exit; then
+                failure="lane-$((lane_failure_index + 1))-remote-termination-unconfirmed"
+                terminate_child "$command_pid"
+                command_pid=""
+            fi
+        else
+            if ! await_command_exit; then
+                failure="command-session-local-exit-unconfirmed"
+                close_command_lease "local-exit-timeout"
+            else
+                close_command_lease "after-command-exit"
+            fi
+        fi
+
+        # Confirmation is an independent SSH query and is attempted even when
+        # the command channel itself cannot be reaped. Only the signed-by-path,
+        # nonce-bound receipt plus an empty process group can establish safety.
+        if ! confirm_command_session; then
+            [[ -n "$failure" ]] || failure="command-session-unconfirmed"
+        fi
+        terminate_child "$command_pid"
+        command_pid=""
+        rm -f -- "$command_lease_fifo"
+        rmdir -- "$command_lease_dir"
+        command_lease_dir=""
+
+        if [[ -z "$failure" ]]; then
+            for ((i = 0; i < lane_count; i++)); do
+                if ! kill -0 "${forward_pids[$i]}" 2>/dev/null; then
+                    observe_lane_exit "$i"
+                    failure="lane-$((i + 1))-exited-before-post-probe"
+                fi
+            done
+            if [[ -z "$failure" ]]; then
+                for ((i = 0; i < lane_count; i++)); do
+                    if ! probe_lane "$i" post 1; then
+                        failure="lane-$((i + 1))-post-probe-failed"
+                    fi
+                done
+            fi
+        fi
+    fi
+
+    for ((i = 0; i < lane_count; i++)); do
+        stop_lane "$i"
+    done
+    [[ -n "$failure" ]] || transport_passed=true
+    finished_at="$(timestamp_utc)"
+
+    lane_state_temp="$(mktemp)"
+    for ((i = 0; i < lane_count; i++)); do
+        jq -cn \
+            --arg id "lane-$((i + 1))" \
+            --argjson listenPort "${FORWARD_PORTS[i]}" \
+            --argjson startAttempted "${start_attempted[i]}" \
+            --argjson started "${started[i]}" \
+            --arg startedAt "${lane_started_at[i]}" \
+            --argjson preAttempted "${pre_attempted[i]}" \
+            --argjson prePassed "${pre_passed[i]}" \
+            --arg preStatus "${pre_status[i]}" \
+            --arg preAt "${pre_at[i]}" \
+            --argjson postAttempted "${post_attempted[i]}" \
+            --argjson postPassed "${post_passed[i]}" \
+            --arg postStatus "${post_status[i]}" \
+            --arg postAt "${post_at[i]}" \
+            --argjson exitedEarly "${exited_early[i]}" \
+            --arg exitStatus "${exit_status[i]}" \
+            --argjson stoppedByHelper "${stopped_by_helper[i]}" \
+            '
+            def nullable: if . == "" then null else . end;
+            def nullable_int: if . == "" then null else tonumber end;
+            {
+                id: $id,
+                listenPort: $listenPort,
+                startAttempted: $startAttempted,
+                started: $started,
+                startedAt: ($startedAt | nullable),
+                preProbe: {
+                    attempted: $preAttempted,
+                    passed: $prePassed,
+                    httpStatus: ($preStatus | nullable_int),
+                    at: ($preAt | nullable)
+                },
+                postProbe: {
+                    attempted: $postAttempted,
+                    passed: $postPassed,
+                    httpStatus: ($postStatus | nullable_int),
+                    at: ($postAt | nullable)
+                },
+                exitedEarly: $exitedEarly,
+                exitStatus: ($exitStatus | nullable_int),
+                stoppedByHelper: $stoppedByHelper
+            }
+            ' >>"$lane_state_temp"
+    done
+
+    transport_temp="$(mktemp)"
+    jq -s \
+        --arg startedAt "$started_at" \
+        --arg finishedAt "$finished_at" \
+        --arg commandExitStatus "$command_exit_status" \
+        --argjson commandTerminated "$command_terminated_for_lane_failure" \
+        --argjson commandStarted "$command_started" \
+        --arg commandSessionId "$command_session_id" \
+        --arg commandSessionOutput "$command_session_output" \
+        --argjson commandLeaseClosed "$command_lease_closed" \
+        --arg commandLeaseCloseReason "$command_lease_close_reason" \
+        --argjson commandSessionConfirmationAttempted \
+            "$command_session_confirmation_attempted" \
+        --argjson commandSessionConfirmed "$command_session_confirmed" \
+        --argjson commandSessionReceipt "$command_session_receipt_json" \
+        --arg failure "$failure" \
+        --argjson passed "$transport_passed" \
+        --argjson tunnelCount "$lane_count" \
+        '
+        def nullable: if . == "" then null else . end;
+        def nullable_int: if . == "" then null else tonumber end;
+        . as $lanes
+        | if ($lanes | length) != $tunnelCount
+        then error("lane-state count differs from the fixed tunnel count")
+        else
+            {
+                kind: "ssh-l4-traefik-transport",
+                formatVersion: 1,
+                mode: "ssh-l4-traefik",
+                startedAt: $startedAt,
+                finishedAt: $finishedAt,
+                topology: {
+                    formatVersion: 1,
+                    balancer: "haproxy-tcp-static-rr",
+                    frontend: {host: "127.0.0.1", port: 18080},
+                    tunnelCount: $tunnelCount,
+                    backends: ($lanes | map({
+                        id,
+                        listenHost: "127.0.0.1",
+                        listenPort,
+                        targetHost: "rke2-traefik.kube-system.svc.cluster.local",
+                        targetPort: 80
+                    })),
+                    healthPolicy: "all-required"
+                },
+                allRequired: true,
+                commandExitStatus: ($commandExitStatus | nullable_int),
+                commandTerminatedForLaneFailure: $commandTerminated,
+                commandSession: {
+                    required: $commandStarted,
+                    id: $commandSessionId,
+                    outputPath: $commandSessionOutput,
+                    leaseClosedByHelper: $commandLeaseClosed,
+                    leaseCloseReason: ($commandLeaseCloseReason | nullable),
+                    confirmationAttempted: $commandSessionConfirmationAttempted,
+                    confirmed: $commandSessionConfirmed,
+                    receipt: $commandSessionReceipt
+                },
+                lanes: $lanes,
+                failure: ($failure | nullable),
+                passed: $passed
+            }
+        end
+        ' "$lane_state_temp" >"$transport_temp"
+    rm -f -- "$lane_state_temp"
+    lane_state_temp=""
+
+    local remote_dir="${transport_output%/*}"
+    local remote_temp="${transport_output}.tmp.${run_id}.$$"
+    if ! remote_exec mkdir -p -- "$remote_dir" ||
+        ! parent_bound_exec scp \
+            "${scp_options[@]}" -- "$transport_temp" "$user@$host:$remote_temp" ||
+        ! remote_exec chmod 0600 -- "$remote_temp" ||
+        ! remote_exec mv -- "$remote_temp" "$transport_output"; then
+        remote_exec rm -f -- "$remote_temp" >/dev/null 2>&1 || true
+        printf 'ERROR: Could not persist transport evidence to %s\n' \
+            "$transport_output" >&2
+        return "$TRANSPORT_EVIDENCE_FAILURE_EXIT"
+    fi
+
+    rm -f -- "$transport_temp"
+    transport_temp=""
+    if [[ "$transport_passed" != true ]]; then
+        return "$TRANSPORT_FAILURE_EXIT"
+    fi
+    return "$command_exit_status"
 }
 
 validate_remote_identity() {
-    local actual
-    actual="$(remote_exec bluemap-runpod-identity)" ||
+    local actual actual_file
+    actual_file="$(mktemp)"
+    if ! remote_exec bluemap-runpod-identity >"$actual_file"; then
+        rm -f -- "$actual_file"
         die "Could not query the RunPod load-generator identity"
+    fi
+    actual="$(<"$actual_file")"
+    rm -f -- "$actual_file"
     jq -e \
         --arg runId "$run_id" \
         --arg imageDigest "$expected_image_digest" \
@@ -266,8 +949,18 @@ case "$command_name" in
         remote_exec "$@"
         ;;
     exec-traefik-forward)
+        (($# >= 4)) ||
+            die "exec-traefik-forward requires --transport-output PATH -- COMMAND"
+        [[ "$1" == "--transport-output" ]] ||
+            die "exec-traefik-forward requires --transport-output as its first option"
+        transport_output="$2"
+        shift 2
+        [[ "$1" == "--" ]] ||
+            die "exec-traefik-forward requires -- before COMMAND"
+        shift
+        validate_remote_path "$transport_output"
         validate_remote_identity >/dev/null
-        remote_exec_traefik_forward "$@"
+        remote_exec_traefik_forward "$transport_output" "$@"
         ;;
     copy-to)
         (($# == 2)) || die "copy-to requires LOCAL and REMOTE"
@@ -277,7 +970,8 @@ case "$command_name" in
             die "Local source must be a regular, non-symlink file"
         validate_remote_path "$remote_file"
         validate_remote_identity >/dev/null
-        scp "${scp_options[@]}" -- "$local_file" "$user@$host:$remote_file"
+        parent_bound_exec scp \
+            "${scp_options[@]}" -- "$local_file" "$user@$host:$remote_file"
         ;;
     copy-from)
         (($# == 2)) || die "copy-from requires REMOTE and LOCAL"
@@ -289,7 +983,8 @@ case "$command_name" in
         [[ -d "$(dirname -- "$local_file")" ]] ||
             die "Local destination directory does not exist"
         validate_remote_identity >/dev/null
-        scp "${scp_options[@]}" -- "$user@$host:$remote_file" "$local_file"
+        parent_bound_exec scp \
+            "${scp_options[@]}" -- "$user@$host:$remote_file" "$local_file"
         ;;
     *)
         die "Unknown command '$command_name'"

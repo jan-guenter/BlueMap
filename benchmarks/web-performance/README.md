@@ -617,14 +617,32 @@ identity, and its dedicated Ed25519 private key. The standalone runner's
 default `cloudflare-https` traffic mode sends measured k6 requests to
 `https://bluemap-test.guenter.cloud` and requires edge-bypass proof. The
 `ssh-l4-traefik` mode instead uses the fixed
-`http://bluemap-test.guenter.cloud` identity through an SSH L4 tunnel from
-`127.0.0.1:18080` to
-`rke2-traefik.kube-system.svc.cluster.local:80`; it does not claim to exercise
-or bypass Cloudflare. Direct HTTP correctness requests use the selected
-candidate's exact cluster-DNS URL. These identities are recorded separately
-and cannot be substituted for each other. The legacy Kubernetes load-generator
-mode remains available only for local exploratory work and is not valid for
-the formal comparison.
+`http://bluemap-test.guenter.cloud` identity through a loopback HAProxy TCP
+frontend at `127.0.0.1:18080`. HAProxy distributes new connections with
+`static-rr` over exactly eight independently supervised reverse-SSH lanes on
+ports `18081` through `18088`; all terminate at
+`rke2-traefik.kube-system.svc.cluster.local:80`. This mode does not claim to
+exercise or bypass Cloudflare. All eight lanes are mandatory, have no adaptive
+health removal or retry fallback, and are probed before and after every k6
+phase. The runner preserves the exact topology and per-lane health evidence;
+the offline analyzer recomputes it. Direct HTTP correctness requests use the
+selected candidate's exact cluster-DNS URL. These identities are recorded
+separately and cannot be substituted for each other. The legacy Kubernetes
+load-generator mode remains available only for local exploratory work and is
+not valid for the formal comparison.
+
+Each remote k6 phase also has a held-open SSH-stdin lease owned directly by the
+controller helper and a fresh nonce-bound terminal receipt. A required startup
+handshake and watcher-liveness gate precede workload release, and the watcher
+itself remains supervised throughout the phase, while parent-death KILL
+supervision prevents orphaned SSH children. A verified launch barrier
+establishes the RunPod process group before the lease watcher can act;
+lease loss or the helper's independent wall-clock deadline requests TERM and
+escalates to KILL after a bounded wait. The wrapper will not release its global
+active-phase lock until the complete group is absent and the watcher and
+resource sampler are reaped. Confirmation requires both the matching immutable
+receipt and lock absence. Missing or malformed termination proof is fatal to
+the controller and cannot become an ordinary failed case followed by more load.
 
 The durable formal controller always selects `ssh-l4-traefik`. Before its
 80-entry schedule it runs a fixed, non-resumable six-entry preflight from the

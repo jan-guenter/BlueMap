@@ -9,8 +9,11 @@ RUN apk add --no-cache \
         ca-certificates \
         coreutils \
         curl \
+        haproxy=3.2.22-r0 \
         jq \
         openssh-server \
+        tini \
+        util-linux \
     && addgroup -g 12345 loadgen \
     && adduser -D -h /home/loadgen -u 12345 -G loadgen loadgen \
     && passwd -d loadgen \
@@ -32,6 +35,7 @@ RUN [ "${#BLUEMAP_SOURCE_REVISION}" -eq 40 ] \
     && chmod 0444 /runner/loadgen-build.json
 
 COPY --from=k6 /usr/bin/k6 /usr/local/bin/k6
+COPY benchmarks/web-performance/runpod/haproxy.cfg /etc/haproxy/haproxy.cfg
 COPY benchmarks/web-performance/runpod/entrypoint.sh /usr/local/bin/bluemap-runpod-entrypoint
 COPY benchmarks/web-performance/runpod/identity.sh /usr/local/bin/bluemap-runpod-identity
 COPY benchmarks/web-performance/runpod/run-phase.sh /usr/local/bin/bluemap-runpod-run-phase
@@ -42,6 +46,11 @@ RUN chmod 0755 \
         /usr/local/bin/bluemap-runpod-identity \
         /usr/local/bin/bluemap-runpod-run-phase \
         /usr/local/bin/bluemap-runpod-sample-resources \
+    && chown root:root /etc/haproxy/haproxy.cfg \
+    && chmod 0444 /etc/haproxy/haproxy.cfg \
+    && test -x /sbin/tini \
+    && command -v setsid >/dev/null \
+    && haproxy -c -f /etc/haproxy/haproxy.cfg \
     && printf '%s\n' \
         'Port 22' \
         'AddressFamily any' \
@@ -57,7 +66,7 @@ RUN chmod 0755 \
         'AllowTcpForwarding remote' \
         'AllowStreamLocalForwarding no' \
         'GatewayPorts no' \
-        'PermitListen 127.0.0.1:18080' \
+        'PermitListen 127.0.0.1:18081 127.0.0.1:18082 127.0.0.1:18083 127.0.0.1:18084 127.0.0.1:18085 127.0.0.1:18086 127.0.0.1:18087 127.0.0.1:18088' \
         'X11Forwarding no' \
         'PermitTunnel no' \
         'PermitUserEnvironment no' \
@@ -68,4 +77,4 @@ RUN chmod 0755 \
 
 EXPOSE 22
 
-ENTRYPOINT ["/usr/local/bin/bluemap-runpod-entrypoint"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/bluemap-runpod-entrypoint"]
