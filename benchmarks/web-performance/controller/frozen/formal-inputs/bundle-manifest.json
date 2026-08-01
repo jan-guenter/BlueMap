@@ -1,0 +1,18 @@
+{
+  "analyzerSha256": "78daeb01057957dcef5128726b398fdc73ae0f65fa38bdd38f4dbc5e35ac4da8",
+  "benchmarkGitRevision": "4e9293724072a9024d05695c741b26395867dbdd",
+  "controllerLockSha256": "87364ed0f79a5e61a1b62e81b5b8dc974c66c20a60fdfd14552d6091e17a9104",
+  "createdAt": "2026-08-01T05:43:59.092Z",
+  "formatVersion": 1,
+  "freezerSha256": "bc33e598b2cd0fbf4146b4fe748ba130e5c7acba5081d94395d8db861b183da0",
+  "loadGenerator": {
+    "backend": "runpod-ssh",
+    "image": "ghcr.io/jan-guenter/bluemap-perf-loadgen@sha256:fe75bae74e2cbe4e280e7e7f70f2ab8d150f2fd53d211c84766ab7d36c1b0162",
+    "imageDigest": "sha256:fe75bae74e2cbe4e280e7e7f70f2ab8d150f2fd53d211c84766ab7d36c1b0162",
+    "sourceRevision": "4e9293724072a9024d05695c741b26395867dbdd"
+  },
+  "matrixSha256": "1c9007e83e05ded4d2dbf073430b73851f716616e74cabd2cf6f8ba1a3427ace",
+  "orchestratorSha256": "986d5c06886092da68e04728c3b273ed9e07374308d6ebb5eb7a94a56baeb58b",
+  "runtimeAdmissionIdentitiesSha256": "88c6acb2fdc5fa5773a8d6967c4890f570804100537a2e848015297c7e13aff7",
+  "scheduleSha256": "bad0a43f7d89c4ecfe9174b6f44bd394f387867c07fc5af61a4ced6ef503e175"
+}

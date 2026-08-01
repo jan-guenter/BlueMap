@@ -1,0 +1,18 @@
+{
+  "controllers": [
+    {
+      "path": "freeze.py",
+      "sha256": "bc33e598b2cd0fbf4146b4fe748ba130e5c7acba5081d94395d8db861b183da0"
+    },
+    {
+      "path": "orchestrate.py",
+      "sha256": "986d5c06886092da68e04728c3b273ed9e07374308d6ebb5eb7a94a56baeb58b"
+    },
+    {
+      "path": "analyze.py",
+      "sha256": "78daeb01057957dcef5128726b398fdc73ae0f65fa38bdd38f4dbc5e35ac4da8"
+    }
+  ],
+  "formatVersion": 1,
+  "requiredRevision": "4e9293724072a9024d05695c741b26395867dbdd"
+}
