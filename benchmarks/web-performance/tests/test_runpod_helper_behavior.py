@@ -399,6 +399,86 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
             else:
                 self.fail(f"transport child {pid} survived helper cleanup")
 
+    def test_remote_telemetry_metadata_reread_survives_transport_quoting(
+        self,
+    ) -> None:
+        helper_source = HELPER.read_text(encoding="utf-8")
+        start_marker = 'if runpod_metadata="$(remote_exec bash -ceu \'\n'
+        end_marker = '\n        \' bash "$resource_output")"; then'
+        self.assertEqual(helper_source.count(start_marker), 1)
+        start = helper_source.index(start_marker) + len(start_marker)
+        self.assertEqual(helper_source.count(end_marker, start), 1)
+        remote_program = helper_source[
+            start : helper_source.index(end_marker, start)
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            resource_output = Path(directory) / "load-generator-resources.ndjson"
+            source_sha256 = hashlib.sha256(
+                b"runpod resource sampler fixture\n"
+            ).hexdigest()
+            fixture = (
+                json.dumps(
+                    {
+                        "kind": "runpod-resource-sample",
+                        "sourceSha256": source_sha256,
+                        "sequence": 1,
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "kind": "runpod-resource-sample",
+                        "sourceSha256": source_sha256,
+                        "sequence": 2,
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            resource_output.write_text(fixture, encoding="utf-8")
+
+            encoded = subprocess.run(
+                [
+                    "bash",
+                    "-ceu",
+                    """
+                    quoted=""
+                    for argument; do
+                        printf -v quoted '%s %q' "$quoted" "$argument"
+                    done
+                    printf '%s' "${quoted# }"
+                    """,
+                    "bash",
+                    "bash",
+                    "-ceu",
+                    remote_program,
+                    "bash",
+                    str(resource_output),
+                ],
+                capture_output=True,
+                check=True,
+                text=True,
+            ).stdout
+            result = subprocess.run(
+                ["bash", "-c", encoded],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = json.loads(result.stdout)
+        self.assertEqual(
+            metadata,
+            {
+                "sha256": hashlib.sha256(fixture.encode("utf-8")).hexdigest(),
+                "count": 2,
+                "sourceSha256": source_sha256,
+            },
+        )
+
     def test_healthy_lanes_preserve_nonzero_command_status_and_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

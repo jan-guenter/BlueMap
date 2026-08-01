@@ -986,7 +986,7 @@ remote_exec_traefik_forward() {
         if runpod_metadata="$(remote_exec bash -ceu '
             path="$1"
             [[ -f "$path" && ! -L "$path" && -s "$path" ]]
-            sha="$(sha256sum -- "$path" | awk "{print \\$1}")"
+            sha="$(sha256sum -- "$path" | awk "{print \$1}")"
             count="$(wc -l < "$path")"
             source="$(head -n 1 -- "$path" | jq -er .sourceSha256)"
             [[ "$sha" =~ ^[a-f0-9]{64}$ &&

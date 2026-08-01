@@ -153,8 +153,8 @@ def parse_endpoint(value: str, family: str, label: str) -> dict[str, Any]:
     }
 
 
-def tcp_sockets(proc_root: Path) -> dict[int, dict[str, Any]]:
-    sockets: dict[int, dict[str, Any]] = {}
+def tcp_sockets(proc_root: Path) -> dict[int, list[dict[str, Any]]]:
+    sockets: dict[int, list[dict[str, Any]]] = {}
     for name, family in (("tcp", "ipv4"), ("tcp6", "ipv6")):
         path = proc_root / "net" / name
         try:
@@ -211,9 +211,7 @@ def tcp_sockets(proc_root: Path) -> dict[int, dict[str, Any]]:
                 < 0
             ):
                 raise CaptureError(f"{path}:{line_number} contains a negative value")
-            if inode in sockets:
-                raise CaptureError(f"socket inode {inode} occurs more than once")
-            sockets[inode] = sample
+            sockets.setdefault(inode, []).append(sample)
     return sockets
 
 
@@ -273,24 +271,31 @@ def capture(
             raise CaptureError(f"{lane_id} PID start-time identity changed")
         owned = socket_inodes(proc_root, pid)
         established = [
-            sockets[inode]
+            socket_sample
             for inode in sorted(owned)
-            if inode in sockets and sockets[inode]["stateHex"] == ESTABLISHED
+            for socket_sample in sockets.get(inode, [])
+            if socket_sample["stateHex"] == ESTABLISHED
         ]
-        control_sockets = [
-            value
+        endpoint_inodes = {
+            value["inode"]
             for value in established
             if value["remote"]["address"] == expected_remote_address
             and value["remote"]["port"] == expected_remote_port
-        ]
-        if len(control_sockets) != 1:
+        }
+        if len(endpoint_inodes) != 1:
             raise CaptureError(
                 f"{lane_id} must own exactly one ESTABLISHED TCP socket to the "
-                f"frozen remote SSH endpoint; found {len(control_sockets)}"
+                f"frozen remote SSH endpoint; found {len(endpoint_inodes)}"
             )
-        control_inode = control_sockets[0]["inode"]
+        control_inode = next(iter(endpoint_inodes))
         if control_inode < 1:
             raise CaptureError("SSH lane control-socket inode is not positive")
+        if len(sockets[control_inode]) != 1:
+            raise CaptureError(
+                f"{lane_id} control-socket inode {control_inode} resolves to "
+                f"{len(sockets[control_inode])} ESTABLISHED TCP rows"
+            )
+        control_socket = sockets[control_inode][0]
         if control_inode in control_socket_inodes:
             raise CaptureError("SSH lane control-socket inodes are not distinct")
         control_socket_inodes.add(control_inode)
@@ -303,7 +308,7 @@ def capture(
                     "userTicks": stat["userTicks"],
                     "systemTicks": stat["systemTicks"],
                 },
-                "socket": control_sockets[0],
+                "socket": control_socket,
             }
         )
     return {

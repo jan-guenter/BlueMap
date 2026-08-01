@@ -163,6 +163,76 @@ class ControllerProcSamplerTests(unittest.TestCase):
                     22,
                 )
 
+    def test_unrelated_duplicate_inode_rows_do_not_invalidate_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lanes, identities = self.build_proc(root)
+            unrelated_inode = 6001
+            (root / "101" / "fd" / "4").symlink_to(
+                f"socket:[{unrelated_inode}]"
+            )
+            with (root / "net" / "tcp").open("a", encoding="ascii") as destination:
+                destination.write(
+                    "8: 0100007F:9C41 0100007F:0050 01 "
+                    "00000001:00000002 01:00000000 00000000 "
+                    f"1000 0 {unrelated_inode} 1 0000000000000000 200\n"
+                )
+            with (root / "net" / "tcp6").open("a", encoding="ascii") as destination:
+                destination.write(
+                    "0: 00000000000000000000000001000000:9C41 "
+                    "B80D0120000000000000000001000000:0050 01 "
+                    "00000003:00000004 01:00000000 00000000 "
+                    f"1000 0 {unrelated_inode} 1 0000000000000000 200\n"
+                )
+
+            sample = SAMPLER.capture(
+                root,
+                lanes,
+                identities,
+                "a" * 64,
+                100,
+                "203.0.113.10",
+                22,
+            )
+
+        self.assertEqual(sample["lanes"][0]["socket"]["inode"], 5001)
+
+    def test_selected_control_inode_duplicate_rows_fail_closed(self) -> None:
+        duplicate_rows = {
+            "identical": (
+                "8: 0100007F:9C41 0A7100CB:0016 01 "
+                "00000000:00000000 01:00000000 00000008 "
+                "1000 0 5001 1 0000000000000000 200\n"
+            ),
+            "conflicting": (
+                "8: 0100007F:9C41 070033C6:0016 01 "
+                "00000000:00000000 01:00000000 00000008 "
+                "1000 0 5001 1 0000000000000000 200\n"
+            ),
+        }
+        for label, duplicate_row in duplicate_rows.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                lanes, identities = self.build_proc(root)
+                with (root / "net" / "tcp").open(
+                    "a", encoding="ascii"
+                ) as destination:
+                    destination.write(duplicate_row)
+
+                with self.assertRaisesRegex(
+                    SAMPLER.CaptureError,
+                    "control-socket inode 5001 resolves to 2 ESTABLISHED TCP rows",
+                ):
+                    SAMPLER.capture(
+                        root,
+                        lanes,
+                        identities,
+                        "a" * 64,
+                        100,
+                        "203.0.113.10",
+                        22,
+                    )
+
     def test_ipv6_proc_address_decodes_by_little_endian_words(self) -> None:
         endpoint = SAMPLER.parse_endpoint(
             "B80D0120000000000000000001000000:0016", "ipv6", "remote"
