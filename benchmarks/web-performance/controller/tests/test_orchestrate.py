@@ -259,8 +259,10 @@ class RunPodOrchestratorTests(unittest.TestCase):
                     and entry["measurementDuration"] == "2m"
                     and entry["cooldownSeconds"] == 15
                     and entry["minimumAchievedRateRatio"] == 1.0
-                    and entry["preAllocatedVUs"] == 256
-                    and entry["maxVUs"] == 512
+                    and entry["preAllocatedVUs"] == 1024
+                    and entry["maxVUs"] == 1024
+                    and entry["completionProgress"]
+                    == orchestrate.COMPLETION_PROGRESS_CONTROL
                     for entry in schedule["entries"]
                 )
             )
@@ -1501,6 +1503,12 @@ class RunPodOrchestratorTests(unittest.TestCase):
         self.assertEqual(
             option(command, "--overload-policy"),
             "allow-explicit",
+        )
+        self.assertEqual(
+            option(command, "--completion-progress-window-seconds"), "5"
+        )
+        self.assertEqual(
+            option(command, "--completion-progress-minimum-fraction"), "0.1"
         )
         self.assertIn("--require-edge-bypass", command)
         self.assertEqual(

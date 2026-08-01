@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import ipaddress
 import itertools
@@ -11,6 +12,7 @@ import json
 import math
 import os
 import re
+import socket
 import statistics
 import sys
 from collections import defaultdict
@@ -35,7 +37,11 @@ RUNNER_INPUT_FILES = {
     "configmap_references.py",
     "capture_prometheus.py",
     "check_arrival_gate.py",
+    "check_completion_progress.py",
     "check_load_generator_capacity.py",
+    "check_ssh_transport_telemetry.py",
+    "sample_ssh_transport.py",
+    "runpod-sample-resources.sh",
     "slow_reader.py",
     "generate_schedule.py",
     "runtime_identity.py",
@@ -54,7 +60,11 @@ SOURCE_HASH_FILES = {
     "configSanitizerSha256": "sanitize_configmap.py",
     "configMapReferencesSha256": "configmap_references.py",
     "arrivalGateSha256": "check_arrival_gate.py",
+    "completionProgressGateSha256": "check_completion_progress.py",
     "loadGeneratorCapacitySha256": "check_load_generator_capacity.py",
+    "sshTransportTelemetryCheckerSha256": "check_ssh_transport_telemetry.py",
+    "controllerTransportSamplerSha256": "sample_ssh_transport.py",
+    "runpodResourceSamplerSha256": "runpod-sample-resources.sh",
     "slowReaderSha256": "slow_reader.py",
     "runpodLoadgenHelperSha256": "runpod_loadgen.sh",
     "runtimeIdentitySha256": "runtime_identity.py",
@@ -117,6 +127,12 @@ PROFILES = {
 }
 
 OVERLOAD_POLICIES = {"forbid", "allow-explicit"}
+COMPLETION_PROGRESS_CONTROL = {
+    "windowSeconds": 5,
+    "startupAllowanceSeconds": 5,
+    "minimumCompletionFraction": 0.1,
+    "startTimeToleranceSeconds": 0.1,
+}
 FORMAL_OVERLOAD_POLICIES = {
     "map-mixed-r15": "allow-explicit",
     "map-mixed-horizontal-r40": "allow-explicit",
@@ -131,6 +147,7 @@ RESPONSE_CLASSIFICATION_METRICS = {
     "transportErrors": "bluemap_transport_errors",
     "unexpectedResponses": "bluemap_unexpected_responses",
 }
+COMPLETION_PROGRESS_METRIC = "bluemap_valid_completion_offset_seconds"
 
 AGGREGATE_METRICS = {
     "offeredThroughput": ("metrics", "throughput", "offeredIterationsPerSecond"),
@@ -517,6 +534,18 @@ def validate_matrix_constraints(
         raise AnalysisFailure(
             "matrix controls.minimumAchievedRateRatio must be in (0, 1]"
         )
+    if controls.get("completionProgress") != COMPLETION_PROGRESS_CONTROL:
+        raise AnalysisFailure(
+            "matrix controls.completionProgress differs from the fixed contract"
+        )
+    progress = controls["completionProgress"]
+    for key in ("warmupDuration", "measurementDuration"):
+        if duration_seconds(
+            controls[key], f"matrix controls.{key}"
+        ) < progress["startupAllowanceSeconds"] + progress["windowSeconds"]:
+            raise AnalysisFailure(
+                f"matrix controls.{key} has no full completion progress window"
+            )
 
     variants = matrix.get("variants")
     cases = matrix.get("cases")
@@ -749,6 +778,7 @@ def build_expected_schedule(
                         ],
                         "preAllocatedVUs": controls["preAllocatedVUs"],
                         "maxVUs": controls["maxVUs"],
+                        "completionProgress": controls["completionProgress"],
                         "latencyP95Milliseconds": case[
                             "latencyP95Milliseconds"
                         ],
@@ -1847,8 +1877,9 @@ def validate_preflight_attestation(
             "measurementDuration": "2m",
             "cooldownSeconds": 15,
             "minimumAchievedRateRatio": 1.0,
-            "preAllocatedVUs": 256,
-            "maxVUs": 512,
+            "preAllocatedVUs": 1024,
+            "maxVUs": 1024,
+            "completionProgress": COMPLETION_PROGRESS_CONTROL,
         },
         "cases": expected_preflight_cases,
         "variants": expected_preflight_variants,
@@ -2239,6 +2270,7 @@ def compare_workload_identity(
         "preAllocatedVUs": entry["preAllocatedVUs"],
         "maxVUs": entry["maxVUs"],
         "minimumAchievedRateRatio": entry["minimumAchievedRateRatio"],
+        "completionProgress": entry["completionProgress"],
         "traceSeed": entry["traceSeed"],
         "acceptEncoding": entry["acceptEncoding"],
         "storedEncoding": entry["storedEncoding"],
@@ -2544,16 +2576,32 @@ def load_runpod_resource_samples(path: Path) -> list[dict[str, Any]]:
             raise AnalysisFailure(f"{path}:{number}: invalid JSON") from error
         if not isinstance(value, dict):
             raise AnalysisFailure(f"{path}:{number}: sample is not an object")
-        if set(value) != {
+        legacy_keys = {
             "capturedAt",
             "cpuUsageUsec",
             "cpuThrottledUsec",
             "memoryCurrentBytes",
             "network",
-        } or not isinstance(value.get("network"), dict) or set(
+        }
+        transport_keys = legacy_keys | {
+            "formatVersion",
+            "kind",
+            "sourceSha256",
+            "transport",
+        }
+        sample_keys = frozenset(value)
+        if sample_keys not in {frozenset(legacy_keys), frozenset(transport_keys)} or not isinstance(value.get("network"), dict) or set(
             value["network"]
         ) != {"rxBytes", "txBytes"}:
             raise AnalysisFailure(f"{path}:{number}: malformed RunPod sample")
+        if sample_keys == frozenset(transport_keys) and (
+            value.get("formatVersion") != 2
+            or value.get("kind") != "runpod-resource-transport-sample"
+            or not isinstance(value.get("sourceSha256"), str)
+            or HEX_64.fullmatch(value["sourceSha256"]) is None
+            or not isinstance(value.get("transport"), dict)
+        ):
+            raise AnalysisFailure(f"{path}:{number}: malformed RunPod transport sample")
         for key, raw in (
             ("cpuUsageUsec", value.get("cpuUsageUsec")),
             ("cpuThrottledUsec", value.get("cpuThrottledUsec")),
@@ -2800,6 +2848,796 @@ def validate_runpod_capacity_phases(
     return capacity
 
 
+TRANSPORT_HAPROXY_KEYS = {
+    "id",
+    "serverName",
+    "qcur",
+    "qmax",
+    "scur",
+    "smax",
+    "stot",
+    "bin",
+    "bout",
+    "econ",
+    "eresp",
+    "wretr",
+    "wredis",
+    "status",
+}
+TRANSPORT_HAPROXY_CUMULATIVE = (
+    "qmax",
+    "smax",
+    "stot",
+    "bin",
+    "bout",
+    "econ",
+    "eresp",
+    "wretr",
+    "wredis",
+)
+
+
+def transport_uint(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AnalysisFailure(f"{label} is not a non-negative integer")
+    return value
+
+
+def load_transport_ndjson(path: Path, label: str) -> list[dict[str, Any]]:
+    if not path.is_file() or path.is_symlink():
+        raise AnalysisFailure(f"{label} is missing, not regular, or a symlink")
+    samples: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise AnalysisFailure(f"cannot read {label}: {error}") from error
+    for line_number, line in enumerate(lines, 1):
+        if not line:
+            raise AnalysisFailure(f"{label}:{line_number} is blank")
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise AnalysisFailure(f"{label}:{line_number} is invalid JSON") from error
+        if not isinstance(value, dict):
+            raise AnalysisFailure(f"{label}:{line_number} is not an object")
+        samples.append(value)
+    if len(samples) < 2:
+        raise AnalysisFailure(f"{label} contains fewer than two samples")
+    return samples
+
+
+def transport_delta(
+    first: dict[str, Any],
+    last: dict[str, Any],
+    fields: Iterable[str],
+    label: str,
+) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for field in fields:
+        before = transport_uint(first.get(field), f"{label}.{field}[first]")
+        after = transport_uint(last.get(field), f"{label}.{field}[last]")
+        if after < before:
+            raise AnalysisFailure(f"{label}.{field} decreased")
+        result[field] = after - before
+    return result
+
+
+def transport_timeline(
+    samples: list[dict[str, Any]],
+    label: str,
+    start: float,
+    end: float,
+) -> float:
+    epochs = [
+        timestamp_epoch(sample.get("capturedAt"), f"{label}[{index}].capturedAt")
+        for index, sample in enumerate(samples)
+    ]
+    gaps = [right - left for left, right in zip(epochs, epochs[1:], strict=False)]
+    if any(gap <= 0 or gap > 5 for gap in gaps):
+        raise AnalysisFailure(
+            f"{label} timestamps do not increase within the five-second gap limit"
+        )
+    if (
+        epochs[0] < start - 5
+        or epochs[0] > start
+        or epochs[-1] < end - 5
+        or epochs[-1] > end + 5
+    ):
+        raise AnalysisFailure(f"{label} does not cover both workload-window edges")
+    return max(gaps)
+
+
+def analyzer_haproxy_stat(
+    value: Any, expected_id: str, expected_server: str, label: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != TRANSPORT_HAPROXY_KEYS:
+        raise AnalysisFailure(f"{label} has an unexpected schema")
+    if (
+        value.get("id") != expected_id
+        or value.get("serverName") != expected_server
+        or not isinstance(value.get("status"), str)
+        or not value["status"]
+    ):
+        raise AnalysisFailure(f"{label} identity/status is invalid")
+    for field in TRANSPORT_HAPROXY_KEYS - {"id", "serverName", "status"}:
+        transport_uint(value.get(field), f"{label}.{field}")
+    return value
+
+
+def analyzer_decode_proc_address(
+    address_hex: str, family: str, label: str
+) -> str:
+    expected_length = 8 if family == "ipv4" else 32
+    if re.fullmatch(rf"[A-F0-9]{{{expected_length}}}", address_hex) is None:
+        raise AnalysisFailure(f"{label} addressHex is malformed")
+    raw = bytes.fromhex(address_hex)
+    if family == "ipv4":
+        decoded = raw[::-1]
+        value = socket.inet_ntop(socket.AF_INET, decoded)
+    else:
+        decoded = b"".join(
+            raw[index : index + 4][::-1] for index in range(0, 16, 4)
+        )
+        value = socket.inet_ntop(socket.AF_INET6, decoded)
+    return str(ipaddress.ip_address(value))
+
+
+def recompute_controller_transport(
+    samples: list[dict[str, Any]],
+    evidence: dict[str, Any],
+    source_sha256: str,
+    start: float,
+    end: float,
+    label: str,
+    expected_remote_address: str,
+    expected_remote_port: int,
+) -> dict[str, Any]:
+    gap = transport_timeline(samples, f"{label}: controller telemetry", start, end)
+    lanes = evidence.get("lanes")
+    if not isinstance(lanes, list) or len(lanes) != 8:
+        raise AnalysisFailure(f"{label}: transport lane identity is unavailable")
+    expected = {
+        lane.get("id"): (
+            lane.get("process", {}).get("pid"),
+            lane.get("process", {}).get("startTimeTicks"),
+        )
+        for lane in lanes
+        if isinstance(lane, dict)
+    }
+    expected_pids = [identity[0] for identity in expected.values()]
+    if (
+        len(expected_pids) != 8
+        or any(
+            isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
+            for pid in expected_pids
+        )
+        or len(set(expected_pids)) != 8
+    ):
+        raise AnalysisFailure(f"{label}: transport SSH lane PIDs are not distinct")
+    previous_monotonic = -1
+    clock_ticks: int | None = None
+    first_tcp: dict[str, Any] | None = None
+    last_tcp: dict[str, Any] | None = None
+    previous_tcp: dict[str, Any] | None = None
+    first_lanes: dict[str, dict[str, Any]] = {}
+    previous_lanes: dict[str, dict[str, Any]] = {}
+    socket_identity: dict[str, tuple[Any, ...]] = {}
+    maxima = {
+        f"lane-{index}": {
+            "txBytes": 0,
+            "rxBytes": 0,
+            "rtoJiffies": 0,
+            "unrecoveredRtoCount": 0,
+        }
+        for index in range(1, 9)
+    }
+    expected_lane_ids = [f"lane-{index}" for index in range(1, 9)]
+    for sample_index, sample in enumerate(samples):
+        sample_socket_inodes: set[int] = set()
+        if set(sample) != {
+            "formatVersion",
+            "kind",
+            "capturedAt",
+            "monotonicNanoseconds",
+            "sourceSha256",
+            "clockTicksPerSecond",
+            "tcp",
+            "lanes",
+        } or (
+            sample.get("formatVersion") != 2
+            or sample.get("kind") != "controller-ssh-transport-sample"
+            or sample.get("sourceSha256") != source_sha256
+        ):
+            raise AnalysisFailure(
+                f"{label}: controller sample {sample_index} is malformed"
+            )
+        monotonic = transport_uint(
+            sample.get("monotonicNanoseconds"),
+            f"{label}: controller monotonicNanoseconds",
+        )
+        if monotonic <= previous_monotonic:
+            raise AnalysisFailure(f"{label}: controller monotonic clock regressed")
+        previous_monotonic = monotonic
+        sample_ticks = transport_uint(
+            sample.get("clockTicksPerSecond"),
+            f"{label}: controller clockTicksPerSecond",
+        )
+        if sample_ticks < 1 or (clock_ticks is not None and sample_ticks != clock_ticks):
+            raise AnalysisFailure(f"{label}: controller clock-tick identity changed")
+        clock_ticks = sample_ticks
+        tcp = sample.get("tcp")
+        if not isinstance(tcp, dict) or set(tcp) != {
+            "retransSegs",
+            "tcpTimeouts",
+            "tcpSynRetrans",
+        }:
+            raise AnalysisFailure(f"{label}: controller TCP counters are malformed")
+        for field in tcp:
+            transport_uint(tcp[field], f"{label}: controller TCP {field}")
+        if previous_tcp is not None:
+            transport_delta(previous_tcp, tcp, tcp, f"{label}: controller TCP")
+        if first_tcp is None:
+            first_tcp = tcp
+        previous_tcp = tcp
+        last_tcp = tcp
+        sample_lanes = sample.get("lanes")
+        if (
+            not isinstance(sample_lanes, list)
+            or [lane.get("id") if isinstance(lane, dict) else None for lane in sample_lanes]
+            != expected_lane_ids
+        ):
+            raise AnalysisFailure(f"{label}: controller lane order is invalid")
+        for lane in sample_lanes:
+            lane_id = lane["id"]
+            if set(lane) != {"id", "process", "socket"}:
+                raise AnalysisFailure(f"{label}: {lane_id} sample is malformed")
+            process = lane.get("process")
+            if not isinstance(process, dict) or set(process) != {
+                "pid",
+                "startTimeTicks",
+                "userTicks",
+                "systemTicks",
+            }:
+                raise AnalysisFailure(f"{label}: {lane_id} process is malformed")
+            identity = (
+                transport_uint(process.get("pid"), f"{label}: {lane_id} pid"),
+                transport_uint(
+                    process.get("startTimeTicks"),
+                    f"{label}: {lane_id} startTimeTicks",
+                ),
+            )
+            if identity != expected.get(lane_id):
+                raise AnalysisFailure(f"{label}: {lane_id} process identity changed")
+            for field in ("userTicks", "systemTicks"):
+                transport_uint(process.get(field), f"{label}: {lane_id} {field}")
+            socket = lane.get("socket")
+            if not isinstance(socket, dict) or set(socket) != {
+                "inode",
+                "family",
+                "stateHex",
+                "local",
+                "remote",
+                "txQueueBytes",
+                "rxQueueBytes",
+                "timerActive",
+                "timerExpiresJiffies",
+                "unrecoveredRtoCount",
+                "retransmitTimeoutJiffies",
+            }:
+                raise AnalysisFailure(f"{label}: {lane_id} socket is malformed")
+            if socket.get("family") not in {"ipv4", "ipv6"} or socket.get(
+                "stateHex"
+            ) != "01":
+                raise AnalysisFailure(f"{label}: {lane_id} socket is not ESTABLISHED")
+            inode = transport_uint(
+                socket.get("inode"), f"{label}: {lane_id} inode"
+            )
+            if inode < 1:
+                raise AnalysisFailure(
+                    f"{label}: controller SSH control-socket inode is invalid"
+                )
+            if inode in sample_socket_inodes:
+                raise AnalysisFailure(
+                    f"{label}: controller SSH control-socket inodes overlap"
+                )
+            sample_socket_inodes.add(inode)
+            stable: list[Any] = [inode, socket["family"]]
+            for endpoint_name in ("local", "remote"):
+                endpoint = socket.get(endpoint_name)
+                if not isinstance(endpoint, dict) or set(endpoint) != {
+                    "address",
+                    "addressHex",
+                    "port",
+                }:
+                    raise AnalysisFailure(
+                        f"{label}: {lane_id} {endpoint_name} is malformed"
+                    )
+                address = endpoint.get("address")
+                address_hex = endpoint.get("addressHex")
+                port = transport_uint(
+                    endpoint.get("port"), f"{label}: {lane_id} endpoint port"
+                )
+                if (
+                    not isinstance(address, str)
+                    or not isinstance(address_hex, str)
+                    or port > 65535
+                ):
+                    raise AnalysisFailure(
+                        f"{label}: {lane_id} endpoint identity is invalid"
+                    )
+                try:
+                    normalized = str(ipaddress.ip_address(address))
+                except ValueError as error:
+                    raise AnalysisFailure(
+                        f"{label}: {lane_id} endpoint address is invalid"
+                    ) from error
+                if normalized != address or analyzer_decode_proc_address(
+                    address_hex,
+                    socket["family"],
+                    f"{label}: {lane_id} {endpoint_name}",
+                ) != address:
+                    raise AnalysisFailure(
+                        f"{label}: {lane_id} endpoint address/hex identity differs"
+                    )
+                if endpoint_name == "remote" and (
+                    address != expected_remote_address
+                    or port != expected_remote_port
+                ):
+                    raise AnalysisFailure(
+                        f"{label}: {lane_id} remote endpoint differs from frozen identity"
+                    )
+                stable.extend((address, address_hex, port))
+            for field in (
+                "txQueueBytes",
+                "rxQueueBytes",
+                "timerActive",
+                "timerExpiresJiffies",
+                "unrecoveredRtoCount",
+                "retransmitTimeoutJiffies",
+            ):
+                transport_uint(socket.get(field), f"{label}: {lane_id} {field}")
+            if lane_id in socket_identity and socket_identity[lane_id] != tuple(stable):
+                raise AnalysisFailure(f"{label}: {lane_id} socket identity changed")
+            socket_identity[lane_id] = tuple(stable)
+            if lane_id in previous_lanes:
+                transport_delta(
+                    previous_lanes[lane_id]["process"],
+                    process,
+                    ("userTicks", "systemTicks"),
+                    f"{label}: {lane_id} CPU",
+                )
+            first_lanes.setdefault(lane_id, lane)
+            previous_lanes[lane_id] = lane
+            maxima[lane_id]["txBytes"] = max(
+                maxima[lane_id]["txBytes"], socket["txQueueBytes"]
+            )
+            maxima[lane_id]["rxBytes"] = max(
+                maxima[lane_id]["rxBytes"], socket["rxQueueBytes"]
+            )
+            maxima[lane_id]["rtoJiffies"] = max(
+                maxima[lane_id]["rtoJiffies"],
+                socket["retransmitTimeoutJiffies"],
+            )
+            maxima[lane_id]["unrecoveredRtoCount"] = max(
+                maxima[lane_id]["unrecoveredRtoCount"],
+                socket["unrecoveredRtoCount"],
+            )
+    assert first_tcp is not None and last_tcp is not None and clock_ticks is not None
+    lane_summary = {}
+    for lane_id in expected_lane_ids:
+        before = first_lanes[lane_id]
+        after = previous_lanes[lane_id]
+        lane_summary[lane_id] = {
+            "cpuTickDelta": transport_delta(
+                before["process"],
+                after["process"],
+                ("userTicks", "systemTicks"),
+                f"{label}: {lane_id} CPU",
+            ),
+            "maximumQueueBytes": maxima[lane_id],
+        }
+    return {
+        "sampleCount": len(samples),
+        "maximumSampleGapSeconds": gap,
+        "clockTicksPerSecond": clock_ticks,
+        "tcpCounterDelta": transport_delta(
+            first_tcp, last_tcp, first_tcp, f"{label}: controller TCP"
+        ),
+        "lanes": lane_summary,
+    }
+
+
+def recompute_runpod_transport(
+    samples: list[dict[str, Any]],
+    source_sha256: str,
+    start: float,
+    end: float,
+    label: str,
+) -> dict[str, Any]:
+    gap = transport_timeline(samples, f"{label}: RunPod telemetry", start, end)
+    first_tcp: dict[str, Any] | None = None
+    last_tcp: dict[str, Any] | None = None
+    previous_tcp: dict[str, Any] | None = None
+    previous_resources: dict[str, Any] | None = None
+    first_stats: dict[str, dict[str, Any]] = {}
+    previous_stats: dict[str, dict[str, Any]] = {}
+    maxima: dict[str, dict[str, int]] = {}
+    statuses: dict[str, set[str]] = {}
+    for sample_index, sample in enumerate(samples):
+        if set(sample) != {
+            "formatVersion",
+            "kind",
+            "capturedAt",
+            "sourceSha256",
+            "cpuUsageUsec",
+            "cpuThrottledUsec",
+            "memoryCurrentBytes",
+            "network",
+            "transport",
+        } or (
+            sample.get("formatVersion") != 2
+            or sample.get("kind") != "runpod-resource-transport-sample"
+            or sample.get("sourceSha256") != source_sha256
+        ):
+            raise AnalysisFailure(f"{label}: RunPod sample {sample_index} is malformed")
+        network = sample.get("network")
+        if not isinstance(network, dict) or set(network) != {"rxBytes", "txBytes"}:
+            raise AnalysisFailure(f"{label}: RunPod network sample is malformed")
+        resources = {
+            "cpuUsageUsec": transport_uint(
+                sample.get("cpuUsageUsec"), f"{label}: RunPod CPU"
+            ),
+            "cpuThrottledUsec": transport_uint(
+                sample.get("cpuThrottledUsec"), f"{label}: RunPod throttling"
+            ),
+            "rxBytes": transport_uint(network.get("rxBytes"), f"{label}: RunPod rx"),
+            "txBytes": transport_uint(network.get("txBytes"), f"{label}: RunPod tx"),
+        }
+        transport_uint(sample.get("memoryCurrentBytes"), f"{label}: RunPod memory")
+        if previous_resources is not None:
+            transport_delta(
+                previous_resources,
+                resources,
+                resources,
+                f"{label}: RunPod resources",
+            )
+        previous_resources = resources
+        transport = sample.get("transport")
+        if not isinstance(transport, dict) or set(transport) != {"tcp", "haproxy"}:
+            raise AnalysisFailure(f"{label}: RunPod transport sample is malformed")
+        tcp = transport.get("tcp")
+        if not isinstance(tcp, dict) or set(tcp) != {
+            "retransSegs",
+            "tcpTimeouts",
+            "tcpSynRetrans",
+        }:
+            raise AnalysisFailure(f"{label}: RunPod TCP counters are malformed")
+        for field in tcp:
+            transport_uint(tcp[field], f"{label}: RunPod TCP {field}")
+        if previous_tcp is not None:
+            transport_delta(previous_tcp, tcp, tcp, f"{label}: RunPod TCP")
+        if first_tcp is None:
+            first_tcp = tcp
+        previous_tcp = tcp
+        last_tcp = tcp
+        haproxy = transport.get("haproxy")
+        if not isinstance(haproxy, dict) or set(haproxy) != {"backend", "lanes"}:
+            raise AnalysisFailure(f"{label}: HAProxy sample is malformed")
+        stats = [
+            analyzer_haproxy_stat(
+                haproxy.get("backend"), "backend", "BACKEND", f"{label}: backend"
+            )
+        ]
+        lane_stats = haproxy.get("lanes")
+        if not isinstance(lane_stats, list) or len(lane_stats) != 8:
+            raise AnalysisFailure(f"{label}: HAProxy lane stats are incomplete")
+        stats.extend(
+            analyzer_haproxy_stat(
+                value,
+                f"lane-{index}",
+                f"lane_{index}",
+                f"{label}: lane-{index}",
+            )
+            for index, value in enumerate(lane_stats, 1)
+        )
+        for stat in stats:
+            stat_id = stat["id"]
+            if stat_id in previous_stats:
+                transport_delta(
+                    previous_stats[stat_id],
+                    stat,
+                    TRANSPORT_HAPROXY_CUMULATIVE,
+                    f"{label}: HAProxy {stat_id}",
+                )
+            first_stats.setdefault(stat_id, stat)
+            previous_stats[stat_id] = stat
+            maxima.setdefault(stat_id, {"qcur": 0, "scur": 0})
+            maxima[stat_id]["qcur"] = max(maxima[stat_id]["qcur"], stat["qcur"])
+            maxima[stat_id]["scur"] = max(maxima[stat_id]["scur"], stat["scur"])
+            statuses.setdefault(stat_id, set()).add(stat["status"])
+    assert first_tcp is not None and last_tcp is not None
+    summary = {
+        stat_id: {
+            "counterDelta": transport_delta(
+                first_stats[stat_id],
+                previous_stats[stat_id],
+                TRANSPORT_HAPROXY_CUMULATIVE,
+                f"{label}: HAProxy {stat_id}",
+            ),
+            "maximumCurrentQueue": maxima[stat_id]["qcur"],
+            "maximumCurrentSessions": maxima[stat_id]["scur"],
+            "statuses": sorted(statuses[stat_id]),
+        }
+        for stat_id in sorted(first_stats)
+    }
+    lane_connections = [
+        summary[f"lane-{index}"]["counterDelta"]["stot"]
+        for index in range(1, 9)
+    ]
+    return {
+        "sampleCount": len(samples),
+        "maximumSampleGapSeconds": gap,
+        "tcpCounterDelta": transport_delta(
+            first_tcp, last_tcp, first_tcp, f"{label}: RunPod TCP"
+        ),
+        "haproxy": summary,
+        "laneConnectionDeltaImbalance": {
+            "minimum": min(lane_connections),
+            "maximum": max(lane_connections),
+            "range": max(lane_connections) - min(lane_connections),
+        },
+    }
+
+
+def validate_transport_telemetry_artifacts(
+    transport_path: Path,
+    evidence: dict[str, Any],
+    label: str,
+    expected_transport_output: str,
+) -> dict[str, Any]:
+    phase_dir = transport_path.parent
+    inputs = transport_path.parents[3] / "inputs"
+    controller_path = phase_dir / "ssh-l4-transport.controller.ndjson"
+    runpod_path = phase_dir / "load-generator-resources.ndjson"
+    validation_path = phase_dir / "ssh-l4-transport-telemetry.json"
+    controller_source_path = inputs / "sample_ssh_transport.py"
+    runpod_source_path = inputs / "runpod-sample-resources.sh"
+    for path, name in (
+        (controller_source_path, "controller sampler source"),
+        (runpod_source_path, "RunPod sampler source"),
+        (validation_path, "runner transport validation"),
+    ):
+        if not path.is_file() or path.is_symlink():
+            raise AnalysisFailure(f"{label}: {name} is missing or unsafe")
+    controller_source = sha256_file(controller_source_path)
+    runpod_source = sha256_file(runpod_source_path)
+    frozen_identity = validate_runpod_identity(
+        load_regular_object(inputs / "runpod-load-generator-identity.json"),
+        f"{label}: archived RunPod identity",
+    )
+    expected_remote_address = frozen_identity["runpod"]["publicIp"]
+    expected_remote_port = frozen_identity["ssh"]["port"]
+    telemetry = evidence.get("telemetry")
+    if not isinstance(telemetry, dict) or set(telemetry) != {
+        "formatVersion",
+        "required",
+        "intervalSeconds",
+        "controller",
+        "runpod",
+    } or (
+        telemetry.get("formatVersion") != 2
+        or telemetry.get("required") is not True
+        or isinstance(telemetry.get("intervalSeconds"), bool)
+        or not isinstance(telemetry.get("intervalSeconds"), (int, float))
+        or telemetry.get("intervalSeconds") != 1
+    ):
+        raise AnalysisFailure(f"{label}: transport telemetry descriptor is malformed")
+    controller_samples = load_transport_ndjson(
+        controller_path, f"{label}: controller transport telemetry"
+    )
+    runpod_samples = load_transport_ndjson(
+        runpod_path, f"{label}: RunPod transport telemetry"
+    )
+    expected_remote_paths = {
+        "controller": re.sub(
+            r"ssh-l4-transport\.json$",
+            "ssh-l4-transport.controller.ndjson",
+            expected_transport_output,
+        ),
+        "runpod": re.sub(
+            r"ssh-l4-transport\.json$",
+            "load-generator-resources.ndjson",
+            expected_transport_output,
+        ),
+    }
+    descriptors = {
+        "controller": (controller_path, controller_samples, controller_source),
+        "runpod": (runpod_path, runpod_samples, runpod_source),
+    }
+    for name, (raw_path, samples, source) in descriptors.items():
+        descriptor = telemetry.get(name)
+        if not isinstance(descriptor, dict) or set(descriptor) != {
+            "path",
+            "sha256",
+            "sampleCount",
+            "source",
+            "capture",
+        }:
+            raise AnalysisFailure(f"{label}: {name} telemetry descriptor is malformed")
+        if descriptor.get("sha256") != sha256_file(raw_path) or descriptor.get(
+            "sampleCount"
+        ) != len(samples):
+            raise AnalysisFailure(f"{label}: {name} telemetry hash/count changed")
+        if descriptor.get("path") != expected_remote_paths[name]:
+            raise AnalysisFailure(f"{label}: {name} telemetry path changed")
+        source_identity = descriptor.get("source")
+        capture = descriptor.get("capture")
+        if name == "controller":
+            expected_source_identity = {
+                "kind": "controller-procfs-ssh-lanes-v2",
+                "samplerSha256": source,
+                "remoteAddress": expected_remote_address,
+                "remotePort": expected_remote_port,
+            }
+            expected_capture_keys = {
+                "attempted",
+                "validBeforeWorkload",
+                "readyAt",
+                "reaped",
+                "exitStatus",
+                "persisted",
+            }
+        else:
+            if (
+                not isinstance(source_identity, dict)
+                or set(source_identity)
+                != {"kind", "imageDigest", "samplerSha256", "statsSocket"}
+                or source_identity.get("kind") != "runpod-haproxy-procfs-v1"
+                or source_identity.get("samplerSha256") != source
+                or source_identity.get("statsSocket")
+                != "/run/haproxy/bluemap-stats.sock"
+                or source_identity.get("imageDigest")
+                != frozen_identity["runpod"]["imageDigest"]
+            ):
+                raise AnalysisFailure(
+                    f"{label}: RunPod telemetry source identity changed"
+                )
+            expected_source_identity = source_identity
+            expected_capture_keys = {
+                "attempted",
+                "validBeforeWorkload",
+                "readyAt",
+                "workloadReleasedAt",
+                "reaped",
+                "exitStatus",
+                "persisted",
+                "observedSourceSha256",
+            }
+        if source_identity != expected_source_identity:
+            raise AnalysisFailure(f"{label}: {name} telemetry source identity changed")
+        if (
+            not isinstance(capture, dict)
+            or set(capture) != expected_capture_keys
+            or any(
+                capture.get(field) is not True
+                for field in (
+                    "attempted",
+                    "validBeforeWorkload",
+                    "reaped",
+                    "persisted",
+                )
+            )
+            or isinstance(capture.get("exitStatus"), bool)
+            or not isinstance(capture.get("exitStatus"), int)
+            or capture.get("exitStatus") != 0
+        ):
+            raise AnalysisFailure(f"{label}: {name} telemetry capture is incomplete")
+    if telemetry["runpod"]["capture"].get("observedSourceSha256") != runpod_source:
+        raise AnalysisFailure(f"{label}: RunPod sampler runtime fingerprint changed")
+    receipt = evidence.get("commandSession", {}).get("receipt")
+    receipt_telemetry = receipt.get("telemetry") if isinstance(receipt, dict) else None
+    if (
+        not isinstance(receipt, dict)
+        or not isinstance(receipt_telemetry, dict)
+        or set(receipt_telemetry)
+        != {
+            "resourceOutput",
+            "readyBeforeWorkload",
+            "readyAt",
+            "workloadReleasedAt",
+            "samplerExitStatus",
+        }
+        or receipt_telemetry.get("resourceOutput") != expected_remote_paths["runpod"]
+        or receipt_telemetry.get("readyBeforeWorkload") is not True
+        or isinstance(receipt_telemetry.get("samplerExitStatus"), bool)
+        or not isinstance(receipt_telemetry.get("samplerExitStatus"), int)
+        or receipt_telemetry.get("samplerExitStatus") != 0
+    ):
+        raise AnalysisFailure(f"{label}: telemetry command receipt is unavailable")
+    start = timestamp_epoch(
+        receipt_telemetry.get("workloadReleasedAt"),
+        f"{label}: telemetry workloadReleasedAt",
+    )
+    end = timestamp_epoch(receipt.get("completedAt"), f"{label}: command completedAt")
+    if start > end:
+        raise AnalysisFailure(f"{label}: telemetry workload window is reversed")
+    controller_ready = timestamp_epoch(
+        telemetry["controller"]["capture"].get("readyAt"),
+        f"{label}: controller telemetry readyAt",
+    )
+    runpod_ready = timestamp_epoch(
+        telemetry["runpod"]["capture"].get("readyAt"),
+        f"{label}: RunPod telemetry readyAt",
+    )
+    receipt_ready = timestamp_epoch(
+        receipt_telemetry.get("readyAt"),
+        f"{label}: command receipt telemetry readyAt",
+    )
+    if (
+        controller_ready > start
+        or runpod_ready > start
+        or receipt_ready > start
+        or telemetry["runpod"]["capture"].get("workloadReleasedAt")
+        != receipt_telemetry.get("workloadReleasedAt")
+    ):
+        raise AnalysisFailure(f"{label}: telemetry readiness chronology is invalid")
+    diagnostics = {
+        "controller": recompute_controller_transport(
+            controller_samples,
+            evidence,
+            controller_source,
+            start,
+            end,
+            label,
+            expected_remote_address,
+            expected_remote_port,
+        ),
+        "runpod": recompute_runpod_transport(
+            runpod_samples, runpod_source, start, end, label
+        ),
+    }
+    runner_validation = load_regular_object(validation_path)
+    expected_validation = {
+        "formatVersion": 2,
+        "kind": "ssh-l4-transport-telemetry-validation",
+        "window": {
+            "startedAt": receipt_telemetry["workloadReleasedAt"],
+            "finishedAt": receipt["completedAt"],
+        },
+        "limits": {"maximumSampleGapSeconds": 5.0},
+        "sources": {
+            "controllerSamplerSha256": controller_source,
+            "runpodSamplerSha256": runpod_source,
+            "remoteEndpoint": {
+                "address": expected_remote_address,
+                "port": expected_remote_port,
+            },
+        },
+        "artifacts": {
+            "transportSha256": sha256_file(transport_path),
+            "controllerSha256": sha256_file(controller_path),
+            "runpodSha256": sha256_file(runpod_path),
+        },
+        "diagnostics": diagnostics,
+        "capturePassed": True,
+        "performanceGateApplied": False,
+        "passed": True,
+    }
+    if not equal_json_numbers(runner_validation, expected_validation):
+        raise AnalysisFailure(
+            f"{label}: runner transport telemetry result does not recompute"
+        )
+    return {
+        "descriptor": telemetry,
+        "diagnostics": diagnostics,
+        "controllerSha256": sha256_file(controller_path),
+        "runpodSha256": sha256_file(runpod_path),
+        "runnerValidationSha256": sha256_file(validation_path),
+        "capturePassed": True,
+        "performanceGateApplied": False,
+    }
+
+
 def validate_ssh_l4_transport_artifact(
     path: Path,
     label: str,
@@ -2819,13 +3657,14 @@ def validate_ssh_l4_transport_artifact(
         "commandExitStatus",
         "commandTerminatedForLaneFailure",
         "commandSession",
+        "telemetry",
         "lanes",
         "failure",
         "passed",
     }
     if (
         set(evidence) != expected_keys
-        or evidence.get("formatVersion") != 1
+        or evidence.get("formatVersion") != 2
         or evidence.get("kind") != "ssh-l4-traefik-transport"
         or evidence.get("mode") != "ssh-l4-traefik"
         or evidence.get("topology") != SSH_L4_TRAEFIK_TUNNEL
@@ -2914,6 +3753,7 @@ def validate_ssh_l4_transport_artifact(
                 "lane-failure",
                 "helper-deadline",
                 "local-exit-timeout",
+                "transport-telemetry-failure",
             }
             or command_session["confirmationAttempted"] is not True
         ):
@@ -2934,6 +3774,7 @@ def validate_ssh_l4_transport_artifact(
                 "activeLock",
                 "startedAt",
                 "completedAt",
+                "telemetry",
                 "lease",
                 "termination",
                 "passed",
@@ -2942,7 +3783,7 @@ def validate_ssh_l4_transport_artifact(
                 not isinstance(receipt, dict)
                 or set(receipt) != receipt_keys
                 or receipt.get("kind") != "runpod-command-session"
-                or receipt.get("formatVersion") != 1
+                or receipt.get("formatVersion") != 2
                 or receipt.get("sessionId") != session_id
                 or receipt.get("sessionOutput") != session_output
                 or receipt.get("activeLock")
@@ -2966,6 +3807,45 @@ def validate_ssh_l4_transport_artifact(
             ):
                 raise AnalysisFailure(
                     f"{label}: command-session chronology is invalid"
+                )
+            receipt_telemetry = receipt.get("telemetry")
+            if not isinstance(receipt_telemetry, dict) or set(
+                receipt_telemetry
+            ) != {
+                "resourceOutput",
+                "readyBeforeWorkload",
+                "readyAt",
+                "workloadReleasedAt",
+                "samplerExitStatus",
+            }:
+                raise AnalysisFailure(
+                    f"{label}: command-session telemetry receipt is malformed"
+                )
+            telemetry_ready = timestamp_epoch(
+                receipt_telemetry.get("readyAt"),
+                f"{label}: command-session telemetry readyAt",
+            )
+            workload_released = timestamp_epoch(
+                receipt_telemetry.get("workloadReleasedAt"),
+                f"{label}: command-session workloadReleasedAt",
+            )
+            expected_resource_output = re.sub(
+                r"ssh-l4-transport\.json$",
+                "load-generator-resources.ndjson",
+                expected_transport_output,
+            )
+            if (
+                receipt_telemetry.get("readyBeforeWorkload") is not True
+                or isinstance(receipt_telemetry.get("samplerExitStatus"), bool)
+                or not isinstance(receipt_telemetry.get("samplerExitStatus"), int)
+                or receipt_telemetry.get("samplerExitStatus") != 0
+                or receipt_telemetry.get("resourceOutput")
+                != expected_resource_output
+                or not receipt_started <= telemetry_ready <= workload_released
+                or workload_released > receipt_completed
+            ):
+                raise AnalysisFailure(
+                    f"{label}: command-session telemetry chronology is invalid"
                 )
             lease = receipt.get("lease")
             if (
@@ -3052,6 +3932,7 @@ def validate_ssh_l4_transport_artifact(
             "startAttempted",
             "started",
             "startedAt",
+            "process",
             "preProbe",
             "postProbe",
             "exitedEarly",
@@ -3081,6 +3962,23 @@ def validate_ssh_l4_transport_artifact(
                 raise AnalysisFailure(f"{lane_label} start is outside the phase")
         elif lane_started_at is not None:
             raise AnalysisFailure(f"{lane_label} has a start time without starting")
+        process = lane.get("process")
+        if not isinstance(process, dict) or set(process) != {
+            "pid",
+            "startTimeTicks",
+        }:
+            raise AnalysisFailure(f"{lane_label} process identity is malformed")
+        if lane["started"]:
+            for field in ("pid", "startTimeTicks"):
+                raw = process.get(field)
+                if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+                    raise AnalysisFailure(
+                        f"{lane_label} process {field} is invalid"
+                    )
+        elif process != {"pid": None, "startTimeTicks": None}:
+            raise AnalysisFailure(
+                f"{lane_label} has a process identity without starting"
+            )
         lane_exit = lane.get("exitStatus")
         if lane_exit is not None and (
             isinstance(lane_exit, bool) or not isinstance(lane_exit, int)
@@ -3193,6 +4091,57 @@ def validate_ssh_l4_transport_artifact(
             )
         )
 
+    telemetry_descriptor = evidence.get("telemetry")
+    if not isinstance(telemetry_descriptor, dict) or set(telemetry_descriptor) != {
+        "formatVersion",
+        "required",
+        "intervalSeconds",
+        "controller",
+        "runpod",
+    } or (
+        telemetry_descriptor.get("formatVersion") != 2
+        or telemetry_descriptor.get("required") is not True
+        or isinstance(telemetry_descriptor.get("intervalSeconds"), bool)
+        or not isinstance(
+            telemetry_descriptor.get("intervalSeconds"), (int, float)
+        )
+        or telemetry_descriptor.get("intervalSeconds") != 1
+    ):
+        raise AnalysisFailure(f"{label}: transport telemetry descriptor is malformed")
+    telemetry_lifecycle_valid = True
+    for source_name in ("controller", "runpod"):
+        descriptor = telemetry_descriptor.get(source_name)
+        if not isinstance(descriptor, dict) or set(descriptor) != {
+            "path",
+            "sha256",
+            "sampleCount",
+            "source",
+            "capture",
+        }:
+            raise AnalysisFailure(
+                f"{label}: {source_name} telemetry descriptor is malformed"
+            )
+        capture = descriptor.get("capture")
+        if not isinstance(capture, dict):
+            raise AnalysisFailure(
+                f"{label}: {source_name} telemetry capture is malformed"
+            )
+        telemetry_lifecycle_valid = bool(
+            telemetry_lifecycle_valid
+            and capture.get("attempted") is True
+            and capture.get("validBeforeWorkload") is True
+            and capture.get("reaped") is True
+            and capture.get("persisted") is True
+            and not isinstance(capture.get("exitStatus"), bool)
+            and isinstance(capture.get("exitStatus"), int)
+            and capture.get("exitStatus") == 0
+            and isinstance(descriptor.get("sampleCount"), int)
+            and not isinstance(descriptor.get("sampleCount"), bool)
+            and descriptor["sampleCount"] >= 2
+            and isinstance(descriptor.get("sha256"), str)
+            and HEX_64.fullmatch(descriptor["sha256"]) is not None
+        )
+
     expected_passed = bool(
         all(healthy_lanes)
         and evidence["commandTerminatedForLaneFailure"] is False
@@ -3204,6 +4153,7 @@ def validate_ssh_l4_transport_artifact(
         and command_session["receipt"]["termination"]["killEscalated"] is False
         and command_session["receipt"]["termination"]["commandExitStatus"]
         == command_status
+        and telemetry_lifecycle_valid
         and failure is None
     )
     if evidence["passed"] is not expected_passed:
@@ -3219,6 +4169,13 @@ def validate_ssh_l4_transport_artifact(
         raise AnalysisFailure(
             f"{label}: SSH L4 transport failure did not use reserved status 86"
         )
+    telemetry = (
+        validate_transport_telemetry_artifacts(
+            path, evidence, label, expected_transport_output
+        )
+        if expected_passed
+        else None
+    )
     return {
         "topology": evidence["topology"],
         "startedAt": evidence["startedAt"],
@@ -3229,6 +4186,7 @@ def validate_ssh_l4_transport_artifact(
         ],
         "commandSession": command_session,
         "lanes": lanes,
+        "telemetry": telemetry,
         "failure": failure,
         "sha256": sha256_file(path),
         "passed": expected_passed,
@@ -3810,6 +4768,340 @@ def require_nonnegative_integer_metric(
             f"{entry_id}: measurement summary {metric}.count is not an integer"
         )
     return int(value)
+
+
+def completion_scenario_definitions(
+    entry: dict[str, Any], manifest: dict[str, Any]
+) -> dict[str, tuple[float, float]]:
+    definitions = scenario_definitions(entry, manifest)
+    return {
+        name: (offered, 0.5 if name == "markerPolling" else 0.0)
+        for name, offered in definitions
+    }
+
+
+def recompute_completion_progress(
+    raw_path: Path,
+    summary: dict[str, Any],
+    *,
+    entry: dict[str, Any],
+    manifest: dict[str, Any],
+    duration: str,
+) -> dict[str, Any]:
+    entry_id = entry["entryId"]
+    if not raw_path.is_file() or raw_path.is_symlink():
+        raise AnalysisFailure(
+            f"{entry_id}: raw k6 completion evidence is missing or is a symlink"
+        )
+    controls = entry.get("completionProgress")
+    if controls != COMPLETION_PROGRESS_CONTROL:
+        raise AnalysisFailure(
+            f"{entry_id}: completion progress control differs from the fixed contract"
+        )
+    configured_seconds = duration_seconds(
+        duration, f"{entry_id} completion progress duration"
+    )
+    window_seconds = float(controls["windowSeconds"])
+    startup_allowance = float(controls["startupAllowanceSeconds"])
+    minimum_fraction = float(controls["minimumCompletionFraction"])
+    start_tolerance = float(controls["startTimeToleranceSeconds"])
+    if configured_seconds < startup_allowance + window_seconds:
+        raise AnalysisFailure(
+            f"{entry_id}: phase has no full completion progress window"
+        )
+    scenarios = completion_scenario_definitions(entry, manifest)
+    declarations = 0
+    iteration_declarations = 0
+    dropped_iteration_declarations = 0
+    completion_points: list[tuple[float, float, str]] = []
+    raw_iterations = 0
+    raw_dropped = 0
+    try:
+        lines = raw_path.open(encoding="utf-8")
+    except OSError as error:
+        raise AnalysisFailure(
+            f"{entry_id}: raw k6 completion evidence cannot be opened"
+        ) from error
+    with lines:
+        for line_number, line in enumerate(lines, start=1):
+            if line.endswith("\n"):
+                line = line[:-1]
+            if not line:
+                raise AnalysisFailure(
+                    f"{entry_id}: raw k6 line {line_number} is empty"
+                )
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise AnalysisFailure(
+                    f"{entry_id}: raw k6 line {line_number} is malformed JSON"
+                ) from error
+            if not isinstance(row, dict):
+                raise AnalysisFailure(
+                    f"{entry_id}: raw k6 line {line_number} is not an object"
+                )
+            row_type = row.get("type")
+            metric = row.get("metric")
+            if row_type == "Metric" and metric == COMPLETION_PROGRESS_METRIC:
+                data = row.get("data")
+                if (
+                    not isinstance(data, dict)
+                    or data.get("name") != COMPLETION_PROGRESS_METRIC
+                    or data.get("type") != "trend"
+                ):
+                    raise AnalysisFailure(
+                        f"{entry_id}: completion metric declaration is malformed"
+                    )
+                declarations += 1
+                continue
+            if row_type == "Metric" and metric == "iterations":
+                data = row.get("data")
+                if (
+                    not isinstance(data, dict)
+                    or data.get("name") != "iterations"
+                    or data.get("type") != "counter"
+                ):
+                    raise AnalysisFailure(
+                        f"{entry_id}: iterations metric declaration is malformed"
+                    )
+                iteration_declarations += 1
+                continue
+            if row_type == "Metric" and metric == "dropped_iterations":
+                data = row.get("data")
+                if (
+                    not isinstance(data, dict)
+                    or data.get("name") != "dropped_iterations"
+                    or data.get("type") != "counter"
+                ):
+                    raise AnalysisFailure(
+                        f"{entry_id}: dropped_iterations metric declaration is malformed"
+                    )
+                dropped_iteration_declarations += 1
+                continue
+            if row_type != "Point" or metric not in {
+                COMPLETION_PROGRESS_METRIC,
+                "iterations",
+                "dropped_iterations",
+            }:
+                continue
+            data = row.get("data")
+            if not isinstance(data, dict):
+                raise AnalysisFailure(
+                    f"{entry_id}: raw k6 point {line_number} has no data object"
+                )
+            value = finite_number(
+                data.get("value"),
+                f"{entry_id}: raw k6 point {line_number} value",
+                minimum=0,
+            )
+            tags = data.get("tags")
+            scenario = tags.get("scenario") if isinstance(tags, dict) else None
+            if scenario not in scenarios:
+                raise AnalysisFailure(
+                    f"{entry_id}: raw k6 point {line_number} has an unexpected scenario"
+                )
+            epoch = timestamp_epoch(
+                data.get("time"),
+                f"{entry_id}: raw k6 point {line_number} timestamp",
+            )
+            if metric == COMPLETION_PROGRESS_METRIC:
+                completion_points.append((epoch, value, scenario))
+            elif metric == "iterations":
+                if value != 1:
+                    raise AnalysisFailure(
+                        f"{entry_id}: raw iteration point value is not 1"
+                    )
+                raw_iterations += 1
+            else:
+                if value != 1:
+                    raise AnalysisFailure(
+                        f"{entry_id}: raw dropped-iteration point value is not 1"
+                    )
+                raw_dropped += 1
+    if declarations != 1:
+        raise AnalysisFailure(
+            f"{entry_id}: raw k6 evidence must declare the completion metric once"
+        )
+    if iteration_declarations != 1:
+        raise AnalysisFailure(
+            f"{entry_id}: raw k6 evidence must declare iterations once"
+        )
+    if dropped_iteration_declarations != (1 if raw_dropped else 0):
+        raise AnalysisFailure(
+            f"{entry_id}: raw k6 evidence must declare dropped_iterations exactly when drops exist"
+        )
+    if not completion_points:
+        raise AnalysisFailure(f"{entry_id}: raw k6 accepted completions are missing")
+
+    summary_iterations = require_nonnegative_integer_metric(
+        summary, "iterations", entry_id
+    )
+    summary_dropped = require_nonnegative_integer_metric(
+        summary, "dropped_iterations", entry_id
+    )
+    summary_available = require_nonnegative_integer_metric(
+        summary, "bluemap_available_responses", entry_id
+    )
+    summary_overload = require_nonnegative_integer_metric(
+        summary, "bluemap_overload_responses", entry_id
+    )
+    accepted = summary_available + summary_overload
+    if len(completion_points) != accepted:
+        raise AnalysisFailure(
+            f"{entry_id}: raw accepted completion count differs from summary"
+        )
+    if raw_iterations != summary_iterations:
+        raise AnalysisFailure(f"{entry_id}: raw iteration count differs from summary")
+    if raw_dropped != summary_dropped:
+        raise AnalysisFailure(
+            f"{entry_id}: raw dropped-iteration count differs from summary"
+        )
+
+    inferred_origins = [
+        epoch - offset - scenarios[scenario][1]
+        for epoch, offset, scenario in completion_points
+    ]
+    origin_minimum = min(inferred_origins)
+    origin_maximum = max(inferred_origins)
+    origin_spread = origin_maximum - origin_minimum
+    if origin_spread > start_tolerance:
+        raise AnalysisFailure(
+            f"{entry_id}: completion points do not attest one scenario start time"
+        )
+    origin = statistics.median(inferred_origins)
+    completion_epochs = sorted(epoch for epoch, _, _ in completion_points)
+    for epoch, offset, scenario in completion_points:
+        if abs((epoch - origin) - (offset + scenarios[scenario][1])) > start_tolerance:
+            raise AnalysisFailure(
+                f"{entry_id}: completion offset differs from its raw timestamp"
+            )
+
+    offered_rate = sum(offered for offered, _ in scenarios.values())
+    minimum_completed = max(
+        1,
+        math.ceil(offered_rate * window_seconds * minimum_fraction),
+    )
+    evaluation_start = origin + startup_allowance
+    evaluation_end = origin + configured_seconds
+    final_window_start = evaluation_end - window_seconds
+    candidate_starts = {
+        evaluation_start,
+        final_window_start,
+        *(
+            epoch
+            for epoch in completion_epochs
+            if evaluation_start <= epoch <= final_window_start
+        ),
+    }
+    windows: list[tuple[int, float, float]] = []
+    for start in sorted(candidate_starts):
+        end = start + window_seconds
+        completed = bisect.bisect_right(
+            completion_epochs, end
+        ) - bisect.bisect_right(completion_epochs, start)
+        windows.append((completed, start, end))
+    minimum_observed, worst_start, worst_end = min(windows)
+    return {
+        "formatVersion": 1,
+        "completionMetric": COMPLETION_PROGRESS_METRIC,
+        "configuredDuration": duration,
+        "configuredDurationSeconds": configured_seconds,
+        "controls": controls,
+        "offeredIterationsPerSecond": offered_rate,
+        "minimumCompletedIterationsPerWindow": minimum_completed,
+        "windowBoundary": "(start,end]",
+        "evaluatedContinuousWindows": len(windows),
+        "acceptedCompletionPoints": len(completion_points),
+        "summaryCounts": {
+            "availableResponses": summary_available,
+            "overloadResponses": summary_overload,
+            "acceptedResponses": accepted,
+            "completedIterations": summary_iterations,
+            "droppedIterations": summary_dropped,
+        },
+        "rawCounts": {
+            "acceptedCompletionPoints": len(completion_points),
+            "completedIterations": raw_iterations,
+            "droppedIterations": raw_dropped,
+        },
+        "timing": {
+            "scenarioOriginEpochSeconds": origin,
+            "minimumInferredOriginEpochSeconds": origin_minimum,
+            "maximumInferredOriginEpochSeconds": origin_maximum,
+            "inferredOriginSpreadSeconds": origin_spread,
+            "evaluationStartOffsetSeconds": startup_allowance,
+            "evaluationEndOffsetSeconds": configured_seconds,
+        },
+        "worstWindow": {
+            "startOffsetSeconds": worst_start - origin,
+            "endOffsetSeconds": worst_end - origin,
+            "completedIterations": minimum_observed,
+        },
+        "passed": minimum_observed >= minimum_completed,
+    }
+
+
+def assert_completion_progress_artifact(
+    actual: Any,
+    expected: Any,
+    *,
+    entry_id: str,
+    path: str = "completion progress",
+) -> None:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict) or set(actual) != set(expected):
+            raise AnalysisFailure(f"{entry_id}: {path} artifact is malformed")
+        for key, value in expected.items():
+            assert_completion_progress_artifact(
+                actual[key],
+                value,
+                entry_id=entry_id,
+                path=f"{path}.{key}",
+            )
+        return
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        if not close_number(actual, expected):
+            raise AnalysisFailure(f"{entry_id}: {path} differs from raw evidence")
+        return
+    if actual != expected:
+        raise AnalysisFailure(f"{entry_id}: {path} differs from raw evidence")
+
+
+def validate_completion_progress_phase(
+    phase_dir: Path,
+    summary: dict[str, Any] | None,
+    *,
+    entry: dict[str, Any],
+    manifest: dict[str, Any],
+    duration: str,
+) -> dict[str, Any] | None:
+    raw_path = phase_dir / "raw.ndjson"
+    artifact_path = phase_dir / "completion-progress-gate.json"
+    present = (summary is not None, raw_path.is_file(), artifact_path.is_file())
+    if not any(present):
+        return None
+    if not all(present):
+        raise AnalysisFailure(
+            f"{entry['entryId']}: completion progress evidence is incomplete"
+        )
+    if artifact_path.is_symlink():
+        raise AnalysisFailure(
+            f"{entry['entryId']}: completion progress artifact is a symlink"
+        )
+    expected = recompute_completion_progress(
+        raw_path,
+        summary,
+        entry=entry,
+        manifest=manifest,
+        duration=duration,
+    )
+    artifact = load_object(artifact_path)
+    assert_completion_progress_artifact(
+        artifact,
+        expected,
+        entry_id=entry["entryId"],
+    )
+    return expected
 
 
 def workload_response_classification(
@@ -5461,6 +6753,20 @@ def analyze_case(
     raw_present = (measurement / "raw.ndjson").is_file() and (
         measurement / "raw.ndjson"
     ).stat().st_size > 0
+    warmup_completion_progress = validate_completion_progress_phase(
+        warmup,
+        warmup_summary,
+        entry=entry,
+        manifest=manifest,
+        duration=entry["warmupDuration"],
+    )
+    measurement_completion_progress = validate_completion_progress_phase(
+        measurement,
+        summary,
+        entry=entry,
+        manifest=manifest,
+        duration=entry["measurementDuration"],
+    )
     sampler_failed = (case_dir / ".sampler-failed").exists()
     endpoint_failed = (case_dir / ".endpoint-sample-failed").exists()
     failures_log_empty = empty_file(case_dir / "failures.log")
@@ -5501,6 +6807,15 @@ def analyze_case(
         if latency_artifact is None:
             raise AnalysisFailure(
                 f"{entry['entryId']}: passed result lacks a latency gate"
+            )
+        if (
+            warmup_completion_progress is None
+            or measurement_completion_progress is None
+            or warmup_completion_progress["passed"] is not True
+            or measurement_completion_progress["passed"] is not True
+        ):
+            raise AnalysisFailure(
+                f"{entry['entryId']}: passed result lacks valid completion progress"
             )
         validate_arrival_identity(
             warmup_arrival_artifact,
@@ -5606,6 +6921,10 @@ def analyze_case(
         "warmupArrival": warmup_arrival is True,
         "warmupSummary": warmup_summary is not None,
         "warmupRawOutput": warmup_raw_present,
+        "warmupCompletionProgress": bool(
+            warmup_completion_progress is not None
+            and warmup_completion_progress["passed"] is True
+        ),
         "measurementExit": measurement_exit == 0,
         "measurementArrival": measurement_arrival is True,
         "warmupResponsePolicy": warmup_classification["passed"] is True,
@@ -5621,6 +6940,10 @@ def analyze_case(
         "latency": latency_gate_satisfied,
         "measurementSummary": summary is not None,
         "measurementRawOutput": raw_present,
+        "measurementCompletionProgress": bool(
+            measurement_completion_progress is not None
+            and measurement_completion_progress["passed"] is True
+        ),
         "warmupTransportProof": (
             warmup_transport_proof["applicable"] is not True
             or warmup_transport_proof["passed"] is True
@@ -5700,6 +7023,8 @@ def analyze_case(
         and gates["measurementClassificationTrustworthy"]
         and gates["warmupArrival"]
         and gates["measurementArrival"]
+        and gates["warmupCompletionProgress"]
+        and gates["measurementCompletionProgress"]
         and gates["warmupTransportProof"]
         and gates["measurementTransportProof"]
         and gates["warmupSshL4Transport"]
@@ -5806,6 +7131,10 @@ def analyze_case(
             "classification": measurement_classification,
         },
         "warmupResponseClassification": warmup_classification,
+        "completionProgress": {
+            "warmup": warmup_completion_progress,
+            "measurement": measurement_completion_progress,
+        },
         "transportProof": {
             "mode": traffic_mode,
             "passed": (

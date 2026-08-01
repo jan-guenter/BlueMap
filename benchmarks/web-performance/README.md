@@ -670,6 +670,31 @@ resource sampler are reaped. Confirmation requires both the matching immutable
 receipt and lock absence. Missing or malformed termination proof is fatal to
 the controller and cannot become an ordinary failed case followed by more load.
 
+Every SSH-L4 phase also captures immutable one-second transport diagnostics on
+both ends of the route. On RunPod, the non-root sampler reads HAProxy's
+read-only Unix stats socket and records the backend aggregate plus all eight
+fixed lanes (`qcur`, `qmax`, `scur`, `smax`, `stot`, bytes, connection/response
+errors, retries, redispatches, and status), together with cgroup/network data
+and the kernel TCP retransmission, timeout, and SYN-retransmission counters. On
+the controller, a privilege-free procfs sampler binds the exact eight SSH child
+PID/start-time identities to exactly one `ESTABLISHED` SSH control socket that
+matches the frozen RunPod IP/SSH port; transient reverse-forward target sockets
+owned by the same client are intentionally ignored. It records per-process CPU
+ticks, control-socket queues, timer/RTO state, and the controller network
+namespace's TCP counters. The
+procfs `retrnsmt` field is an unrecovered-RTO gauge and may decrease as a socket
+recovers; only its observed maximum is summarized, never a fabricated delta.
+
+Both samplers publish an atomic, source-fingerprinted readiness receipt only
+after a complete first sample. Their NDJSON path, SHA-256, count, one-second
+interval, source identity, and lifecycle status are bound into transport v2,
+archived in `SHA256SUMS`, and independently recomputed by the offline analyzer.
+Missing or malformed data, a source or endpoint mismatch, a non-monotonic
+cumulative counter, or a sample/edge gap above five seconds fails the capture
+closed. Queueing, lane imbalance, retransmission/timeout deltas, RTO gauges,
+and SSH CPU are diagnostic observations only; the benchmark does not invent
+performance thresholds from them.
+
 The durable formal controller always selects `ssh-l4-traefik`. Before its
 80-entry schedule it runs a fixed, non-resumable six-entry preflight from the
 same RunPod source in two phases:
@@ -683,13 +708,27 @@ same RunPod source in two phases:
    measured while malformed or unmarked failures remain fatal.
 
 All six entries use p95/p99 ceilings of 5,000/10,000 ms, a 30-second warm-up,
-two-minute measurement, 15-second cool-down, exact offered-rate ratio 1.0, 256
-preallocated VUs, and 512 maximum VUs. The formal run begins only after both
+two-minute measurement, 15-second cool-down, exact offered-rate ratio 1.0, 1,024
+preallocated VUs, and 1,024 maximum VUs. Preallocating the entire configured VU
+pool prevents k6's dynamic VU initialization from amplifying a sudden
+application-latency backlog. They also use the fixed completion-progress
+control described below: five-second rolling windows, a five-second startup
+allowance, a 10% minimum completion fraction, and a 100 ms scenario-origin
+attestation tolerance. The formal run begins only after both
 the strict and overload-aware phases pass on the same load generator. The
 derived inputs and all results are preserved, and both the formal orchestrator
 and offline analyzer require the hash-bound passed report. See
 `controller/README.md` for the relay headroom gate and observability
 limitations.
+
+k6 reserves `preAllocatedVUs` per scenario, not once per process. Consequently
+the `live-viewers` profile can reserve the configured pool twice (player and
+marker scenarios), even though the marker arrival rate is lower. The formal
+RunPod sizing deliberately accommodates that bound. An exploratory Kubernetes
+generator constrained to 2 GiB should pass smaller explicit
+`--pre-allocated-vus` and `--max-vus` values instead of inheriting the formal
+1,024-per-scenario controls; such a reduced exploratory run is not formal
+evidence.
 
 The runner requires explicit names for every web Deployment, web Pod, and,
 for SQL cases, database Pod. File-storage cases omit `--database-pod`; it does
@@ -759,8 +798,12 @@ benchmarks/web-performance/tools/run_origin_case.sh \
   --trace-seed bluemap-web-performance-v1 \
   --latency-p95-ms 10000 \
   --latency-p99-ms 20000 \
-  --pre-allocated-vus 256 \
-  --max-vus 512 \
+  --pre-allocated-vus 1024 \
+  --max-vus 1024 \
+  --completion-progress-window-seconds 5 \
+  --completion-progress-startup-allowance-seconds 5 \
+  --completion-progress-minimum-fraction 0.1 \
+  --completion-progress-start-time-tolerance-seconds 0.1 \
   --accept-encoding zstd \
   --stored-encoding zstd \
   --contract-mode enhanced \
@@ -890,7 +933,8 @@ The local `artifacts/<case-id>/` directory contains:
   where those metrics exist;
 - the HTTP contract output;
 - k6 console output, summary JSON, and raw metric NDJSON for both warmup and
-  measurement in every repetition;
+  measurement in every repetition, plus the independently checked
+  `completion-progress-gate.json` for each phase;
 - phase timestamps, explicit failure messages, and a final `result.json`.
 
 Literal sensitive environment values and credential-like command arguments are
@@ -902,7 +946,8 @@ an overload response is malformed, k6 reports another failed check or
 threshold, an expected artifact is missing, a metrics sample fails, a
 configured Prometheus capture fails, the achieved iteration rate is below the
 configured fraction of offered load, k6 drops an iteration, success-only
-p95/p99 exceeds its gate, selected-node background noise exceeds its gates, a
+p95/p99 exceeds its gate, accepted completions stall below the rolling-window
+floor, selected-node background noise exceeds its gates, a
 selected container restarts, a ConfigMap changes, an EndpointSlice target
 differs at a boundary/sample, or fewer than the requested repetitions complete.
 An empty PostgreSQL series is retained as a valid result because exporter
@@ -961,6 +1006,7 @@ run one profile:
 ```shell
 k6 run \
   --summary-export artifacts/EXPERIMENT_ID/summary.json \
+  --out json=artifacts/EXPERIMENT_ID/raw.ndjson \
   -e BASE_URL=http://SERVICE.NAMESPACE.svc:PORT \
   -e MANIFEST=artifacts/EXPERIMENT_ID/manifest.json \
   -e PROFILE=map-data-mixed \
@@ -972,8 +1018,8 @@ k6 run \
   -e TRACE_SEED=bluemap-web-performance-v1 \
   -e LATENCY_P95_MS=10000 \
   -e LATENCY_P99_MS=20000 \
-  -e PRE_ALLOCATED_VUS=256 \
-  -e MAX_VUS=512 \
+  -e PRE_ALLOCATED_VUS=1024 \
+  -e MAX_VUS=1024 \
   -e EXPERIMENT_ID=EXPERIMENT_ID \
   benchmarks/web-performance/k6/bluemap.js
 ```
@@ -987,6 +1033,30 @@ counts and writes `arrival-gate.json`. It derives achieved throughput as
 completed iterations divided by the configured phase duration; k6's
 wall-clock `iterations.rate` is retained only as a diagnostic because it
 includes a slow final request or graceful tail after scheduling has stopped.
+
+Formal and preflight phases add a separate fail-closed completion-progress
+gate. k6 emits one `bluemap_valid_completion_offset_seconds` raw point when a
+request finishes as either an available response or an exact valid overload
+response. The point value is the elapsed time since
+`exec.scenario.startTime`; its NDJSON timestamp independently reconstructs the
+same scenario origin. All reconstructed origins must agree within 100 ms, and
+the raw completion, iteration, and dropped-iteration counts must exactly match
+the summary. Missing, malformed, inconsistent, or truncated timing evidence
+rejects the phase.
+
+After a fixed five-second startup allowance, every continuous five-second
+window through the nominal configured phase end must contain at least
+`max(1, ceil(total_offered_rate * 5 * 0.10))` accepted completions. Windows use
+the exact `(start,end]` boundary, and the checker evaluates every point where
+the continuous count can change rather than sampling a few aligned buckets.
+The floor is therefore 20 completions at 40 requests/second and one completion
+at one request/second. This catches a long head-of-line completion lull even
+when queued requests later drain and the aggregate arrival count looks healthy.
+It does not replace or relax the zero-`dropped_iterations`, response-policy,
+transport, latency, or load-generator-capacity gates. The runner writes the
+derived result to `completion-progress-gate.json`; the offline analyzer parses
+the raw NDJSON and recomputes the complete result instead of trusting that
+artifact.
 
 For `live-viewers-r15`, 15 player polls per second are combined with 1.5 marker
 polls per second because markers are requested once per viewer every ten

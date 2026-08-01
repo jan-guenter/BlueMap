@@ -49,7 +49,12 @@ session_output="$BLUEMAP_PHASE_SESSION_OUTPUT"
 session_temp="${session_output}.tmp.${session_id}.$$"
 runtime_dir=""
 stop_file="${resource_output}.stop"
+ready_file="${resource_output}.ready"
 sampler_pid=""
+sampler_exit_status=""
+sampler_ready=false
+sampler_ready_at=""
+workload_released_at=""
 command_pid=""
 command_pgid=""
 watcher_pid=""
@@ -177,10 +182,19 @@ stop_sampler() {
     [[ "$sampler_pid" =~ ^[1-9][0-9]*$ ]] || return 0
     : > "$stop_file"
     if wait "$sampler_pid"; then
+        sampler_exit_status=0
         sampler_reaped=true
+    else
+        sampler_exit_status=$?
+        sampler_reaped=true
+        sampler_pid=""
+        rm -f -- "$stop_file"
+        rm -f -- "$ready_file"
+        return 1
     fi
     sampler_pid=""
     rm -f -- "$stop_file"
+    rm -f -- "$ready_file"
 }
 
 # Invoked by the EXIT trap below.
@@ -262,8 +276,53 @@ fi
 lease_handshake=""
 
 rm -f -- "$stop_file"
-bluemap-runpod-sample-resources "$resource_output" "$stop_file" &
+rm -f -- "$ready_file"
+bluemap-runpod-sample-resources "$resource_output" "$stop_file" "$ready_file" &
 sampler_pid=$!
+sampler_ready_valid() {
+    [[ -f "$ready_file" && ! -L "$ready_file" &&
+        -f "$resource_output" && ! -L "$resource_output" ]] || return 1
+    local ready_source sample_source
+    ready_source="$(jq -er '
+        if (keys | sort) != ([
+            "formatVersion", "kind", "sampleCount", "sourceSha256"
+        ] | sort)
+        or .formatVersion != 1
+        or .kind != "runpod-resource-transport-ready"
+        or .sampleCount != 1
+        or (.sourceSha256 | type) != "string"
+        or (.sourceSha256 | test("^[a-f0-9]{64}$") | not)
+        then error("invalid atomic readiness receipt")
+        else .sourceSha256
+        end
+    ' "$ready_file")" || return 1
+    sample_source="$(head -n 1 -- "$resource_output" | jq -er '
+        if .formatVersion != 2
+        or .kind != "runpod-resource-transport-sample"
+        or (.sourceSha256 | type) != "string"
+        or (.sourceSha256 | test("^[a-f0-9]{64}$") | not)
+        or (.transport.haproxy.lanes | length) != 8
+        or ((.transport.tcp | keys | sort)
+            != (["retransSegs", "tcpSynRetrans", "tcpTimeouts"] | sort))
+        then error("invalid first transport sample")
+        else .sourceSha256
+        end
+    ')" || return 1
+    [[ "$ready_source" == "$sample_source" ]]
+}
+for _ in {1..100}; do
+    sampler_ready_valid && break
+    kill -0 "$sampler_pid" 2>/dev/null || break
+    sleep 0.05
+done
+if ! sampler_ready_valid || ! kill -0 "$sampler_pid" 2>/dev/null; then
+    wait "$sampler_pid" 2>/dev/null || sampler_exit_status=$?
+    sampler_pid=""
+    rm -f -- "$ready_file"
+    fail "load-generator transport/resource telemetry was not valid before workload release"
+fi
+sampler_ready=true
+sampler_ready_at="$(timestamp)"
 
 command_ready="$runtime_dir/command-ready"
 command_go="$runtime_dir/command-go"
@@ -342,6 +401,7 @@ done
     ! -e "$runtime_dir/lease-protocol-violation" ]] ||
     fail "command lease ended before workload release"
 [[ -e "$watcher_live" ]] || fail "command lease watcher was not armed"
+workload_released_at="$(timestamp)"
 : > "$command_go"
 
 while [[ "$command_pid" =~ ^[1-9][0-9]*$ ]]; do
@@ -407,8 +467,18 @@ fi
 
 if ! kill -0 "$sampler_pid" 2>/dev/null; then
     printf 'ERROR: load-generator resource sampler exited during the phase\n' >&2
+    if wait "$sampler_pid"; then
+        sampler_exit_status=0
+    else
+        sampler_exit_status=$?
+    fi
+    sampler_reaped=true
+    sampler_pid=""
+    rm -f -- "$stop_file"
+    rm -f -- "$ready_file"
 else
-    stop_sampler
+    stop_sampler ||
+        printf 'ERROR: load-generator resource sampler failed while stopping\n' >&2
 fi
 
 completed_at="$(timestamp)"
@@ -416,7 +486,13 @@ session_passed=false
 if [[ "$process_group_empty" == true &&
     "$watcher_reaped" == true &&
     "$watcher_exit_valid" == true &&
+    "$sampler_ready" == true &&
+    -n "$sampler_ready_at" &&
+    -n "$workload_released_at" &&
+    ( "$sampler_ready_at" == "$workload_released_at" ||
+      "$sampler_ready_at" < "$workload_released_at" ) &&
     "$sampler_reaped" == true &&
+    "$sampler_exit_status" == 0 &&
     "$lease_protocol_violation" == false ]]; then
     session_passed=true
 fi
@@ -426,6 +502,11 @@ jq -n \
     --arg sessionOutput "$session_output" \
     --arg startedAt "$started_at" \
     --arg completedAt "$completed_at" \
+    --arg resourceOutput "$resource_output" \
+    --arg samplerReadyAt "$sampler_ready_at" \
+    --arg workloadReleasedAt "$workload_released_at" \
+    --argjson samplerReady "$sampler_ready" \
+    --argjson samplerExitStatus "$sampler_exit_status" \
     --arg leaseObservedAt "$lease_observed_at" \
     --argjson leaseEofObserved "$lease_eof_observed" \
     --argjson leaseProtocolViolation "$lease_protocol_violation" \
@@ -441,12 +522,19 @@ jq -n \
     def nullable: if . == "" then null else . end;
     {
         kind: "runpod-command-session",
-        formatVersion: 1,
+        formatVersion: 2,
         sessionId: $sessionId,
         sessionOutput: $sessionOutput,
         activeLock: "/tmp/bluemap-runpod-active-phase.lock",
         startedAt: $startedAt,
         completedAt: $completedAt,
+        telemetry: {
+            resourceOutput: $resourceOutput,
+            readyBeforeWorkload: $samplerReady,
+            readyAt: $samplerReadyAt,
+            workloadReleasedAt: $workloadReleasedAt,
+            samplerExitStatus: $samplerExitStatus
+        },
         lease: {
             required: true,
             eofObserved: $leaseEofObserved,

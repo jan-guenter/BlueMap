@@ -33,12 +33,34 @@ FORWARD_TARGET_HOST="rke2-traefik.kube-system.svc.cluster.local"
 FORWARD_TARGET_PORT=80
 FORWARD_LISTEN_HOST="127.0.0.1"
 FORWARD_PORTS=(18081 18082 18083 18084 18085 18086 18087 18088)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONTROLLER_TRANSPORT_SAMPLER="$SCRIPT_DIR/sample_ssh_transport.py"
+RUNPOD_RESOURCE_SAMPLER_SOURCE="$SCRIPT_DIR/runpod-sample-resources.sh"
+if [[ ! -f "$RUNPOD_RESOURCE_SAMPLER_SOURCE" ]]; then
+    RUNPOD_RESOURCE_SAMPLER_SOURCE="$SCRIPT_DIR/../runpod/sample-resources.sh"
+fi
+[[ -f "$CONTROLLER_TRANSPORT_SAMPLER" &&
+    ! -L "$CONTROLLER_TRANSPORT_SAMPLER" ]] ||
+    die "controller SSH transport sampler is unavailable"
+[[ -f "$RUNPOD_RESOURCE_SAMPLER_SOURCE" &&
+    ! -L "$RUNPOD_RESOURCE_SAMPLER_SOURCE" ]] ||
+    die "RunPod resource sampler source is unavailable"
+controller_sampler_sha256="$(sha256sum -- "$CONTROLLER_TRANSPORT_SAMPLER" | awk '{print $1}')"
+runpod_sampler_sha256="$(sha256sum -- "$RUNPOD_RESOURCE_SAMPLER_SOURCE" | awk '{print $1}')"
+[[ "$controller_sampler_sha256" =~ ^[a-f0-9]{64}$ &&
+    "$runpod_sampler_sha256" =~ ^[a-f0-9]{64}$ ]] ||
+    die "transport sampler source fingerprint is malformed"
 transport_temp=""
 lane_state_temp=""
 command_session_temp=""
 command_lease_dir=""
 command_lease_fd=""
 command_pid=""
+controller_sampler_pid=""
+controller_sampler_runtime=""
+controller_sampler_output=""
+controller_sampler_ready=""
+controller_sampler_stop=""
 forward_pids=()
 
 while (($# > 0)); do
@@ -178,6 +200,10 @@ cleanup() {
         done
     fi
     terminate_child "$command_pid"
+    if [[ -n "$controller_sampler_stop" ]]; then
+        : > "$controller_sampler_stop" 2>/dev/null || true
+    fi
+    terminate_child "$controller_sampler_pid"
     for pid in "${forward_pids[@]}"; do
         terminate_child "$pid"
     done
@@ -185,6 +211,8 @@ cleanup() {
     [[ -z "$transport_temp" ]] || rm -f -- "$transport_temp"
     [[ -z "$lane_state_temp" ]] || rm -f -- "$lane_state_temp"
     [[ -z "$command_session_temp" ]] || rm -f -- "$command_session_temp"
+    [[ -z "$controller_sampler_runtime" ]] ||
+        rm -rf -- "$controller_sampler_runtime"
     if [[ -n "$command_lease_dir" ]]; then
         rm -f -- "$command_lease_dir/stdin"
         rmdir -- "$command_lease_dir" 2>/dev/null || true
@@ -250,7 +278,28 @@ remote_exec_traefik_forward() {
     [[ "$command_session_id" =~ ^[a-f0-9]{64}$ ]] ||
         die "Could not generate a unique command-session identity"
     local command_session_output="${transport_output}.command-session.${command_session_id}.json"
+    local controller_telemetry_output="${transport_output%.json}.controller.ndjson"
     validate_remote_path "$command_session_output"
+    validate_remote_path "$controller_telemetry_output"
+
+    local resource_output=""
+    local resource_output_count=0
+    local previous_argument=""
+    local current_argument
+    for current_argument in "$@"; do
+        if [[ "$previous_argument" == "--resource-output" ]]; then
+            resource_output="$current_argument"
+            ((resource_output_count += 1))
+        fi
+        previous_argument="$current_argument"
+    done
+    [[ "$resource_output_count" == 1 ]] ||
+        die "the remote phase command must contain one --resource-output path"
+    validate_remote_path "$resource_output"
+    [[ "$resource_output" != "$transport_output" &&
+        "$resource_output" != "$command_session_output" &&
+        "$resource_output" != "$controller_telemetry_output" ]] ||
+        die "transport telemetry paths must be distinct"
 
     # Outputs are immutable per invocation. Refuse an existing path before
     # opening any tunnel so a prior receipt can never be replayed as proof for
@@ -262,7 +311,8 @@ remote_exec_traefik_forward() {
         for path do
             [[ ! -e "$path" && ! -L "$path" ]]
         done
-    ' bash "$transport_output" "$command_session_output" ||
+    ' bash "$transport_output" "$command_session_output" \
+        "$controller_telemetry_output" "$resource_output" ||
         die "Transport or command-session output already exists"
 
     local phase_timeout_seconds=""
@@ -299,6 +349,18 @@ remote_exec_traefik_forward() {
     local command_session_confirmed=false
     local command_session_receipt_json=null
     local transport_passed=false
+    local controller_sampler_attempted=false
+    local controller_sampler_ready_before_command=false
+    local controller_sampler_ready_at=""
+    local controller_sampler_reaped=false
+    local controller_sampler_status=""
+    local controller_telemetry_sha256=""
+    local controller_telemetry_count=0
+    local controller_telemetry_persisted=false
+    local runpod_telemetry_sha256=""
+    local runpod_telemetry_count=0
+    local runpod_telemetry_source_sha256=""
+    local runpod_telemetry_completed=false
     local lane_failure_index=""
     local command_deadline_expired=false
     local command_deadline_epoch=""
@@ -318,6 +380,8 @@ remote_exec_traefik_forward() {
     local -a exited_early=()
     local -a exit_status=()
     local -a stopped_by_helper=()
+    local -a lane_process_id=()
+    local -a lane_process_start_ticks=()
 
     forward_pids=()
     for ((i = 0; i < lane_count; i++)); do
@@ -336,7 +400,83 @@ remote_exec_traefik_forward() {
         exited_early[i]=false
         exit_status[i]=""
         stopped_by_helper[i]=false
+        lane_process_id[i]=""
+        lane_process_start_ticks[i]=""
     done
+
+    process_start_time_ticks() {
+        local pid="$1"
+        local stat tail
+        local -a fields
+        stat="$(<"/proc/$pid/stat")" || return 1
+        tail="${stat##*) }"
+        read -r -a fields <<<"$tail"
+        [[ "${fields[19]:-}" =~ ^[1-9][0-9]*$ ]] || return 1
+        printf '%s\n' "${fields[19]}"
+    }
+
+    stop_controller_sampler() {
+        [[ "$controller_sampler_pid" =~ ^[1-9][0-9]*$ ]] || return 0
+        : > "$controller_sampler_stop"
+        for _ in {1..100}; do
+            kill -0 "$controller_sampler_pid" 2>/dev/null || break
+            sleep 0.05
+        done
+        if kill -0 "$controller_sampler_pid" 2>/dev/null; then
+            terminate_child "$controller_sampler_pid"
+            controller_sampler_status=143
+            controller_sampler_pid=""
+            controller_sampler_reaped=true
+            return 1
+        fi
+        if wait "$controller_sampler_pid"; then
+            controller_sampler_status=0
+        else
+            controller_sampler_status=$?
+        fi
+        controller_sampler_pid=""
+        controller_sampler_reaped=true
+        [[ "$controller_sampler_status" == 0 ]]
+    }
+
+    controller_sampler_ready_valid() {
+        [[ -f "$controller_sampler_ready" &&
+            ! -L "$controller_sampler_ready" &&
+            -f "$controller_sampler_output" &&
+            ! -L "$controller_sampler_output" ]] || return 1
+        local ready_source sample_source
+        ready_source="$(jq -er \
+            --arg sourceSha256 "$controller_sampler_sha256" \
+            '
+            if (keys | sort) != ([
+                "formatVersion", "kind", "sampleCount", "sourceSha256"
+            ] | sort)
+            or .formatVersion != 1
+            or .kind != "controller-ssh-transport-ready"
+            or .sampleCount != 1
+            or .sourceSha256 != $sourceSha256
+            then error("invalid controller telemetry readiness receipt")
+            else .sourceSha256
+            end
+            ' "$controller_sampler_ready")" || return 1
+        sample_source="$(head -n 1 -- "$controller_sampler_output" | jq -er \
+            --arg sourceSha256 "$controller_sampler_sha256" \
+            --arg remoteAddress "$host" \
+            --argjson remotePort "$port" \
+            '
+            if .formatVersion != 2
+            or .kind != "controller-ssh-transport-sample"
+            or .sourceSha256 != $sourceSha256
+            or (.lanes | length) != 8
+            or (all(.lanes[];
+                .socket.remote.address == $remoteAddress
+                and .socket.remote.port == $remotePort) | not)
+            then error("invalid first controller telemetry sample")
+            else .sourceSha256
+            end
+            ')" || return 1
+        [[ "$ready_source" == "$sample_source" ]]
+    }
 
     started_at="$(timestamp_utc)"
 
@@ -499,6 +639,7 @@ remote_exec_traefik_forward() {
         if ! jq -e \
             --arg sessionId "$command_session_id" \
             --arg sessionOutput "$command_session_output" \
+            --arg resourceOutput "$resource_output" \
             --arg helperStatus "$command_exit_status" \
             '
             def exact_keys($expected):
@@ -506,17 +647,29 @@ remote_exec_traefik_forward() {
             def nullable_int: if . == "" then null else tonumber end;
             exact_keys([
                 "kind", "formatVersion", "sessionId", "sessionOutput",
-                "activeLock", "startedAt", "completedAt", "lease",
+                "activeLock", "startedAt", "completedAt", "telemetry", "lease",
                 "termination", "passed"
             ])
             and .kind == "runpod-command-session"
-            and .formatVersion == 1
+            and .formatVersion == 2
             and .sessionId == $sessionId
             and .sessionOutput == $sessionOutput
             and .activeLock == "/tmp/bluemap-runpod-active-phase.lock"
             and ((.startedAt | type) == "string" and (.startedAt | length) > 0)
             and ((.completedAt | type) == "string" and (.completedAt | length) > 0)
             and .startedAt <= .completedAt
+            and (.telemetry | exact_keys([
+                "resourceOutput", "readyBeforeWorkload", "readyAt",
+                "workloadReleasedAt", "samplerExitStatus"
+            ]))
+            and .telemetry.resourceOutput == $resourceOutput
+            and .telemetry.readyBeforeWorkload == true
+            and ((.telemetry.readyAt | type) == "string"
+                and (.telemetry.readyAt | length) > 0)
+            and ((.telemetry.workloadReleasedAt | type) == "string"
+                and (.telemetry.workloadReleasedAt | length) > 0)
+            and .telemetry.readyAt <= .telemetry.workloadReleasedAt
+            and .telemetry.samplerExitStatus == 0
             and (.lease | exact_keys([
                 "required", "eofObserved", "protocolViolation", "observedAt"
             ]))
@@ -602,6 +755,13 @@ remote_exec_traefik_forward() {
         if kill -0 "${forward_pids[$i]}" 2>/dev/null; then
             started[i]=true
             lane_started_at[i]="$(timestamp_utc)"
+            lane_process_id[i]="${forward_pids[$i]}"
+            if ! lane_process_start_ticks[i]="$(
+                process_start_time_ticks "${forward_pids[$i]}"
+            )"; then
+                failure="lane-$((i + 1))-process-identity-unavailable"
+                break
+            fi
         else
             observe_lane_exit "$i"
             failure="lane-$((i + 1))-start-failed"
@@ -612,6 +772,59 @@ remote_exec_traefik_forward() {
             break
         fi
     done
+
+    if [[ -z "$failure" ]]; then
+        controller_sampler_runtime="$(mktemp -d)"
+        chmod 0700 "$controller_sampler_runtime"
+        controller_sampler_output="$controller_sampler_runtime/controller.ndjson"
+        controller_sampler_ready="$controller_sampler_runtime/ready"
+        controller_sampler_stop="$controller_sampler_runtime/stop"
+        controller_sampler_attempted=true
+        sampler_arguments=(
+            "$CONTROLLER_TRANSPORT_SAMPLER"
+            --output "$controller_sampler_output"
+            --ready-file "$controller_sampler_ready"
+            --stop-file "$controller_sampler_stop"
+            --source-sha256 "$controller_sampler_sha256"
+            --expected-remote-address "$host"
+            --expected-remote-port "$port"
+            --interval-seconds 1
+        )
+        for ((i = 0; i < lane_count; i++)); do
+            sampler_arguments+=(
+                --lane "lane-$((i + 1))=${forward_pids[$i]}"
+            )
+        done
+        # A backgrounded shell function introduces an intermediate Bash PID,
+        # which would invalidate the explicit parent identity. Launch the
+        # sampler with the same direct parent-bound wrapper as every SSH lane.
+        # shellcheck disable=SC2016
+        setpriv --pdeathsig KILL bash -ceu '
+            expected_parent="$1"
+            shift
+            [[ "$PPID" == "$expected_parent" ]] || exit 125
+            exec "$@"
+        ' bash "$helper_pid" python3 "${sampler_arguments[@]}" &
+        controller_sampler_pid=$!
+        for _ in {1..100}; do
+            controller_sampler_ready_valid && break
+            kill -0 "$controller_sampler_pid" 2>/dev/null || break
+            sleep 0.05
+        done
+        if controller_sampler_ready_valid; then
+            controller_sampler_ready_before_command=true
+            controller_sampler_ready_at="$(timestamp_utc)"
+        else
+            if wait "$controller_sampler_pid"; then
+                controller_sampler_status=0
+            else
+                controller_sampler_status=$?
+            fi
+            controller_sampler_pid=""
+            controller_sampler_reaped=true
+            failure="controller-telemetry-not-ready-before-command"
+        fi
+    fi
 
     if [[ -z "$failure" ]]; then
         # The helper itself owns the only write-capable descriptor for this
@@ -649,6 +862,11 @@ remote_exec_traefik_forward() {
                 close_command_lease "helper-deadline"
                 break
             fi
+            if ! kill -0 "$controller_sampler_pid" 2>/dev/null; then
+                failure="controller-telemetry-exited-during-command"
+                close_command_lease "transport-telemetry-failure"
+                break
+            fi
             for ((i = 0; i < lane_count; i++)); do
                 if ! kill -0 "${forward_pids[$i]}" 2>/dev/null; then
                     lane_failure_index="$i"
@@ -662,6 +880,12 @@ remote_exec_traefik_forward() {
         if [[ "$command_deadline_expired" == true ]]; then
             if ! await_command_exit; then
                 failure="command-session-helper-deadline-termination-unconfirmed"
+            fi
+        elif [[ "$failure" == "controller-telemetry-exited-during-command" ]]; then
+            if ! await_command_exit; then
+                failure="controller-telemetry-remote-termination-unconfirmed"
+                terminate_child "$command_pid"
+                command_pid=""
             fi
         elif [[ -n "$lane_failure_index" ]]; then
             observe_lane_exit "$lane_failure_index"
@@ -679,6 +903,17 @@ remote_exec_traefik_forward() {
                 close_command_lease "local-exit-timeout"
             else
                 close_command_lease "after-command-exit"
+            fi
+        fi
+
+        # Bound the controller-side capture to the workload command itself.
+        # Independent receipt confirmation and eight post-probes can take
+        # several seconds; including them would move the final sample away
+        # from the workload edge and pollute diagnostic TCP deltas with
+        # control-plane SSH connections.
+        if [[ "$controller_sampler_pid" =~ ^[1-9][0-9]*$ ]]; then
+            if ! stop_controller_sampler && [[ -z "$failure" ]]; then
+                failure="controller-telemetry-sampler-failed"
             fi
         fi
 
@@ -714,6 +949,86 @@ remote_exec_traefik_forward() {
     for ((i = 0; i < lane_count; i++)); do
         stop_lane "$i"
     done
+
+    if [[ "$controller_sampler_attempted" == true &&
+        "$controller_sampler_ready_before_command" == true &&
+        "$controller_sampler_reaped" == true &&
+        "$controller_sampler_status" == 0 &&
+        -s "$controller_sampler_output" ]]; then
+        controller_telemetry_sha256="$(
+            sha256sum -- "$controller_sampler_output" | awk '{print $1}'
+        )"
+        controller_telemetry_count="$(wc -l < "$controller_sampler_output")"
+        local controller_remote_temp="${controller_telemetry_output}.tmp.${run_id}.$$"
+        if [[ "$controller_telemetry_sha256" =~ ^[a-f0-9]{64}$ &&
+            "$controller_telemetry_count" =~ ^([2-9]|[1-9][0-9]+)$ ]] &&
+            parent_bound_exec scp \
+                "${scp_options[@]}" -- "$controller_sampler_output" \
+                "$user@$host:$controller_remote_temp" &&
+            remote_exec chmod 0600 -- "$controller_remote_temp" &&
+            remote_exec mv -- "$controller_remote_temp" \
+                "$controller_telemetry_output"; then
+            controller_telemetry_persisted=true
+        else
+            remote_exec rm -f -- "$controller_remote_temp" >/dev/null 2>&1 || true
+            [[ -n "$failure" ]] || failure="controller-telemetry-persist-failed"
+        fi
+    elif [[ "$controller_sampler_attempted" == true && -z "$failure" ]]; then
+        failure="controller-telemetry-incomplete"
+    fi
+
+    if [[ "$command_started" == true &&
+        "$command_session_confirmed" == true ]]; then
+        local runpod_metadata
+        # The command receipt proves the sampler was valid before workload
+        # release and reaped. Re-read the immutable output independently.
+        # shellcheck disable=SC2016
+        if runpod_metadata="$(remote_exec bash -ceu '
+            path="$1"
+            [[ -f "$path" && ! -L "$path" && -s "$path" ]]
+            sha="$(sha256sum -- "$path" | awk "{print \\$1}")"
+            count="$(wc -l < "$path")"
+            source="$(head -n 1 -- "$path" | jq -er .sourceSha256)"
+            [[ "$sha" =~ ^[a-f0-9]{64}$ &&
+                "$count" =~ ^([2-9]|[1-9][0-9]+)$ &&
+                "$source" =~ ^[a-f0-9]{64}$ ]]
+            jq -nc --arg sha256 "$sha" --argjson count "$count" \
+                --arg sourceSha256 "$source" \
+                "{sha256:\$sha256,count:\$count,sourceSha256:\$sourceSha256}"
+        ' bash "$resource_output")"; then
+            runpod_telemetry_sha256="$(jq -r .sha256 <<<"$runpod_metadata")"
+            runpod_telemetry_count="$(jq -r .count <<<"$runpod_metadata")"
+            runpod_telemetry_source_sha256="$(
+                jq -r .sourceSha256 <<<"$runpod_metadata"
+            )"
+            if jq -e \
+                --arg output "$resource_output" \
+                '
+                .formatVersion == 2
+                and .telemetry.resourceOutput == $output
+                and .telemetry.readyBeforeWorkload == true
+                and (.telemetry.readyAt | type) == "string"
+                and (.telemetry.workloadReleasedAt | type) == "string"
+                and .telemetry.readyAt <= .telemetry.workloadReleasedAt
+                and .telemetry.samplerExitStatus == 0
+                and .termination.samplerReaped == true
+                ' <<<"$command_session_receipt_json" >/dev/null 2>&1; then
+                runpod_telemetry_completed=true
+            else
+                [[ -n "$failure" ]] ||
+                    failure="runpod-telemetry-receipt-invalid"
+            fi
+        else
+            [[ -n "$failure" ]] || failure="runpod-telemetry-missing"
+        fi
+    fi
+
+    if [[ "$command_started" == true &&
+        ( "$controller_telemetry_persisted" != true ||
+          "$runpod_telemetry_completed" != true ) &&
+        -z "$failure" ]]; then
+        failure="transport-telemetry-incomplete"
+    fi
     [[ -n "$failure" ]] || transport_passed=true
     finished_at="$(timestamp_utc)"
 
@@ -736,6 +1051,8 @@ remote_exec_traefik_forward() {
             --argjson exitedEarly "${exited_early[i]}" \
             --arg exitStatus "${exit_status[i]}" \
             --argjson stoppedByHelper "${stopped_by_helper[i]}" \
+            --arg processId "${lane_process_id[i]}" \
+            --arg processStartTimeTicks "${lane_process_start_ticks[i]}" \
             '
             def nullable: if . == "" then null else . end;
             def nullable_int: if . == "" then null else tonumber end;
@@ -745,6 +1062,10 @@ remote_exec_traefik_forward() {
                 startAttempted: $startAttempted,
                 started: $started,
                 startedAt: ($startedAt | nullable),
+                process: {
+                    pid: ($processId | nullable_int),
+                    startTimeTicks: ($processStartTimeTicks | nullable_int)
+                },
                 preProbe: {
                     attempted: $preAttempted,
                     passed: $prePassed,
@@ -779,6 +1100,28 @@ remote_exec_traefik_forward() {
             "$command_session_confirmation_attempted" \
         --argjson commandSessionConfirmed "$command_session_confirmed" \
         --argjson commandSessionReceipt "$command_session_receipt_json" \
+        --arg controllerTelemetryOutput "$controller_telemetry_output" \
+        --arg controllerTelemetrySha256 "$controller_telemetry_sha256" \
+        --argjson controllerTelemetryCount "$controller_telemetry_count" \
+        --argjson controllerSamplerAttempted "$controller_sampler_attempted" \
+        --argjson controllerSamplerReadyBeforeCommand \
+            "$controller_sampler_ready_before_command" \
+        --arg controllerSamplerReadyAt "$controller_sampler_ready_at" \
+        --argjson controllerSamplerReaped "$controller_sampler_reaped" \
+        --arg controllerSamplerStatus "$controller_sampler_status" \
+        --argjson controllerTelemetryPersisted \
+            "$controller_telemetry_persisted" \
+        --arg controllerSamplerSha256 "$controller_sampler_sha256" \
+        --arg controllerRemoteAddress "$host" \
+        --argjson controllerRemotePort "$port" \
+        --arg runpodTelemetryOutput "$resource_output" \
+        --arg runpodTelemetrySha256 "$runpod_telemetry_sha256" \
+        --argjson runpodTelemetryCount "$runpod_telemetry_count" \
+        --arg runpodTelemetrySourceSha256 \
+            "$runpod_telemetry_source_sha256" \
+        --argjson runpodTelemetryCompleted "$runpod_telemetry_completed" \
+        --arg runpodSamplerSha256 "$runpod_sampler_sha256" \
+        --arg runpodImageDigest "$expected_image_digest" \
         --arg failure "$failure" \
         --argjson passed "$transport_passed" \
         --argjson tunnelCount "$lane_count" \
@@ -791,7 +1134,7 @@ remote_exec_traefik_forward() {
         else
             {
                 kind: "ssh-l4-traefik-transport",
-                formatVersion: 1,
+                formatVersion: 2,
                 mode: "ssh-l4-traefik",
                 startedAt: $startedAt,
                 finishedAt: $finishedAt,
@@ -821,6 +1164,67 @@ remote_exec_traefik_forward() {
                     confirmationAttempted: $commandSessionConfirmationAttempted,
                     confirmed: $commandSessionConfirmed,
                     receipt: $commandSessionReceipt
+                },
+                telemetry: {
+                    formatVersion: 2,
+                    required: true,
+                    intervalSeconds: 1,
+                    controller: {
+                        path: $controllerTelemetryOutput,
+                        sha256: ($controllerTelemetrySha256 | nullable),
+                        sampleCount: $controllerTelemetryCount,
+                        source: {
+                            kind: "controller-procfs-ssh-lanes-v2",
+                            samplerSha256: $controllerSamplerSha256,
+                            remoteAddress: $controllerRemoteAddress,
+                            remotePort: $controllerRemotePort
+                        },
+                        capture: {
+                            attempted: $controllerSamplerAttempted,
+                            validBeforeWorkload: $controllerSamplerReadyBeforeCommand,
+                            readyAt: ($controllerSamplerReadyAt | nullable),
+                            reaped: $controllerSamplerReaped,
+                            exitStatus: ($controllerSamplerStatus | nullable_int),
+                            persisted: $controllerTelemetryPersisted
+                        }
+                    },
+                    runpod: {
+                        path: $runpodTelemetryOutput,
+                        sha256: ($runpodTelemetrySha256 | nullable),
+                        sampleCount: $runpodTelemetryCount,
+                        source: {
+                            kind: "runpod-haproxy-procfs-v1",
+                            imageDigest: $runpodImageDigest,
+                            samplerSha256: $runpodSamplerSha256,
+                            statsSocket: "/run/haproxy/bluemap-stats.sock"
+                        },
+                        capture: {
+                            attempted: $commandStarted,
+                            validBeforeWorkload: (
+                                $commandSessionReceipt.telemetry.readyBeforeWorkload
+                                // false
+                            ),
+                            readyAt: (
+                                $commandSessionReceipt.telemetry.readyAt // null
+                            ),
+                            workloadReleasedAt: (
+                                $commandSessionReceipt.telemetry.workloadReleasedAt
+                                // null
+                            ),
+                            reaped: (
+                                $commandSessionReceipt.termination.samplerReaped
+                                // false
+                            ),
+                            exitStatus: (
+                                $commandSessionReceipt.telemetry.samplerExitStatus
+                                // null
+                            ),
+                            persisted: $runpodTelemetryCompleted,
+                            observedSourceSha256: (
+                                $runpodTelemetrySourceSha256 | nullable
+                            )
+                        }
+                    }
                 },
                 lanes: $lanes,
                 failure: ($failure | nullable),

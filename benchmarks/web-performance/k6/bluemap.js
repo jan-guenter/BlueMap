@@ -10,10 +10,10 @@ const RATE = positiveInteger(__ENV.RATE || "100", "RATE");
 const DURATION = __ENV.DURATION || "5m";
 const DURATION_SECONDS = durationSeconds(DURATION, "DURATION");
 const PRE_ALLOCATED_VUS = positiveInteger(
-  __ENV.PRE_ALLOCATED_VUS || "256",
+  __ENV.PRE_ALLOCATED_VUS || "1024",
   "PRE_ALLOCATED_VUS",
 );
-const MAX_VUS = positiveInteger(__ENV.MAX_VUS || "512", "MAX_VUS");
+const MAX_VUS = positiveInteger(__ENV.MAX_VUS || "1024", "MAX_VUS");
 const VIEWERS = positiveInteger(__ENV.VIEWERS || "100", "VIEWERS");
 const MARKER_INTERVAL_SECONDS = positiveInteger(
   __ENV.MARKER_INTERVAL_SECONDS || "10",
@@ -164,6 +164,9 @@ const unexpectedResponses = new Counter("bluemap_unexpected_responses");
 const availableDuration = new Trend("bluemap_available_duration", true);
 const availableTtfb = new Trend("bluemap_available_ttfb", true);
 const requestTtfb = new Trend("bluemap_ttfb", true);
+const validCompletionOffsetSeconds = new Trend(
+  "bluemap_valid_completion_offset_seconds",
+);
 const edgeCacheViolation = new Rate("bluemap_edge_cache_violation");
 const edgeMitigation = new Rate("bluemap_edge_mitigation");
 const prohibitedEdgeHeader = new Rate("bluemap_prohibited_edge_header");
@@ -673,6 +676,19 @@ function recordStatus(response, expectedStatuses, endpointClass) {
   malformedOverloadResponses.add(classifiedMalformedOverload ? 1 : 0, tags);
   transportErrors.add(failedTransport ? 1 : 0, tags);
   unexpectedResponses.add(classifiedUnexpected ? 1 : 0, tags);
+
+  if (successful || classifiedOverload) {
+    const scenarioStartTime = exec.scenario.startTime;
+    const completionOffsetSeconds = (Date.now() - scenarioStartTime) / 1000;
+    if (
+      !Number.isFinite(scenarioStartTime) ||
+      !Number.isFinite(completionOffsetSeconds) ||
+      completionOffsetSeconds < 0
+    ) {
+      throw new Error("k6 scenario completion timing is unavailable");
+    }
+    validCompletionOffsetSeconds.add(completionOffsetSeconds, tags);
+  }
 
   if (successful) {
     availableDuration.add(response.timings.duration, tags);

@@ -180,7 +180,16 @@ The four low-load entries use `overloadPolicy: forbid`; the two rate-40 stress
 entries use `allow-explicit`. Every entry has 5,000/10,000 ms p95/p99 ceilings,
 a 30-second warm-up, two-minute measurement, 15-second cool-down, zstd
 storage/accept encoding, and an exact 100% scheduled-iteration completion
-gate. This preserves strict zero-overload correctness checks and exercises
+gate. Each also preallocates the full fixed 1,024-VU pool and applies the
+hash-bound rolling completion-progress contract: after five startup seconds,
+every continuous `(start,start+5s]` window must contain at least
+`max(1, ceil(offered_rate * 5 * 0.10))` available or exact-valid-overload
+completions. k6 records scenario-relative completion offsets alongside raw
+NDJSON timestamps; both the runner and offline analyzer independently require
+one origin within 100 ms, exact raw/summary counts, and complete timing
+evidence. At rate 40 the floor is 20; at rate 1 it is one. This progress gate
+does not relax the separate zero-drop or HTTP correctness gates. This preserves
+strict zero-overload correctness checks and exercises
 overload-aware accounting before the formal stress cases measure explicitly
 attributed overload as availability and goodput. The derived matrix, generated
 six-entry schedule, provenance, checksums, per-case evidence, and final report
@@ -193,6 +202,12 @@ five minutes. The offline analyzer reconstructs the one-block schedule itself,
 semantically replays all six raw case directories and lifecycle events, and
 recomputes the relay summary from the preserved metrics samples before it
 accepts the 80-entry run.
+
+The 1,024-VU value is a per-scenario k6 reservation. In particular,
+`live-viewers` can reserve one pool for player polling and another for marker
+polling. This is intentional for the formal RunPod. A 2 GiB exploratory
+Kubernetes generator must use smaller explicit preallocated/maximum VU values
+and cannot present that reduced run as formal evidence.
 
 During preflight, the controller samples the exact admitted controller Pod
 through the existing namespaced `metrics.k8s.io` permission. A bounded

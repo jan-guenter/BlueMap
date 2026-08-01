@@ -18,8 +18,29 @@ FAKE_SAMPLER = """#!/usr/bin/env bash
 set -Eeuo pipefail
 output="$1"
 stop_file="$2"
-: >"$output"
+ready_file="$3"
+source_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+jq -nc --arg sourceSha256 "$source_sha256" '
+{
+    formatVersion: 2,
+    kind: "runpod-resource-transport-sample",
+    sourceSha256: $sourceSha256,
+    transport: {
+        tcp: {retransSegs: 0, tcpTimeouts: 0, tcpSynRetrans: 0},
+        haproxy: {lanes: [range(1; 9) | {id: "lane-\\(.)"}]}
+    }
+}' >"$output"
+ready_temp="${ready_file}.tmp.$$"
+jq -nc --arg sourceSha256 "$source_sha256" '
+{
+    formatVersion: 1,
+    kind: "runpod-resource-transport-ready",
+    sampleCount: 1,
+    sourceSha256: $sourceSha256
+}' >"$ready_temp"
+mv -- "$ready_temp" "$ready_file"
 if [[ "${FAKE_SAMPLER_FAIL:-false}" == true ]]; then
+    sleep 0.15
     exit 42
 fi
 while [[ ! -e "$stop_file" ]]; do

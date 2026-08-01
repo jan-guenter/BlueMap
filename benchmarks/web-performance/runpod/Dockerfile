@@ -12,6 +12,7 @@ RUN apk add --no-cache \
         haproxy=3.2.22-r0 \
         jq \
         openssh-server \
+        socat=1.8.1.3-r0 \
         tini \
         util-linux \
     && addgroup -g 12345 loadgen \
@@ -20,7 +21,8 @@ RUN apk add --no-cache \
     && install -d -m 0700 -o loadgen -g loadgen /home/loadgen/.ssh \
     && install -d -m 0750 -o loadgen -g loadgen /artifacts \
     && install -d -m 0755 -o root -g root /runner \
-    && install -d -m 0755 /run/sshd
+    && install -d -m 0755 /run/sshd \
+    && install -d -m 0755 -o root -g root /run/haproxy
 
 RUN [ "${#BLUEMAP_SOURCE_REVISION}" -eq 40 ] \
     && case "$BLUEMAP_SOURCE_REVISION" in \
@@ -50,6 +52,7 @@ RUN chmod 0755 \
     && chmod 0444 /etc/haproxy/haproxy.cfg \
     && test -x /sbin/tini \
     && command -v setsid >/dev/null \
+    && command -v socat >/dev/null \
     && haproxy -c -f /etc/haproxy/haproxy.cfg \
     && printf '%s\n' \
         'Port 22' \

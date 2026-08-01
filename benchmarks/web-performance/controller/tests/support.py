@@ -237,6 +237,12 @@ def schedule_entry(variant_id: str = "rust-postgresql-r3") -> dict[str, Any]:
         "latencyP99Milliseconds": 500,
         "preAllocatedVUs": 20,
         "maxVUs": 100,
+        "completionProgress": {
+            "windowSeconds": 5,
+            "startupAllowanceSeconds": 5,
+            "minimumCompletionFraction": 0.1,
+            "startTimeToleranceSeconds": 0.1,
+        },
         "acceptEncoding": "zstd",
         "storedEncoding": "zstd",
         "contractMode": "enhanced",

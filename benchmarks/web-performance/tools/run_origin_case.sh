@@ -12,6 +12,9 @@ LOADGEN_BACKEND="kubernetes"
 LOADGEN_IDENTITY=""
 LOADGEN_IDENTITY_KEY=""
 RUNPOD_LOADGEN_HELPER="$BENCHMARK_ROOT/tools/runpod_loadgen.sh"
+SSH_TRANSPORT_TELEMETRY_CHECKER="$BENCHMARK_ROOT/tools/check_ssh_transport_telemetry.py"
+CONTROLLER_TRANSPORT_SAMPLER="$BENCHMARK_ROOT/tools/sample_ssh_transport.py"
+RUNPOD_RESOURCE_SAMPLER_SOURCE="$BENCHMARK_ROOT/runpod/sample-resources.sh"
 TRAFFIC_BASE_URL=""
 TRAFFIC_MODE=""
 ORIGIN_BASE_URL=""
@@ -28,13 +31,17 @@ RATE="100"
 VIEWERS="100"
 MARKER_INTERVAL_SECONDS="10"
 MIN_ACHIEVED_RATE_RATIO="0.99"
+COMPLETION_PROGRESS_WINDOW_SECONDS="5"
+COMPLETION_PROGRESS_STARTUP_ALLOWANCE_SECONDS="5"
+COMPLETION_PROGRESS_MINIMUM_FRACTION="0.1"
+COMPLETION_PROGRESS_START_TIME_TOLERANCE_SECONDS="0.1"
 TRACE_SEED="bluemap-web-performance-v1"
 LATENCY_P95_MS="500"
 LATENCY_P99_MS="1000"
 LARGE_OBJECT_LATENCY_P95_MS=""
 LARGE_OBJECT_LATENCY_P99_MS=""
-PRE_ALLOCATED_VUS="256"
-MAX_VUS="512"
+PRE_ALLOCATED_VUS="1024"
+MAX_VUS="1024"
 ACCEPT_ENCODING="zstd"
 STORED_ENCODING="zstd"
 CONTRACT_MODE="enhanced"
@@ -128,13 +135,21 @@ Workload options:
   --viewers N                     player polls/second in live-viewers (default: 100)
   --marker-interval-seconds N     per-viewer marker interval (default: 10)
   --min-achieved-rate-ratio R     formal arrival-rate gate (default: 0.99)
+  --completion-progress-window-seconds N
+                                  rolling completion window (default: 5)
+  --completion-progress-startup-allowance-seconds N
+                                  startup excluded from lull checks (default: 5)
+  --completion-progress-minimum-fraction R
+                                  minimum offered completions/window (default: 0.1)
+  --completion-progress-start-time-tolerance-seconds N
+                                  maximum raw start-origin spread (default: 0.1)
   --trace-seed TEXT                deterministic request trace seed
   --latency-p95-ms N               formal p95 gate (default: 500)
   --latency-p99-ms N               formal p99 gate (default: 1000)
   --large-object-latency-p95-ms N  optional large-object p95 override
   --large-object-latency-p99-ms N  optional large-object p99 override
-  --pre-allocated-vus N           k6 preallocated VUs (default: 256)
-  --max-vus N                     k6 maximum VUs (default: 512)
+  --pre-allocated-vus N           k6 preallocated VUs (default: 1024)
+  --max-vus N                     k6 maximum VUs (default: 1024)
   --accept-encoding NAME          request encoding (default: zstd)
   --stored-encoding NAME          contract expectation (default: zstd)
   --contract-mode enhanced|legacy HTTP contract gate (default: enhanced)
@@ -369,6 +384,22 @@ while (($# > 0)); do
             ;;
         --min-achieved-rate-ratio)
             MIN_ACHIEVED_RATE_RATIO="${2:-}"
+            shift 2
+            ;;
+        --completion-progress-window-seconds)
+            COMPLETION_PROGRESS_WINDOW_SECONDS="${2:-}"
+            shift 2
+            ;;
+        --completion-progress-startup-allowance-seconds)
+            COMPLETION_PROGRESS_STARTUP_ALLOWANCE_SECONDS="${2:-}"
+            shift 2
+            ;;
+        --completion-progress-minimum-fraction)
+            COMPLETION_PROGRESS_MINIMUM_FRACTION="${2:-}"
+            shift 2
+            ;;
+        --completion-progress-start-time-tolerance-seconds)
+            COMPLETION_PROGRESS_START_TIME_TOLERANCE_SECONDS="${2:-}"
             shift 2
             ;;
         --trace-seed)
@@ -617,6 +648,21 @@ fi
     die "Prometheus step must not exceed 3600 seconds"
 validate_k6_duration "warmup" "$WARMUP_DURATION"
 validate_k6_duration "measurement" "$MEASUREMENT_DURATION"
+validate_positive_number \
+    "completion progress window" \
+    "$COMPLETION_PROGRESS_WINDOW_SECONDS"
+validate_positive_number \
+    "completion progress start-time tolerance" \
+    "$COMPLETION_PROGRESS_START_TIME_TOLERANCE_SECONDS"
+jq -en \
+    --arg value "$COMPLETION_PROGRESS_STARTUP_ALLOWANCE_SECONDS" \
+    '($value | tonumber) >= 0' >/dev/null 2>&1 ||
+    die "completion progress startup allowance must be nonnegative"
+jq -en \
+    --arg value "$COMPLETION_PROGRESS_MINIMUM_FRACTION" \
+    '($value | tonumber) as $number | $number > 0 and $number <= 1' \
+    >/dev/null 2>&1 ||
+    die "completion progress minimum fraction must be in (0, 1]"
 [[ "$MIN_ACHIEVED_RATE_RATIO" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] ||
     die "--min-achieved-rate-ratio must be greater than zero and at most one"
 [[ "$MIN_ACHIEVED_RATE_RATIO" != "0" &&
@@ -688,8 +734,16 @@ fi
     die "Schedule validator is unavailable"
 [[ -f "$SCRIPT_DIR/check_arrival_gate.py" ]] ||
     die "Arrival-gate helper is unavailable"
+[[ -f "$SCRIPT_DIR/check_completion_progress.py" ]] ||
+    die "Completion-progress helper is unavailable"
 [[ -f "$SCRIPT_DIR/check_load_generator_capacity.py" ]] ||
     die "Load-generator capacity helper is unavailable"
+[[ -f "$SSH_TRANSPORT_TELEMETRY_CHECKER" ]] ||
+    die "SSH transport telemetry checker is unavailable"
+[[ -f "$CONTROLLER_TRANSPORT_SAMPLER" ]] ||
+    die "Controller SSH transport sampler is unavailable"
+[[ -f "$RUNPOD_RESOURCE_SAMPLER_SOURCE" ]] ||
+    die "RunPod transport/resource sampler source is unavailable"
 [[ -f "$RUNTIME_IDENTITY_SCRIPT" ]] ||
     die "Runtime-identity helper is unavailable"
 [[ -f "$RUNPOD_LOADGEN_HELPER" ]] ||
@@ -774,7 +828,9 @@ if ((schedule_option_count == 3)); then
     for helper in \
         capture_prometheus.py \
         check_arrival_gate.py \
+        check_completion_progress.py \
         check_load_generator_capacity.py \
+        check_ssh_transport_telemetry.py \
         configmap_references.py \
         generate_schedule.py \
         runtime_identity.py \
@@ -786,6 +842,12 @@ if ((schedule_option_count == 3)); then
             "benchmarks/web-performance/tools/$helper" \
             "$SCRIPT_DIR/$helper"
     done
+    verify_committed_benchmark_file \
+        "benchmarks/web-performance/tools/sample_ssh_transport.py" \
+        "$CONTROLLER_TRANSPORT_SAMPLER"
+    verify_committed_benchmark_file \
+        "benchmarks/web-performance/runpod/sample-resources.sh" \
+        "$RUNPOD_RESOURCE_SAMPLER_SOURCE"
 
     EXPECTED_IMAGES_JSON="$(
         jq -ceS '.expectedImages' <<<"$SCHEDULE_ENTRY_JSON"
@@ -819,6 +881,10 @@ if ((schedule_option_count == 3)); then
         --argjson minimumAchievedRateRatio "$MIN_ACHIEVED_RATE_RATIO" \
         --argjson preAllocatedVUs "$PRE_ALLOCATED_VUS" \
         --argjson maxVUs "$MAX_VUS" \
+        --argjson completionProgressWindowSeconds "$COMPLETION_PROGRESS_WINDOW_SECONDS" \
+        --argjson completionProgressStartupAllowanceSeconds "$COMPLETION_PROGRESS_STARTUP_ALLOWANCE_SECONDS" \
+        --argjson completionProgressMinimumFraction "$COMPLETION_PROGRESS_MINIMUM_FRACTION" \
+        --argjson completionProgressStartTimeToleranceSeconds "$COMPLETION_PROGRESS_START_TIME_TOLERANCE_SECONDS" \
         --argjson latencyP95Milliseconds "$EFFECTIVE_LATENCY_P95_MS" \
         --argjson latencyP99Milliseconds "$EFFECTIVE_LATENCY_P99_MS" \
         '.runnerCaseId == $caseId
@@ -843,6 +909,12 @@ if ((schedule_option_count == 3)); then
          and .minimumAchievedRateRatio == $minimumAchievedRateRatio
          and .preAllocatedVUs == $preAllocatedVUs
          and .maxVUs == $maxVUs
+         and .completionProgress == {
+             windowSeconds: $completionProgressWindowSeconds,
+             startupAllowanceSeconds: $completionProgressStartupAllowanceSeconds,
+             minimumCompletionFraction: $completionProgressMinimumFraction,
+             startTimeToleranceSeconds: $completionProgressStartTimeToleranceSeconds
+         }
          and .latencyP95Milliseconds == $latencyP95Milliseconds
          and .latencyP99Milliseconds == $latencyP99Milliseconds' \
         <<<"$SCHEDULE_ENTRY_JSON" >/dev/null ||
@@ -2218,6 +2290,36 @@ validate_arrival_gate() {
     "$PYTHON_BIN" "$SCRIPT_DIR/check_arrival_gate.py" "${arguments[@]}"
 }
 
+validate_completion_progress_gate() {
+    local raw="$1"
+    local summary="$2"
+    local destination="$3"
+    local duration="$4"
+    local -a arguments=(
+        "$raw"
+        "$summary"
+        --output "$destination"
+        --profile "$PROFILE"
+        --rate "$RATE"
+        --viewers "$VIEWERS"
+        --marker-interval-seconds "$MARKER_INTERVAL_SECONDS"
+        --duration "$duration"
+        --window-seconds "$COMPLETION_PROGRESS_WINDOW_SECONDS"
+        --startup-allowance-seconds \
+        "$COMPLETION_PROGRESS_STARTUP_ALLOWANCE_SECONDS"
+        --minimum-completion-fraction \
+        "$COMPLETION_PROGRESS_MINIMUM_FRACTION"
+        --start-time-tolerance-seconds \
+        "$COMPLETION_PROGRESS_START_TIME_TOLERANCE_SECONDS"
+    )
+    if [[ "$PROFILE" == "live-viewers" ]] &&
+        (($(jq '.markers | length' "$MANIFEST") > 0)); then
+        arguments+=(--markers-present)
+    fi
+    "$PYTHON_BIN" "$SCRIPT_DIR/check_completion_progress.py" \
+        "${arguments[@]}"
+}
+
 validate_response_policy_gate() {
     local summary="$1"
     local destination="$2"
@@ -2388,6 +2490,9 @@ validate_ssh_l4_transport_evidence() {
     jq -e \
         --argjson helperStatus "$helper_status" \
         --arg expectedTransportOutput "$expected_transport_output" \
+        --arg expectedRemoteAddress "$(jq -r '.runpod.publicIp' "$LOADGEN_IDENTITY")" \
+        --argjson expectedRemotePort "$(jq -r '.ssh.port' "$LOADGEN_IDENTITY")" \
+        --arg expectedImageDigest "$(jq -r '.runpod.imageDigest' "$LOADGEN_IDENTITY")" \
         '
         def exact_keys($expected):
             (keys | sort) == ($expected | sort);
@@ -2422,7 +2527,7 @@ validate_ssh_l4_transport_evidence() {
         def lane($id; $port; $transportStarted; $transportFinished):
             exact_keys([
                 "id", "listenPort", "startAttempted", "started", "startedAt",
-                "preProbe", "postProbe", "exitedEarly", "exitStatus",
+                "process", "preProbe", "postProbe", "exitedEarly", "exitStatus",
                 "stoppedByHelper"
             ])
             and .id == $id
@@ -2435,6 +2540,19 @@ validate_ssh_l4_transport_evidence() {
                     and $transportStarted <= .startedAt
                     and .startedAt <= $transportFinished
                 else .startedAt == null
+                end
+            )
+            and (.process | exact_keys(["pid", "startTimeTicks"]))
+            and (
+                if .started
+                then ((.process.pid | type) == "number"
+                    and .process.pid == (.process.pid | floor)
+                    and .process.pid > 0)
+                    and ((.process.startTimeTicks | type) == "number"
+                        and .process.startTimeTicks
+                            == (.process.startTimeTicks | floor)
+                        and .process.startTimeTicks > 0)
+                else .process == {pid: null, startTimeTicks: null}
                 end
             )
             and (.preProbe | probe($transportStarted; $transportFinished))
@@ -2476,6 +2594,9 @@ validate_ssh_l4_transport_evidence() {
             .startAttempted == true
             and .started == true
             and ((.startedAt | type) == "string" and (.startedAt | length) > 0)
+            and ((.process.pid | type) == "number" and .process.pid > 0)
+            and ((.process.startTimeTicks | type) == "number"
+                and .process.startTimeTicks > 0)
             and .preProbe == {
                 attempted: true,
                 passed: true,
@@ -2501,11 +2622,11 @@ validate_ssh_l4_transport_evidence() {
         def command_receipt($id; $output):
             exact_keys([
                 "kind", "formatVersion", "sessionId", "sessionOutput",
-                "activeLock", "startedAt", "completedAt", "lease",
+                "activeLock", "startedAt", "completedAt", "telemetry", "lease",
                 "termination", "passed"
             ])
             and .kind == "runpod-command-session"
-            and .formatVersion == 1
+            and .formatVersion == 2
             and .sessionId == $id
             and .sessionOutput == $output
             and .activeLock == "/tmp/bluemap-runpod-active-phase.lock"
@@ -2514,6 +2635,19 @@ validate_ssh_l4_transport_evidence() {
             and (.startedAt | timestamp)
             and (.completedAt | timestamp)
             and .startedAt <= .completedAt
+            and (.telemetry | exact_keys([
+                "resourceOutput", "readyBeforeWorkload", "readyAt",
+                "workloadReleasedAt", "samplerExitStatus"
+            ]))
+            and (.telemetry.resourceOutput | type) == "string"
+            and (.telemetry.resourceOutput | startswith("/artifacts/"))
+            and .telemetry.readyBeforeWorkload == true
+            and (.telemetry.readyAt | timestamp)
+            and (.telemetry.workloadReleasedAt | timestamp)
+            and .startedAt <= .telemetry.readyAt
+            and .telemetry.readyAt <= .telemetry.workloadReleasedAt
+            and .telemetry.workloadReleasedAt <= .completedAt
+            and .telemetry.samplerExitStatus == 0
             and (.lease | exact_keys([
                 "required", "eofObserved", "protocolViolation", "observedAt"
             ]))
@@ -2577,7 +2711,8 @@ validate_ssh_l4_transport_evidence() {
                     and (.leaseCloseReason == "after-command-exit"
                         or .leaseCloseReason == "lane-failure"
                         or .leaseCloseReason == "helper-deadline"
-                        or .leaseCloseReason == "local-exit-timeout")
+                        or .leaseCloseReason == "local-exit-timeout"
+                        or .leaseCloseReason == "transport-telemetry-failure")
                     and .confirmationAttempted == true
                     and (
                         if .confirmed
@@ -2602,15 +2737,92 @@ validate_ssh_l4_transport_evidence() {
                     and .receipt == null
                 end
             );
+        def sha256:
+            type == "string" and test("^[a-f0-9]{64}$");
+        def nullable_sha256:
+            . == null or sha256;
+        def telemetry_descriptor($name; $root):
+            exact_keys(["path", "sha256", "sampleCount", "source", "capture"])
+            and (.path | type) == "string"
+            and (.sha256 | nullable_sha256)
+            and ((.sampleCount | type) == "number"
+                and .sampleCount == (.sampleCount | floor)
+                and .sampleCount >= 0)
+            and (.source | type) == "object"
+            and (.source.samplerSha256 | sha256)
+            and (.capture | type) == "object"
+            and (.capture.attempted | type) == "boolean"
+            and (.capture.validBeforeWorkload | type) == "boolean"
+            and (.capture.reaped | type) == "boolean"
+            and (.capture.persisted | type) == "boolean"
+            and (.capture.exitStatus == null or (
+                (.capture.exitStatus | type) == "number"
+                and .capture.exitStatus == (.capture.exitStatus | floor)
+            ))
+            and (
+                if $name == "controller"
+                then .path == (
+                        $expectedTransportOutput
+                        | sub("ssh-l4-transport\\.json$";
+                            "ssh-l4-transport.controller.ndjson")
+                    )
+                    and (.source | exact_keys([
+                        "kind", "samplerSha256", "remoteAddress", "remotePort"
+                    ]))
+                    and .source.kind == "controller-procfs-ssh-lanes-v2"
+                    and .source.remoteAddress == $expectedRemoteAddress
+                    and .source.remotePort == $expectedRemotePort
+                    and (.capture | exact_keys([
+                        "attempted", "validBeforeWorkload", "readyAt",
+                        "reaped", "exitStatus", "persisted"
+                    ]))
+                else .path == (
+                        $expectedTransportOutput
+                        | sub("ssh-l4-transport\\.json$";
+                            "load-generator-resources.ndjson")
+                    )
+                    and (.source | exact_keys([
+                        "kind", "imageDigest", "samplerSha256", "statsSocket"
+                    ]))
+                    and .source.kind == "runpod-haproxy-procfs-v1"
+                    and (.source.imageDigest | type) == "string"
+                    and .source.imageDigest == $expectedImageDigest
+                    and .source.statsSocket
+                        == "/run/haproxy/bluemap-stats.sock"
+                    and (.capture | exact_keys([
+                        "attempted", "validBeforeWorkload", "readyAt",
+                        "workloadReleasedAt", "reaped", "exitStatus",
+                        "persisted", "observedSourceSha256"
+                    ]))
+                    and (.capture.observedSourceSha256 | nullable_sha256)
+                end
+            )
+            and (
+                if .capture.validBeforeWorkload
+                then (.capture.readyAt | timestamp)
+                else .capture.readyAt == null
+                end
+            )
+            and (
+                if .capture.persisted
+                then (.sha256 | sha256)
+                    and .sampleCount >= 2
+                    and .capture.attempted
+                    and .capture.validBeforeWorkload
+                    and .capture.reaped
+                    and .capture.exitStatus == 0
+                else true
+                end
+            );
         . as $root
         |
         exact_keys([
             "formatVersion", "kind", "mode", "startedAt", "finishedAt",
             "topology", "allRequired", "commandExitStatus",
-            "commandTerminatedForLaneFailure", "commandSession", "lanes",
+            "commandTerminatedForLaneFailure", "commandSession", "telemetry", "lanes",
             "failure", "passed"
         ])
-        and .formatVersion == 1
+        and .formatVersion == 2
         and .kind == "ssh-l4-traefik-transport"
         and .mode == "ssh-l4-traefik"
         and (.startedAt | timestamp)
@@ -2631,6 +2843,15 @@ validate_ssh_l4_transport_evidence() {
         ))
         and (.commandTerminatedForLaneFailure | type) == "boolean"
         and (.commandSession | command_session($root))
+        and (.telemetry | exact_keys([
+            "formatVersion", "required", "intervalSeconds",
+            "controller", "runpod"
+        ]))
+        and .telemetry.formatVersion == 2
+        and .telemetry.required == true
+        and .telemetry.intervalSeconds == 1
+        and (.telemetry.controller | telemetry_descriptor("controller"; $root))
+        and (.telemetry.runpod | telemetry_descriptor("runpod"; $root))
         and (.lanes | type) == "array"
         and (.lanes | length) == 8
         and all(
@@ -2657,6 +2878,8 @@ validate_ssh_l4_transport_evidence() {
             and .commandSession.receipt.termination.killEscalated == false
             and .commandSession.receipt.termination.commandExitStatus
                 == .commandExitStatus
+            and .telemetry.controller.capture.persisted == true
+            and .telemetry.runpod.capture.persisted == true
             and all(
                 .lanes[];
                 healthy_lane($root.startedAt; $root.finishedAt)
@@ -2684,6 +2907,7 @@ run_k6_phase() {
     local remote_raw="$remote_dir/raw.ndjson"
     local remote_resources="$remote_dir/load-generator-resources.ndjson"
     local remote_transport="$remote_dir/ssh-l4-transport.json"
+    local remote_controller_transport="$remote_dir/ssh-l4-transport.controller.ndjson"
     local phase_timeout_seconds
     local -a phase_command
     mkdir -- "$local_dir" || return 1
@@ -2819,6 +3043,28 @@ print(math.ceil(value * factor) + 90)
         ' "$local_dir/ssh-l4-transport.json" >/dev/null; then
         die "Repetition $repetition $phase: remote process-group termination is unconfirmed"
     fi
+    if [[ "$LOADGEN_BACKEND" == "runpod-ssh" &&
+        "$TRAFFIC_MODE" == "ssh-l4-traefik" ]] &&
+        jq -e '.passed == true' "$local_dir/ssh-l4-transport.json" >/dev/null; then
+        if ! copy_remote_file \
+            "$remote_controller_transport" \
+            "$local_dir/ssh-l4-transport.controller.ndjson"; then
+            die "Repetition $repetition $phase: controller SSH transport telemetry is missing"
+        elif ! "$PYTHON_BIN" "$SSH_TRANSPORT_TELEMETRY_CHECKER" \
+            "$local_dir/ssh-l4-transport.json" \
+            "$local_dir/ssh-l4-transport.controller.ndjson" \
+            "$local_dir/load-generator-resources.ndjson" \
+            --controller-sampler "$CONTROLLER_TRANSPORT_SAMPLER" \
+            --runpod-sampler "$RUNPOD_RESOURCE_SAMPLER_SOURCE" \
+            --expected-remote-address \
+            "$(jq -r '.runpod.publicIp' "$LOADGEN_IDENTITY")" \
+            --expected-remote-port "$(jq -r '.ssh.port' "$LOADGEN_IDENTITY")" \
+            --expected-runpod-image-digest \
+            "$(jq -r '.runpod.imageDigest' "$LOADGEN_IDENTITY")" \
+            --output "$local_dir/ssh-l4-transport-telemetry.json"; then
+            die "Repetition $repetition $phase: SSH transport telemetry failed capture validation"
+        fi
+    fi
     if [[ -s "$local_dir/summary.json" ]] &&
         ! validate_arrival_gate \
             "$local_dir/summary.json" \
@@ -2826,6 +3072,16 @@ print(math.ceil(value * factor) + 90)
             "$duration"; then
         record_failure \
             "Repetition $repetition $phase: scheduled/completed or dropped-iteration gate failed"
+        artifact_failure=1
+    fi
+    if [[ -s "$local_dir/summary.json" && -s "$local_dir/raw.ndjson" ]] &&
+        ! validate_completion_progress_gate \
+            "$local_dir/raw.ndjson" \
+            "$local_dir/summary.json" \
+            "$local_dir/completion-progress-gate.json" \
+            "$duration"; then
+        record_failure \
+            "Repetition $repetition $phase: rolling accepted-completion progress gate failed"
         artifact_failure=1
     fi
     if [[ -s "$local_dir/summary.json" ]] &&
@@ -2946,6 +3202,10 @@ write_workload_metadata() {
         --argjson preAllocatedVUs "$PRE_ALLOCATED_VUS" \
         --argjson maxVUs "$MAX_VUS" \
         --argjson minimumAchievedRateRatio "$MIN_ACHIEVED_RATE_RATIO" \
+        --argjson completionProgressWindowSeconds "$COMPLETION_PROGRESS_WINDOW_SECONDS" \
+        --argjson completionProgressStartupAllowanceSeconds "$COMPLETION_PROGRESS_STARTUP_ALLOWANCE_SECONDS" \
+        --argjson completionProgressMinimumFraction "$COMPLETION_PROGRESS_MINIMUM_FRACTION" \
+        --argjson completionProgressStartTimeToleranceSeconds "$COMPLETION_PROGRESS_START_TIME_TOLERANCE_SECONDS" \
         --arg traceSeed "$TRACE_SEED" \
         --argjson latencyP95Milliseconds "$LATENCY_P95_MS" \
         --argjson latencyP99Milliseconds "$LATENCY_P99_MS" \
@@ -2990,7 +3250,11 @@ write_workload_metadata() {
         --arg configSanitizerSha256 "$(sha256sum "$SCRIPT_DIR/sanitize_configmap.py" | awk '{print $1}')" \
         --arg configMapReferencesSha256 "$(sha256sum "$SCRIPT_DIR/configmap_references.py" | awk '{print $1}')" \
         --arg arrivalGateSha256 "$(sha256sum "$SCRIPT_DIR/check_arrival_gate.py" | awk '{print $1}')" \
+        --arg completionProgressGateSha256 "$(sha256sum "$SCRIPT_DIR/check_completion_progress.py" | awk '{print $1}')" \
         --arg loadGeneratorCapacitySha256 "$(sha256sum "$SCRIPT_DIR/check_load_generator_capacity.py" | awk '{print $1}')" \
+        --arg sshTransportTelemetryCheckerSha256 "$(sha256sum "$SSH_TRANSPORT_TELEMETRY_CHECKER" | awk '{print $1}')" \
+        --arg controllerTransportSamplerSha256 "$(sha256sum "$CONTROLLER_TRANSPORT_SAMPLER" | awk '{print $1}')" \
+        --arg runpodResourceSamplerSha256 "$(sha256sum "$RUNPOD_RESOURCE_SAMPLER_SOURCE" | awk '{print $1}')" \
         --arg slowReaderSha256 "$(sha256sum "$SCRIPT_DIR/slow_reader.py" | awk '{print $1}')" \
         --arg runpodLoadgenHelperSha256 "$(sha256sum "$RUNPOD_LOADGEN_HELPER" | awk '{print $1}')" \
         --arg runtimeIdentitySha256 "$(sha256sum "$RUNTIME_IDENTITY_SCRIPT" | awk '{print $1}')" \
@@ -3115,6 +3379,12 @@ write_workload_metadata() {
                 preAllocatedVUs: $preAllocatedVUs,
                 maxVUs: $maxVUs,
                 minimumAchievedRateRatio: $minimumAchievedRateRatio,
+                completionProgress: {
+                    windowSeconds: $completionProgressWindowSeconds,
+                    startupAllowanceSeconds: $completionProgressStartupAllowanceSeconds,
+                    minimumCompletionFraction: $completionProgressMinimumFraction,
+                    startTimeToleranceSeconds: $completionProgressStartTimeToleranceSeconds
+                },
                 traceSeed: $traceSeed,
                 latencyGates: {
                     p95Milliseconds: $latencyP95Milliseconds,
@@ -3232,7 +3502,11 @@ write_workload_metadata() {
                 configSanitizerSha256: $configSanitizerSha256,
                 configMapReferencesSha256: $configMapReferencesSha256,
                 arrivalGateSha256: $arrivalGateSha256,
+                completionProgressGateSha256: $completionProgressGateSha256,
                 loadGeneratorCapacitySha256: $loadGeneratorCapacitySha256,
+                sshTransportTelemetryCheckerSha256: $sshTransportTelemetryCheckerSha256,
+                controllerTransportSamplerSha256: $controllerTransportSamplerSha256,
+                runpodResourceSamplerSha256: $runpodResourceSamplerSha256,
                 slowReaderSha256: $slowReaderSha256,
                 runpodLoadgenHelperSha256: $runpodLoadgenHelperSha256,
                 runtimeIdentitySha256: $runtimeIdentitySha256
@@ -3354,8 +3628,16 @@ cp -- "$SCRIPT_DIR/capture_prometheus.py" \
     "$ARTIFACT_DIR/inputs/capture_prometheus.py"
 cp -- "$SCRIPT_DIR/check_arrival_gate.py" \
     "$ARTIFACT_DIR/inputs/check_arrival_gate.py"
+cp -- "$SCRIPT_DIR/check_completion_progress.py" \
+    "$ARTIFACT_DIR/inputs/check_completion_progress.py"
 cp -- "$SCRIPT_DIR/check_load_generator_capacity.py" \
     "$ARTIFACT_DIR/inputs/check_load_generator_capacity.py"
+cp -- "$SSH_TRANSPORT_TELEMETRY_CHECKER" \
+    "$ARTIFACT_DIR/inputs/check_ssh_transport_telemetry.py"
+cp -- "$CONTROLLER_TRANSPORT_SAMPLER" \
+    "$ARTIFACT_DIR/inputs/sample_ssh_transport.py"
+cp -- "$RUNPOD_RESOURCE_SAMPLER_SOURCE" \
+    "$ARTIFACT_DIR/inputs/runpod-sample-resources.sh"
 cp -- "$SCRIPT_DIR/slow_reader.py" \
     "$ARTIFACT_DIR/inputs/slow_reader.py"
 cp -- "$SCRIPT_DIR/generate_schedule.py" \
@@ -3387,7 +3669,11 @@ write_workload_metadata
         configmap_references.py \
         capture_prometheus.py \
         check_arrival_gate.py \
+        check_completion_progress.py \
         check_load_generator_capacity.py \
+        check_ssh_transport_telemetry.py \
+        sample_ssh_transport.py \
+        runpod-sample-resources.sh \
         slow_reader.py \
         generate_schedule.py \
         runtime_identity.py \

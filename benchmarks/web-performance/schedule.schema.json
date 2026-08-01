@@ -134,6 +134,7 @@
         "minimumAchievedRateRatio",
         "preAllocatedVUs",
         "maxVUs",
+        "completionProgress",
         "latencyP95Milliseconds",
         "latencyP99Milliseconds"
       ],
@@ -290,11 +291,43 @@
           "type": "integer",
           "minimum": 1
         },
+        "completionProgress": {
+          "$ref": "#/$defs/completionProgress"
+        },
         "latencyP95Milliseconds": {
           "type": "number",
           "exclusiveMinimum": 0
         },
         "latencyP99Milliseconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "completionProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "windowSeconds",
+        "startupAllowanceSeconds",
+        "minimumCompletionFraction",
+        "startTimeToleranceSeconds"
+      ],
+      "properties": {
+        "windowSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "startupAllowanceSeconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimumCompletionFraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "startTimeToleranceSeconds": {
           "type": "number",
           "exclusiveMinimum": 0
         }

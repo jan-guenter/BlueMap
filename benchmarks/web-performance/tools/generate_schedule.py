@@ -20,6 +20,7 @@ from runtime_identity import (
 
 
 ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DURATION = re.compile(r"^([1-9][0-9]*)(ms|s|m|h)$")
 PROFILES = {
     "static",
     "hot-tile",
@@ -34,6 +35,24 @@ PROFILES = {
     "map-data-mixed",
     "browser-mixed",
 }
+COMPLETION_PROGRESS_CONTROL = {
+    "windowSeconds": 5,
+    "startupAllowanceSeconds": 5,
+    "minimumCompletionFraction": 0.1,
+    "startTimeToleranceSeconds": 0.1,
+}
+
+
+def duration_seconds(value: str) -> float:
+    match = DURATION.fullmatch(value)
+    if match is None:
+        raise ValueError("invalid k6 duration")
+    return int(match.group(1)) * {
+        "ms": 0.001,
+        "s": 1.0,
+        "m": 60.0,
+        "h": 3600.0,
+    }[match.group(2)]
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,6 +125,50 @@ def validate_matrix(matrix: dict[str, Any]) -> None:
     ratio = controls.get("minimumAchievedRateRatio")
     if not isinstance(ratio, (int, float)) or not 0 < ratio <= 1:
         raise ValueError("matrix minimumAchievedRateRatio must be in (0, 1]")
+    progress = controls.get("completionProgress")
+    if not isinstance(progress, dict) or set(progress) != {
+        "windowSeconds",
+        "startupAllowanceSeconds",
+        "minimumCompletionFraction",
+        "startTimeToleranceSeconds",
+    }:
+        raise ValueError("matrix completionProgress control is malformed")
+    for key in (
+        "windowSeconds",
+        "startTimeToleranceSeconds",
+    ):
+        value = progress.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value <= 0
+        ):
+            raise ValueError(f"matrix completionProgress.{key} must be positive")
+    allowance = progress.get("startupAllowanceSeconds")
+    if (
+        isinstance(allowance, bool)
+        or not isinstance(allowance, (int, float))
+        or allowance < 0
+    ):
+        raise ValueError(
+            "matrix completionProgress.startupAllowanceSeconds must be nonnegative"
+        )
+    fraction = progress.get("minimumCompletionFraction")
+    if (
+        isinstance(fraction, bool)
+        or not isinstance(fraction, (int, float))
+        or not 0 < fraction <= 1
+    ):
+        raise ValueError(
+            "matrix completionProgress.minimumCompletionFraction must be in (0, 1]"
+        )
+    if progress != COMPLETION_PROGRESS_CONTROL:
+        raise ValueError("matrix completionProgress differs from the fixed contract")
+    for key in ("warmupDuration", "measurementDuration"):
+        if duration_seconds(controls[key]) < allowance + progress["windowSeconds"]:
+            raise ValueError(
+                f"matrix controls.{key} has no full completion progress window"
+            )
 
     variants = matrix.get("variants")
     cases = matrix.get("cases")
@@ -273,6 +336,9 @@ def build_schedule(
                         ],
                         "preAllocatedVUs": matrix["controls"]["preAllocatedVUs"],
                         "maxVUs": matrix["controls"]["maxVUs"],
+                        "completionProgress": matrix["controls"][
+                            "completionProgress"
+                        ],
                         "latencyP95Milliseconds": case[
                             "latencyP95Milliseconds"
                         ],

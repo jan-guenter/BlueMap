@@ -45,6 +45,7 @@ class RunPodImageFanoutTests(unittest.TestCase):
         dockerfile = (RUNPOD_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("haproxy=3.2.22-r0", dockerfile)
+        self.assertIn("socat=1.8.1.3-r0", dockerfile)
         self.assertIn("util-linux", dockerfile)
         self.assertIn("tini", dockerfile)
         self.assertIn("test -x /sbin/tini", dockerfile)
@@ -68,6 +69,23 @@ class RunPodImageFanoutTests(unittest.TestCase):
             "haproxy -c -f /etc/haproxy/haproxy.cfg"
         )
         self.assertGreater(validation_position, copy_position)
+
+    def test_unprivileged_read_only_stats_socket_is_fixed(self) -> None:
+        config = (RUNPOD_ROOT / "haproxy.cfg").read_text(encoding="utf-8")
+        sampler = (RUNPOD_ROOT / "sample-resources.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "stats socket /run/haproxy/bluemap-stats.sock "
+            "user loadgen group loadgen mode 0660 level user",
+            config,
+        )
+        self.assertIn(
+            "UNIX-CONNECT:$HAPROXY_STATS_SOCKET", sampler
+        )
+        self.assertIn("show stat", sampler)
+        self.assertNotIn("level admin", config)
 
     def test_sshd_allows_only_lane_ports_not_haproxy_frontend(self) -> None:
         dockerfile = (RUNPOD_ROOT / "Dockerfile").read_text(encoding="utf-8")

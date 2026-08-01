@@ -12,6 +12,7 @@ import tempfile
 import threading
 import unittest
 from collections import Counter
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -26,6 +27,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 import capture_prometheus
 import check_arrival_gate
+import check_completion_progress
 import check_load_generator_capacity
 import configmap_references
 import generate_schedule
@@ -1437,6 +1439,7 @@ class OriginRunnerStaticTests(unittest.TestCase):
         runner = (TOOLS_DIR / "run_origin_case.sh").read_text(encoding="utf-8")
         self.assertIn("configmap_references.py", runner)
         self.assertIn("check_arrival_gate.py", runner)
+        self.assertIn("check_completion_progress.py", runner)
         self.assertIn("DESIRED_WEB_REPLICA_COUNT", runner)
         self.assertIn("verify_formal_runtime_identity", runner)
         self.assertIn("runtime_identity.py", runner)
@@ -1483,6 +1486,12 @@ class OriginRunnerStaticTests(unittest.TestCase):
         invalid_policy["cases"][0]["overloadPolicy"] = "ignore"
         with self.assertRaisesRegex(ValueError, "invalid overloadPolicy"):
             generate_schedule.validate_matrix(invalid_policy)
+        invalid_progress = json.loads(json.dumps(matrix))
+        invalid_progress["controls"]["completionProgress"][
+            "minimumCompletionFraction"
+        ] = 0.09
+        with self.assertRaisesRegex(ValueError, "fixed contract"):
+            generate_schedule.validate_matrix(invalid_progress)
         first = generate_schedule.build_schedule(matrix, digest)
         second = generate_schedule.build_schedule(matrix, digest)
 
@@ -1493,6 +1502,16 @@ class OriginRunnerStaticTests(unittest.TestCase):
             matrix["benchmarkGitRevision"],
         )
         generate_schedule.validate_schedule(matrix, digest, first)
+        self.assertEqual(len(first["entries"]), 80)
+        self.assertTrue(
+            all(
+                entry["preAllocatedVUs"] == 1024
+                and entry["maxVUs"] == 1024
+                and entry["completionProgress"]
+                == generate_schedule.COMPLETION_PROGRESS_CONTROL
+                for entry in first["entries"]
+            )
+        )
         counts = {}
         for entry in first["entries"]:
             key = (
@@ -1675,6 +1694,14 @@ class OriginRunnerStaticTests(unittest.TestCase):
             "expectedSanitizedRuntimeSpecSha256",
             schedule_schema["$defs"]["entry"]["required"],
         )
+        self.assertIn(
+            "completionProgress",
+            matrix_schema["$defs"]["controls"]["required"],
+        )
+        self.assertIn(
+            "completionProgress",
+            schedule_schema["$defs"]["entry"]["required"],
+        )
         self.assertNotRegex(
             "REPLACE_WITH_40_CHARACTER_BENCHMARK_GIT_REVISION",
             matrix_schema["$defs"]["gitRevision"]["pattern"],
@@ -1698,6 +1725,8 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn('"iterations{scenario:playerPolling}"', script)
         self.assertIn('"iterations{scenario:markerPolling}"', script)
         self.assertIn("minimumIterationCountThreshold", script)
+        self.assertIn("bluemap_valid_completion_offset_seconds", script)
+        self.assertIn("exec.scenario.startTime", script)
         self.assertNotRegex(script, r"iterations\s*:\s*\[\s*`rate>=")
         self.assertNotIn("Math.random()", script)
         self.assertNotIn("data_received{traffic:workload}", script)
@@ -1839,6 +1868,10 @@ class OriginRunnerStaticTests(unittest.TestCase):
         self.assertIn("processGroupEmpty", phase)
         self.assertIn("lease_eof_observed", phase)
         self.assertIn("bluemap-runpod-sample-resources", phase)
+        self.assertIn("sampler_ready_valid", phase)
+        self.assertNotIn('[[ -s "$ready_file" ]]', phase)
+        self.assertIn("controller_sampler_ready_valid", helper)
+        self.assertNotIn('[[ -s "$controller_sampler_ready" ]]', helper)
         self.assertIn("--kill-after=30s", phase)
         self.assertIn(".runtime.cpu.effectiveVcpuCount == $vcpuCount", helper)
         self.assertIn(".runpod.cpuFlavorId == \"cpu5c\"", helper)
@@ -2185,8 +2218,12 @@ class OriginRunnerStaticTests(unittest.TestCase):
         matrix = generate_schedule.load_json(
             BENCHMARK_ROOT / "matrix.example.json"
         )
-        self.assertEqual(matrix["controls"]["preAllocatedVUs"], 256)
-        self.assertEqual(matrix["controls"]["maxVUs"], 512)
+        self.assertEqual(matrix["controls"]["preAllocatedVUs"], 1024)
+        self.assertEqual(matrix["controls"]["maxVUs"], 1024)
+        self.assertEqual(
+            matrix["controls"]["preAllocatedVUs"],
+            matrix["controls"]["maxVUs"],
+        )
 
         cases = {case["id"]: case for case in matrix["cases"]}
         self.assertEqual(
@@ -2234,8 +2271,10 @@ class OriginRunnerStaticTests(unittest.TestCase):
         script = (BENCHMARK_ROOT / "k6" / "bluemap.js").read_text(
             encoding="utf-8"
         )
-        self.assertIn('PRE_ALLOCATED_VUS="256"', runner)
-        self.assertIn('__ENV.PRE_ALLOCATED_VUS || "256"', script)
+        self.assertIn('PRE_ALLOCATED_VUS="1024"', runner)
+        self.assertIn('MAX_VUS="1024"', runner)
+        self.assertIn('__ENV.PRE_ALLOCATED_VUS || "1024"', script)
+        self.assertIn('__ENV.MAX_VUS || "1024"', script)
         self.assertIn('MAX_NON_TARGET_NODE_CPU_RANGE_CORES="0.5"', runner)
         self.assertIn('MAX_NON_TARGET_NODE_CPU_MEAN_CORES="3.0"', runner)
         self.assertIn('MAX_NON_TARGET_NODE_CPU_MAXIMUM_CORES="4.0"', runner)
@@ -2764,6 +2803,353 @@ class ArrivalGateTests(unittest.TestCase):
         )
 
         self.assertTrue(result["passed"])
+
+
+class CompletionProgressGateTests(unittest.TestCase):
+    ORIGIN = 1_785_369_600.0
+
+    @classmethod
+    def timestamp(cls, offset: float) -> str:
+        return (
+            datetime.fromtimestamp(cls.ORIGIN + offset, timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+
+    @classmethod
+    def write_raw(
+        cls,
+        path: Path,
+        offsets: list[float],
+        *,
+        scenario: str = "workload",
+    ) -> None:
+        cls.write_raw_points(
+            path,
+            [(offset, offset, scenario) for offset in offsets],
+        )
+
+    @classmethod
+    def write_raw_points(
+        cls,
+        path: Path,
+        points: list[tuple[float, float, str]],
+        *,
+        dropped_offsets: list[tuple[float, str]] | None = None,
+    ) -> None:
+        completion_metric = check_completion_progress.COMPLETION_METRIC
+        rows: list[dict[str, object]] = [
+            {
+                "type": "Metric",
+                "metric": completion_metric,
+                "data": {
+                    "name": completion_metric,
+                    "type": "trend",
+                },
+            },
+            {
+                "type": "Metric",
+                "metric": "iterations",
+                "data": {"name": "iterations", "type": "counter"},
+            },
+        ]
+        for timestamp_offset, reported_offset, scenario in points:
+            point = {
+                "time": cls.timestamp(timestamp_offset),
+                "value": reported_offset,
+                "tags": {"scenario": scenario},
+            }
+            rows.append(
+                {"type": "Point", "metric": completion_metric, "data": point}
+            )
+            rows.append(
+                {
+                    "type": "Point",
+                    "metric": "iterations",
+                    "data": {
+                        "time": cls.timestamp(timestamp_offset),
+                        "value": 1,
+                        "tags": {"scenario": scenario},
+                    },
+                }
+            )
+        if dropped_offsets:
+            rows.append(
+                {
+                    "type": "Metric",
+                    "metric": "dropped_iterations",
+                    "data": {
+                        "name": "dropped_iterations",
+                        "type": "counter",
+                    },
+                }
+            )
+            for timestamp_offset, scenario in dropped_offsets:
+                rows.append(
+                    {
+                        "type": "Point",
+                        "metric": "dropped_iterations",
+                        "data": {
+                            "time": cls.timestamp(timestamp_offset),
+                            "value": 1,
+                            "tags": {"scenario": scenario},
+                        },
+                    }
+                )
+        path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def summary(
+        count: int,
+        *,
+        available: int | None = None,
+        overload: int = 0,
+        dropped: int = 0,
+    ) -> dict[str, object]:
+        if available is None:
+            available = count - overload
+        return {
+            "metrics": {
+                "iterations": {"values": {"count": count}},
+                "dropped_iterations": {"values": {"count": dropped}},
+                "bluemap_available_responses": {
+                    "values": {"count": available}
+                },
+                "bluemap_overload_responses": {
+                    "values": {"count": overload}
+                },
+            }
+        }
+
+    @staticmethod
+    def evaluate(
+        raw: Path,
+        summary: dict[str, object],
+        *,
+        rate: float = 40,
+        duration: str = "30s",
+    ) -> dict[str, object]:
+        return check_completion_progress.evaluate(
+            raw,
+            summary,
+            profile="map-data-mixed",
+            rate=rate,
+            viewers=1,
+            marker_interval_seconds=10,
+            markers_present=False,
+            duration=duration,
+            window_seconds=5,
+            startup_allowance_seconds=5,
+            minimum_completion_fraction=0.1,
+            start_time_tolerance_seconds=0.1,
+        )
+
+    def test_rejects_s4_like_completion_lull_and_accepts_healthy_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.ndjson"
+            stalled = [index / 40 for index in range(1, 241)] + [
+                20 + index / 40 for index in range(1, 401)
+            ]
+            self.write_raw(raw, stalled)
+            rejected = self.evaluate(raw, self.summary(len(stalled)))
+
+            healthy = [index / 40 for index in range(1, 1201)]
+            self.write_raw(raw, healthy)
+            accepted = self.evaluate(raw, self.summary(len(healthy)))
+
+        self.assertFalse(rejected["passed"])
+        self.assertLess(
+            rejected["worstWindow"]["completedIterations"],
+            rejected["minimumCompletedIterationsPerWindow"],
+        )
+        self.assertTrue(accepted["passed"])
+        self.assertEqual(accepted["minimumCompletedIterationsPerWindow"], 20)
+
+    def test_exact_window_threshold_and_valid_overload_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.ndjson"
+            offsets = [5.25 + index * 0.2 for index in range(20)]
+            self.write_raw(raw, offsets)
+            exact = self.evaluate(
+                raw,
+                self.summary(20, available=0, overload=20),
+                duration="10s",
+            )
+
+            self.write_raw(raw, offsets[:-1])
+            below = self.evaluate(
+                raw,
+                self.summary(19),
+                duration="10s",
+            )
+
+        self.assertTrue(exact["passed"])
+        self.assertEqual(exact["worstWindow"]["completedIterations"], 20)
+        self.assertFalse(below["passed"])
+        self.assertEqual(below["worstWindow"]["completedIterations"], 19)
+
+    def test_low_rate_requires_one_completion_but_is_not_impossible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.ndjson"
+            self.write_raw(raw, [9.0])
+            accepted = self.evaluate(
+                raw,
+                self.summary(1),
+                rate=1,
+                duration="10s",
+            )
+
+            self.write_raw(raw, [2.0])
+            rejected = self.evaluate(
+                raw,
+                self.summary(1),
+                rate=1,
+                duration="10s",
+            )
+
+        self.assertEqual(accepted["minimumCompletedIterationsPerWindow"], 1)
+        self.assertTrue(accepted["passed"])
+        self.assertFalse(rejected["passed"])
+
+    def test_live_viewers_normalizes_delayed_marker_scenario_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.ndjson"
+            points: list[tuple[float, float, str]] = []
+            for index in range(1, 51):
+                global_offset = 5 + index * 0.1
+                points.append(
+                    (global_offset, global_offset, "playerPolling")
+                )
+            for index in range(1, 6):
+                global_offset = 5.5 + index * 0.8
+                points.append(
+                    (global_offset, global_offset - 0.5, "markerPolling")
+                )
+            self.write_raw_points(raw, points)
+            summary = self.summary(len(points))
+            accepted = check_completion_progress.evaluate(
+                raw,
+                summary,
+                profile="live-viewers",
+                rate=1,
+                viewers=10,
+                marker_interval_seconds=10,
+                markers_present=True,
+                duration="10s",
+                window_seconds=5,
+                startup_allowance_seconds=5,
+                minimum_completion_fraction=0.1,
+                start_time_tolerance_seconds=0.1,
+            )
+
+            rows = [json.loads(line) for line in raw.read_text().splitlines()]
+            marker = next(
+                row
+                for row in rows
+                if row.get("type") == "Point"
+                and row.get("metric")
+                == check_completion_progress.COMPLETION_METRIC
+                and row["data"]["tags"]["scenario"] == "markerPolling"
+            )
+            marker["data"]["value"] += 0.101
+            raw.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "start time"):
+                check_completion_progress.evaluate(
+                    raw,
+                    summary,
+                    profile="live-viewers",
+                    rate=1,
+                    viewers=10,
+                    marker_interval_seconds=10,
+                    markers_present=True,
+                    duration="10s",
+                    window_seconds=5,
+                    startup_allowance_seconds=5,
+                    minimum_completion_fraction=0.1,
+                    start_time_tolerance_seconds=0.1,
+                )
+
+        self.assertTrue(accepted["passed"])
+        self.assertEqual(accepted["offeredIterationsPerSecond"], 11)
+        self.assertEqual(accepted["minimumCompletedIterationsPerWindow"], 6)
+
+    def test_dropped_iteration_declaration_is_required_when_drops_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.ndjson"
+            points = [(offset, offset, "workload") for offset in (6.0, 9.0)]
+            self.write_raw_points(
+                raw,
+                points,
+                dropped_offsets=[(7.0, "workload")],
+            )
+            accepted = self.evaluate(
+                raw,
+                self.summary(2, dropped=1),
+                rate=1,
+                duration="10s",
+            )
+
+            rows = [
+                json.loads(line)
+                for line in raw.read_text(encoding="utf-8").splitlines()
+            ]
+            rows = [
+                row
+                for row in rows
+                if not (
+                    row.get("type") == "Metric"
+                    and row.get("metric") == "dropped_iterations"
+                )
+            ]
+            raw.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "declare dropped_iterations"):
+                self.evaluate(
+                    raw,
+                    self.summary(2, dropped=1),
+                    rate=1,
+                    duration="10s",
+                )
+
+        self.assertTrue(accepted["passed"])
+
+    def test_missing_malformed_and_incomplete_raw_evidence_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.ndjson"
+            with self.assertRaisesRegex(ValueError, "missing"):
+                self.evaluate(raw, self.summary(1), rate=1, duration="10s")
+
+            raw.write_text("{not-json}\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "malformed JSON"):
+                self.evaluate(raw, self.summary(1), rate=1, duration="10s")
+
+            self.write_raw(raw, [8.0, 9.0])
+            with self.assertRaisesRegex(ValueError, "differs"):
+                self.evaluate(raw, self.summary(3), rate=1, duration="10s")
+
+            rows = [json.loads(line) for line in raw.read_text().splitlines()]
+            completion = next(
+                row
+                for row in rows
+                if row.get("metric")
+                == check_completion_progress.COMPLETION_METRIC
+                and row.get("type") == "Point"
+            )
+            completion["data"]["value"] = 7.0
+            raw.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "start time"):
+                self.evaluate(raw, self.summary(2), rate=1, duration="10s")
 
 
 class DeliveryCacheProbeTests(unittest.TestCase):

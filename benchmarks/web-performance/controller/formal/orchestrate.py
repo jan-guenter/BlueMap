@@ -87,6 +87,12 @@ PROMETHEUS_STEP_SECONDS = 15
 MAXIMUM_NON_TARGET_NODE_CPU_SPREAD_CORES = 0.5
 MAXIMUM_NON_TARGET_NODE_CPU_MEAN_CORES = 3.0
 MAXIMUM_NON_TARGET_NODE_CPU_LEVEL_CORES = 4.0
+COMPLETION_PROGRESS_CONTROL = {
+    "windowSeconds": 5,
+    "startupAllowanceSeconds": 5,
+    "minimumCompletionFraction": 0.1,
+    "startTimeToleranceSeconds": 0.1,
+}
 PREFLIGHT_SCHEDULE_SEED = "bluemap-web-performance-ssh-l4-preflight-v1"
 PREFLIGHT_VARIANTS = (
     "java-new-postgresql",
@@ -99,8 +105,9 @@ PREFLIGHT_CONTROLS = {
     "measurementDuration": "2m",
     "cooldownSeconds": 15,
     "minimumAchievedRateRatio": 1.0,
-    "preAllocatedVUs": 256,
-    "maxVUs": 512,
+    "preAllocatedVUs": 1024,
+    "maxVUs": 1024,
+    "completionProgress": copy.deepcopy(COMPLETION_PROGRESS_CONTROL),
 }
 PREFLIGHT_CASES = (
     {
@@ -838,6 +845,7 @@ def validate_formal_documents(
             ),
             "benchmarkGitRevision": benchmark_revision,
             "mapIds": matrix.get("mapIds"),
+            "completionProgress": COMPLETION_PROGRESS_CONTROL,
         }
         for field, value in expected.items():
             if entry.get(field) != value:
@@ -933,6 +941,7 @@ def validate_preflight_documents(
         or entry.get("measurementDuration") != "2m"
         or entry.get("cooldownSeconds") != 15
         or entry.get("minimumAchievedRateRatio") != 1.0
+        or entry.get("completionProgress") != COMPLETION_PROGRESS_CONTROL
         or entry.get("overloadPolicy")
         != (
             "allow-explicit"
@@ -2292,6 +2301,14 @@ def build_runner_command(
         str(entry["preAllocatedVUs"]),
         "--max-vus",
         str(entry["maxVUs"]),
+        "--completion-progress-window-seconds",
+        str(entry["completionProgress"]["windowSeconds"]),
+        "--completion-progress-startup-allowance-seconds",
+        str(entry["completionProgress"]["startupAllowanceSeconds"]),
+        "--completion-progress-minimum-fraction",
+        str(entry["completionProgress"]["minimumCompletionFraction"]),
+        "--completion-progress-start-time-tolerance-seconds",
+        str(entry["completionProgress"]["startTimeToleranceSeconds"]),
         "--accept-encoding",
         str(entry["acceptEncoding"]),
         "--stored-encoding",

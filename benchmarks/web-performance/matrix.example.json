@@ -11,8 +11,14 @@
     "measurementDuration": "5m",
     "cooldownSeconds": 60,
     "minimumAchievedRateRatio": 0.99,
-    "preAllocatedVUs": 256,
-    "maxVUs": 512
+    "preAllocatedVUs": 1024,
+    "maxVUs": 1024,
+    "completionProgress": {
+      "windowSeconds": 5,
+      "startupAllowanceSeconds": 5,
+      "minimumCompletionFraction": 0.1,
+      "startTimeToleranceSeconds": 0.1
+    }
   },
   "variants": [
     {

@@ -50,6 +50,10 @@ class RunPodAnalyzerTests(unittest.TestCase):
                     "startAttempted": True,
                     "started": True,
                     "startedAt": iso(10),
+                    "process": {
+                        "pid": 10_000 + index,
+                        "startTimeTicks": 20_000 + index,
+                    },
                     "preProbe": {
                         "attempted": True,
                         "passed": True,
@@ -68,7 +72,7 @@ class RunPodAnalyzerTests(unittest.TestCase):
                 }
             )
         return {
-            "formatVersion": 1,
+            "formatVersion": 2,
             "kind": "ssh-l4-traefik-transport",
             "mode": "ssh-l4-traefik",
             "startedAt": iso(10),
@@ -87,12 +91,22 @@ class RunPodAnalyzerTests(unittest.TestCase):
                 "confirmed": True,
                 "receipt": {
                     "kind": "runpod-command-session",
-                    "formatVersion": 1,
+                    "formatVersion": 2,
                     "sessionId": RunPodAnalyzerTests.COMMAND_SESSION_ID,
                     "sessionOutput": RunPodAnalyzerTests.COMMAND_SESSION_OUTPUT,
                     "activeLock": "/tmp/bluemap-runpod-active-phase.lock",
                     "startedAt": iso(10.25),
                     "completedAt": iso(19.75),
+                    "telemetry": {
+                        "resourceOutput": (
+                            "/artifacts/case/repetitions/01/measurement/"
+                            "load-generator-resources.ndjson"
+                        ),
+                        "readyBeforeWorkload": True,
+                        "readyAt": iso(10.5),
+                        "workloadReleasedAt": iso(10.75),
+                        "samplerExitStatus": 0,
+                    },
                     "lease": {
                         "required": True,
                         "eofObserved": False,
@@ -110,6 +124,57 @@ class RunPodAnalyzerTests(unittest.TestCase):
                         "samplerReaped": True,
                     },
                     "passed": True,
+                },
+            },
+            "telemetry": {
+                "formatVersion": 2,
+                "required": True,
+                "intervalSeconds": 1,
+                "controller": {
+                    "path": (
+                        "/artifacts/case/repetitions/01/measurement/"
+                        "ssh-l4-transport.controller.ndjson"
+                    ),
+                    "sha256": "d" * 64,
+                    "sampleCount": 2,
+                    "source": {
+                        "kind": "controller-procfs-ssh-lanes-v2",
+                        "samplerSha256": "e" * 64,
+                        "remoteAddress": "203.0.113.10",
+                        "remotePort": 22,
+                    },
+                    "capture": {
+                        "attempted": True,
+                        "validBeforeWorkload": True,
+                        "readyAt": iso(10.5),
+                        "reaped": True,
+                        "exitStatus": 0,
+                        "persisted": True,
+                    },
+                },
+                "runpod": {
+                    "path": (
+                        "/artifacts/case/repetitions/01/measurement/"
+                        "load-generator-resources.ndjson"
+                    ),
+                    "sha256": "f" * 64,
+                    "sampleCount": 2,
+                    "source": {
+                        "kind": "runpod-haproxy-procfs-v1",
+                        "imageDigest": "sha256:" + "a" * 64,
+                        "samplerSha256": "b" * 64,
+                        "statsSocket": "/run/haproxy/bluemap-stats.sock",
+                    },
+                    "capture": {
+                        "attempted": True,
+                        "validBeforeWorkload": True,
+                        "readyAt": iso(10.5),
+                        "workloadReleasedAt": iso(10.75),
+                        "reaped": True,
+                        "exitStatus": 0,
+                        "persisted": True,
+                        "observedSourceSha256": "b" * 64,
+                    },
                 },
             },
             "lanes": lanes,
@@ -187,6 +252,190 @@ class RunPodAnalyzerTests(unittest.TestCase):
                 },
             }
         }
+
+    @staticmethod
+    def write_completion_raw(path: Path, offsets: list[float]) -> None:
+        RunPodAnalyzerTests.write_completion_raw_points(
+            path,
+            [(offset, offset, "workload") for offset in offsets],
+        )
+
+    @staticmethod
+    def write_completion_raw_points(
+        path: Path,
+        points: list[tuple[float, float, str]],
+    ) -> None:
+        rows: list[dict[str, object]] = [
+            {
+                "type": "Metric",
+                "metric": analyze.COMPLETION_PROGRESS_METRIC,
+                "data": {
+                    "name": analyze.COMPLETION_PROGRESS_METRIC,
+                    "type": "trend",
+                },
+            },
+            {
+                "type": "Metric",
+                "metric": "iterations",
+                "data": {"name": "iterations", "type": "counter"},
+            },
+        ]
+        for timestamp_offset, reported_offset, scenario in points:
+            rows.extend(
+                [
+                    {
+                        "type": "Point",
+                        "metric": analyze.COMPLETION_PROGRESS_METRIC,
+                        "data": {
+                            "time": iso(timestamp_offset),
+                            "value": reported_offset,
+                            "tags": {"scenario": scenario},
+                        },
+                    },
+                    {
+                        "type": "Point",
+                        "metric": "iterations",
+                        "data": {
+                            "time": iso(timestamp_offset),
+                            "value": 1,
+                            "tags": {"scenario": scenario},
+                        },
+                    },
+                ]
+            )
+        path.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+
+    def test_completion_progress_is_recomputed_from_raw_and_tamper_evident(
+        self,
+    ) -> None:
+        entry = schedule_entry()
+        entry["profile"] = "static"
+        entry["rate"] = 40
+        entry["warmupDuration"] = "10s"
+        summary = self.complete_summary()
+        offsets = [5.25 + index * 0.2 for index in range(20)]
+        for metric in (
+            "iterations",
+            "bluemap_workload_requests",
+            "bluemap_available_responses",
+            "http_reqs",
+            "http_reqs{traffic:workload}",
+        ):
+            summary["metrics"][metric]["values"]["count"] = 20
+
+        with tempfile.TemporaryDirectory() as directory:
+            phase = Path(directory)
+            raw = phase / "raw.ndjson"
+            self.write_completion_raw(raw, offsets)
+            expected = analyze.recompute_completion_progress(
+                raw,
+                summary,
+                entry=entry,
+                manifest=self.proof_manifest(),
+                duration="10s",
+            )
+            write_json(phase / "completion-progress-gate.json", expected)
+            validated = analyze.validate_completion_progress_phase(
+                phase,
+                summary,
+                entry=entry,
+                manifest=self.proof_manifest(),
+                duration="10s",
+            )
+            self.assertTrue(validated["passed"])
+            self.assertEqual(
+                validated["minimumCompletedIterationsPerWindow"], 20
+            )
+
+            tampered = copy.deepcopy(expected)
+            tampered["worstWindow"]["completedIterations"] = 21
+            write_json(phase / "completion-progress-gate.json", tampered)
+            with self.assertRaisesRegex(
+                analyze.AnalysisFailure, "differs from raw evidence"
+            ):
+                analyze.validate_completion_progress_phase(
+                    phase,
+                    summary,
+                    entry=entry,
+                    manifest=self.proof_manifest(),
+                    duration="10s",
+                )
+
+    def test_completion_progress_normalizes_live_viewer_scenario_starts(
+        self,
+    ) -> None:
+        entry = schedule_entry()
+        entry.update(
+            {
+                "profile": "live-viewers",
+                "rate": 1,
+                "viewers": 10,
+                "markerIntervalSeconds": 10,
+                "warmupDuration": "10s",
+            }
+        )
+        manifest = self.proof_manifest()
+        manifest["markers"] = ["/maps/world/live/markers.json"]
+        points: list[tuple[float, float, str]] = []
+        for index in range(1, 51):
+            offset = 5 + index * 0.1
+            points.append((offset, offset, "playerPolling"))
+        for index in range(1, 6):
+            global_offset = 5.5 + index * 0.8
+            points.append(
+                (global_offset, global_offset - 0.5, "markerPolling")
+            )
+        summary = self.complete_summary()
+        for metric in (
+            "iterations",
+            "bluemap_workload_requests",
+            "bluemap_available_responses",
+            "http_reqs",
+            "http_reqs{traffic:workload}",
+        ):
+            summary["metrics"][metric]["values"]["count"] = len(points)
+
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.ndjson"
+            self.write_completion_raw_points(raw, points)
+            result = analyze.recompute_completion_progress(
+                raw,
+                summary,
+                entry=entry,
+                manifest=manifest,
+                duration="10s",
+            )
+
+            rows = [json.loads(line) for line in raw.read_text().splitlines()]
+            marker = next(
+                row
+                for row in rows
+                if row.get("type") == "Point"
+                and row.get("metric") == analyze.COMPLETION_PROGRESS_METRIC
+                and row["data"]["tags"]["scenario"] == "markerPolling"
+            )
+            marker["data"]["value"] += 0.101
+            raw.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                analyze.AnalysisFailure, "scenario start time"
+            ):
+                analyze.recompute_completion_progress(
+                    raw,
+                    summary,
+                    entry=entry,
+                    manifest=manifest,
+                    duration="10s",
+                )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["offeredIterationsPerSecond"], 11)
+        self.assertEqual(result["minimumCompletedIterationsPerWindow"], 6)
 
     @staticmethod
     def response_policy_artifact(
@@ -1322,13 +1571,18 @@ class RunPodAnalyzerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ssh-l4-transport.json"
             write_json(path, evidence)
-            validated = analyze.validate_ssh_l4_transport_artifact(
-                path,
-                "measurement",
-                (START_EPOCH + 9, START_EPOCH + 21),
-                17,
-                self.TRANSPORT_OUTPUT,
-            )
+            with patch.object(
+                analyze,
+                "validate_transport_telemetry_artifacts",
+                return_value={"capturePassed": True},
+            ):
+                validated = analyze.validate_ssh_l4_transport_artifact(
+                    path,
+                    "measurement",
+                    (START_EPOCH + 9, START_EPOCH + 21),
+                    17,
+                    self.TRANSPORT_OUTPUT,
+                )
 
         self.assertIs(validated["passed"], True)
         self.assertEqual(validated["commandExitStatus"], 17)

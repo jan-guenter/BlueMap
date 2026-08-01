@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -9,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 BENCHMARK_ROOT = Path(__file__).resolve().parents[1]
@@ -56,12 +58,19 @@ write_session_receipt() {
         --argjson processGroupId "$$" \
         '{
             kind: "runpod-command-session",
-            formatVersion: 1,
+            formatVersion: 2,
             sessionId: $sessionId,
             sessionOutput: $sessionOutput,
             activeLock: "/tmp/bluemap-runpod-active-phase.lock",
             startedAt: $recordedAt,
             completedAt: $recordedAt,
+            telemetry: {
+                resourceOutput: env.FAKE_REMOTE_RESOURCE_OUTPUT,
+                readyBeforeWorkload: true,
+                readyAt: $recordedAt,
+                workloadReleasedAt: $recordedAt,
+                samplerExitStatus: 0
+            },
             lease: {
                 required: true,
                 eofObserved: $eofObserved,
@@ -107,6 +116,11 @@ elif [[ "$*" == *"for path do"* ]]; then
     [[ "${FAKE_STALE_OUTPUT:-false}" != true ]]
 elif [[ "$last" == *"termination.processGroupId"* ]]; then
     cat "$FAKE_REMOTE_SESSION"
+elif [[ "$last" == *"sourceSha256"* && "$last" == *"sha256sum"* ]]; then
+    jq -nc \
+        --arg sha256 "$FAKE_RUNPOD_RESOURCE_SHA256" \
+        --arg sourceSha256 "$FAKE_RUNPOD_SOURCE_SHA256" \
+        '{sha256: $sha256, count: 2, sourceSha256: $sourceSha256}'
 elif [[ "$last" == *"test-command"* ]]; then
     if [[ "${FAKE_FAIL_LANE:-}" == "2" ||
         "${FAKE_HANG_COMMAND:-false}" == true ]]; then
@@ -131,6 +145,71 @@ FAKE_SCP = r"""#!/usr/bin/env bash
 set -Eeuo pipefail
 source_file="${@: -2:1}"
 cp -- "$source_file" "$FAKE_EVIDENCE"
+"""
+
+FAKE_CONTROLLER_SAMPLER = r"""#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import os
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--output", required=True)
+parser.add_argument("--ready-file", required=True)
+parser.add_argument("--stop-file", required=True)
+parser.add_argument("--source-sha256", required=True)
+parser.add_argument("--expected-remote-address", required=True)
+parser.add_argument("--expected-remote-port", required=True, type=int)
+parser.add_argument("--interval-seconds")
+parser.add_argument("--lane", action="append", default=[])
+args = parser.parse_args()
+
+lanes = []
+for value in args.lane:
+    lane_id, raw_pid = value.split("=", 1)
+    lanes.append({
+        "id": lane_id,
+        "process": {
+            "pid": int(raw_pid),
+            "startTimeTicks": 1,
+            "userTicks": 0,
+            "systemTicks": 0,
+        },
+        "socket": {
+            "remote": {
+                "address": args.expected_remote_address,
+                "port": args.expected_remote_port,
+            }
+        },
+    })
+sample = {
+    "formatVersion": 2,
+    "kind": "controller-ssh-transport-sample",
+    "sourceSha256": args.source_sha256,
+    "lanes": lanes,
+}
+with open(args.output, "w", encoding="utf-8") as output:
+    output.write(json.dumps(sample) + "\n")
+    output.write(json.dumps(sample) + "\n")
+    output.flush()
+    os.fsync(output.fileno())
+ready = {
+    "formatVersion": 1,
+    "kind": "controller-ssh-transport-ready",
+    "sampleCount": 1,
+    "sourceSha256": args.source_sha256,
+}
+temporary = args.ready_file + ".tmp"
+with open(temporary, "w", encoding="utf-8") as destination:
+    json.dump(ready, destination)
+os.replace(temporary, args.ready_file)
+while not os.path.exists(args.stop_file):
+    time.sleep(0.01)
+"""
+
+FAKE_RUNPOD_SAMPLER_SOURCE = """#!/usr/bin/env bash
+exit 0
 """
 
 
@@ -159,6 +238,15 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
                 "--arg",
                 "expectedTransportOutput",
                 "/artifacts/case/phase/ssh-l4-transport.json",
+                "--arg",
+                "expectedRemoteAddress",
+                "203.0.113.10",
+                "--argjson",
+                "expectedRemotePort",
+                "22",
+                "--arg",
+                "expectedImageDigest",
+                "sha256:" + "a" * 64,
                 program,
                 str(artifact),
             ],
@@ -194,6 +282,28 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
         ssh.chmod(0o755)
         scp.chmod(0o755)
 
+        helper_dir = root / "helper"
+        helper_dir.mkdir()
+        helper_path = helper_dir / "runpod_loadgen.sh"
+        helper_source = HELPER.read_text(encoding="utf-8")
+        if fast_deadline:
+            helper_source = helper_source.replace(
+                "phase_timeout_seconds + 60",
+                "phase_timeout_seconds + 0",
+            )
+        helper_path.write_text(helper_source, encoding="utf-8")
+        helper_path.chmod(0o755)
+        controller_sampler = helper_dir / "sample_ssh_transport.py"
+        controller_sampler.write_text(
+            FAKE_CONTROLLER_SAMPLER, encoding="utf-8"
+        )
+        controller_sampler.chmod(0o755)
+        runpod_sampler = helper_dir / "runpod-sample-resources.sh"
+        runpod_sampler.write_text(
+            FAKE_RUNPOD_SAMPLER_SOURCE, encoding="utf-8"
+        )
+        runpod_sampler.chmod(0o755)
+
         identity = root / "identity.json"
         live_identity = root / "live-identity.json"
         key = root / "id_ed25519"
@@ -213,18 +323,12 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
         key.chmod(0o600)
         ssh_log.touch()
 
-        helper_path = HELPER
-        if fast_deadline:
-            helper_path = root / "runpod_loadgen.sh"
-            helper_path.write_text(
-                HELPER.read_text(encoding="utf-8").replace(
-                    "phase_timeout_seconds + 60",
-                    "phase_timeout_seconds + 0",
-                ),
-                encoding="utf-8",
-            )
-            helper_path.chmod(0o755)
-
+        resource_output = (
+            "/artifacts/case/phase/load-generator-resources.ndjson"
+        )
+        runpod_source_sha256 = hashlib.sha256(
+            FAKE_RUNPOD_SAMPLER_SOURCE.encode("utf-8")
+        ).hexdigest()
         environment = {
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -238,6 +342,9 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
             "FAKE_DATE_COUNTER": str(root / "date-counter"),
             "FAKE_COMMAND_PID": str(root / "command.pid"),
             "FAKE_COMMAND_EOF": str(root / "command.eof"),
+            "FAKE_REMOTE_RESOURCE_OUTPUT": resource_output,
+            "FAKE_RUNPOD_SOURCE_SHA256": runpod_source_sha256,
+            "FAKE_RUNPOD_RESOURCE_SHA256": "b" * 64,
         }
         if fail_lane is not None:
             environment["FAKE_FAIL_LANE"] = str(fail_lane)
@@ -260,6 +367,8 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
                 "env",
                 f"BLUEMAP_PHASE_TIMEOUT_SECONDS={1 if fast_deadline else 5}",
                 "test-command",
+                "--resource-output",
+                resource_output,
             ],
             capture_output=True,
             check=False,
@@ -299,13 +408,18 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
             self.assert_runner_accepts(root, evidence, 17)
             started = analyze.timestamp_epoch(evidence["startedAt"], "startedAt")
             finished = analyze.timestamp_epoch(evidence["finishedAt"], "finishedAt")
-            analyzed = analyze.validate_ssh_l4_transport_artifact(
-                root / "transport.json",
-                "measurement",
-                (started - 1, finished + 1),
-                17,
-                "/artifacts/case/phase/ssh-l4-transport.json",
-            )
+            with patch.object(
+                analyze,
+                "validate_transport_telemetry_artifacts",
+                return_value={"capturePassed": True},
+            ):
+                analyzed = analyze.validate_ssh_l4_transport_artifact(
+                    root / "transport.json",
+                    "measurement",
+                    (started - 1, finished + 1),
+                    17,
+                    "/artifacts/case/phase/ssh-l4-transport.json",
+                )
             self.assertTrue(analyzed["passed"])
 
         self.assertEqual(result.returncode, 17, result.stderr)
@@ -527,6 +641,23 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
             scp.write_text(FAKE_SCP, encoding="utf-8")
             ssh.chmod(0o755)
             scp.chmod(0o755)
+            helper_dir = root / "helper"
+            helper_dir.mkdir()
+            helper_path = helper_dir / "runpod_loadgen.sh"
+            helper_path.write_text(
+                HELPER.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            helper_path.chmod(0o755)
+            controller_sampler = helper_dir / "sample_ssh_transport.py"
+            controller_sampler.write_text(
+                FAKE_CONTROLLER_SAMPLER, encoding="utf-8"
+            )
+            controller_sampler.chmod(0o755)
+            runpod_sampler = helper_dir / "runpod-sample-resources.sh"
+            runpod_sampler.write_text(
+                FAKE_RUNPOD_SAMPLER_SOURCE, encoding="utf-8"
+            )
+            runpod_sampler.chmod(0o755)
 
             identity = root / "identity.json"
             live_identity = root / "live-identity.json"
@@ -535,6 +666,9 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
             lane_pid_prefix = root / "lane-pid"
             command_pid_path = root / "command.pid"
             command_eof = root / "command.eof"
+            resource_output = (
+                "/artifacts/case/phase/load-generator-resources.ndjson"
+            )
             identity.write_text(
                 json.dumps(runpod_identity("formal-helper-behavior")),
                 encoding="utf-8",
@@ -559,11 +693,16 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
                 "FAKE_HANG_COMMAND": "true",
                 "FAKE_COMMAND_PID": str(command_pid_path),
                 "FAKE_COMMAND_EOF": str(command_eof),
+                "FAKE_REMOTE_RESOURCE_OUTPUT": resource_output,
+                "FAKE_RUNPOD_SOURCE_SHA256": hashlib.sha256(
+                    FAKE_RUNPOD_SAMPLER_SOURCE.encode("utf-8")
+                ).hexdigest(),
+                "FAKE_RUNPOD_RESOURCE_SHA256": "b" * 64,
             }
             process = subprocess.Popen(
                 [
                     "bash",
-                    str(HELPER),
+                    str(helper_path),
                     "--identity",
                     str(identity),
                     "--identity-key",
@@ -575,6 +714,8 @@ class RunPodHelperBehaviorTests(unittest.TestCase):
                     "env",
                     "BLUEMAP_PHASE_TIMEOUT_SECONDS=5",
                     "test-command",
+                    "--resource-output",
+                    resource_output,
                 ],
                 env=environment,
                 stdout=subprocess.PIPE,

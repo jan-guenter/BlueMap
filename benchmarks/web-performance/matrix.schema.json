@@ -129,7 +129,8 @@
         "cooldownSeconds",
         "minimumAchievedRateRatio",
         "preAllocatedVUs",
-        "maxVUs"
+        "maxVUs",
+        "completionProgress"
       ],
       "properties": {
         "warmupDuration": {
@@ -154,6 +155,38 @@
         "maxVUs": {
           "type": "integer",
           "minimum": 1
+        },
+        "completionProgress": {
+          "$ref": "#/$defs/completionProgress"
+        }
+      }
+    },
+    "completionProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "windowSeconds",
+        "startupAllowanceSeconds",
+        "minimumCompletionFraction",
+        "startTimeToleranceSeconds"
+      ],
+      "properties": {
+        "windowSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "startupAllowanceSeconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimumCompletionFraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "startTimeToleranceSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       }
     },
