@@ -1,7 +1,13 @@
-# Replace these example entries with existing objects from one immutable map.
-# Keep the same file and SQL snapshot for all three targets.
-/maps/world/settings.json
-/maps/world/textures.json
-/maps/world/live/markers.json
-/maps/world/live/players.json
-/maps/world/tiles/0/x0z0
+# Primary zstd tile profile from the sanitized benchmark fixture. Keep the
+# large-object and identity-coded profiles in separate runs; never pool them.
+/maps/world/tiles/0/x-1/0/z-1/0.prbm
+/maps/world/tiles/0/x-8/z-1/0.prbm
+/maps/world/tiles/0/x-5/z-2.prbm
+/maps/world/tiles/0/x-6/z-6.prbm
+/maps/world/tiles/0/x-2/z-4.prbm
+/maps/world/tiles/0/x-5/z-1/0.prbm
+/maps/world/tiles/0/x1/z-5.prbm
+/maps/world/tiles/0/x0/z-7.prbm
+/maps/world/tiles/0/x-8/z-6.prbm
+/maps/world/tiles/0/x-9/z-6.prbm
+/maps/world/tiles/0/x-7/z-9.prbm

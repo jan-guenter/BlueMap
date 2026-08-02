@@ -1,37 +1,92 @@
 {
-  "formatVersion": 1,
-  "environment": "replace with the host or VM image and CPU identity",
-  "protocol": "HTTP/1.1 over direct-origin HTTP",
+  "formatVersion": 2,
+  "environment": "RunPod CPU Pods with immutable images and pod-local disks",
+  "protocol": "HTTP/1.1 over direct RunPod TCP origin; no HTTP intermediary",
+  "directOrigin": true,
+  "runpod": {
+    "region": "EU-NL-1",
+    "topology": "three isolated target Pods, one MariaDB Pod, one load-generator Pod"
+  },
   "database": {
     "snapshotId": "replace-with-DATASET_ID",
-    "aggregateConnectionCeiling": 12
+    "engine": "MariaDB",
+    "version": "replace with immutable MariaDB image/version",
+    "aggregateConnectionCeiling": 12,
+    "tls": {
+      "required": true,
+      "verified": true,
+      "serverName": "replace with certificate DNS name",
+      "caSha256": "replace-with-64-lowercase-hex-CA-digest"
+    }
   },
   "resourceLimits": {
     "upstream": {
-      "cpu": "2 cores",
-      "memory": "2 GiB"
+      "cpu": "4 logical CPUs",
+      "memory": "8 GiB"
     },
     "upstream-php": {
-      "cpu": "2 cores",
-      "memory": "2 GiB"
+      "cpu": "4 logical CPUs",
+      "memory": "8 GiB"
     },
     "new-java": {
-      "cpu": "2 cores",
-      "memory": "2 GiB"
+      "cpu": "4 logical CPUs",
+      "memory": "8 GiB"
     }
   },
   "targets": {
     "upstream": {
-      "runtime": "replace with image digest and Java/runtime version",
-      "configuration": "replace with immutable configuration digest or description"
+      "runtime": "replace with immutable image digest and runtime version",
+      "configuration": "replace with immutable configuration digest",
+      "runtimeIdentity": "replace with frozen RunPod API and SSH runtime identity",
+      "runpodPodId": "replace with frozen RunPod Pod ID",
+      "imageDigest": "sha256:replace-with-64-lowercase-hex-digest",
+      "processIdentitySha256": "replace-with-64-lowercase-hex-digest",
+      "runtimeProbeSha256": "replace-with-64-lowercase-hex-digest",
+      "configurationSha256": "replace-with-64-lowercase-hex-digest",
+      "uploadBitsPerSecond": 1000000000,
+      "identityHeader": null
     },
     "upstream-php": {
-      "runtime": "replace with HTTP server and PHP-FPM image/version identities",
-      "configuration": "replace with immutable HTTP, PHP-FPM, and PHP configuration digests"
+      "runtime": "replace with immutable nginx/PHP-FPM image identities",
+      "configuration": "replace with immutable nginx/PHP/TLS configuration digests",
+      "runtimeIdentity": "replace with frozen RunPod API and SSH runtime identity",
+      "runpodPodId": "replace with frozen RunPod Pod ID",
+      "imageDigest": "sha256:replace-with-64-lowercase-hex-digest",
+      "processIdentitySha256": "replace-with-64-lowercase-hex-digest",
+      "runtimeProbeSha256": "replace-with-64-lowercase-hex-digest",
+      "configurationSha256": "replace-with-64-lowercase-hex-digest",
+      "uploadBitsPerSecond": 1000000000,
+      "identityHeader": null
     },
     "new-java": {
-      "runtime": "replace with image digest and Java/runtime version",
-      "configuration": "replace with immutable configuration digest or description"
+      "runtime": "replace with immutable image digest and runtime version",
+      "configuration": "replace with immutable configuration digest",
+      "runtimeIdentity": "replace with frozen RunPod API and SSH runtime identity",
+      "runpodPodId": "replace with frozen RunPod Pod ID",
+      "imageDigest": "sha256:replace-with-64-lowercase-hex-digest",
+      "processIdentitySha256": "replace-with-64-lowercase-hex-digest",
+      "runtimeProbeSha256": "replace-with-64-lowercase-hex-digest",
+      "configurationSha256": "replace-with-64-lowercase-hex-digest",
+      "uploadBitsPerSecond": 1000000000,
+      "identityHeader": null
+    }
+  },
+  "loadGenerator": {
+    "runtime": "replace with immutable load-generator image digest and k6 version",
+    "configuration": "replace with immutable command/configuration digest",
+    "hardware": {
+      "podId": "replace with frozen RunPod Pod ID",
+      "podType": "replace with exact RunPod CPU Pod type",
+      "cpuModel": "replace with observed CPU model",
+      "logicalCpuCount": 8,
+      "memoryBytes": 17179869184,
+      "downloadBitsPerSecond": 1000000000
+    },
+    "admission": {
+      "maximumCpuUtilizationPercent": 90,
+      "maximumMemoryUtilizationPercent": 90,
+      "minimumSamples": 27,
+      "minimumFreeDiskBytes": 4294967296
     }
   }
 }

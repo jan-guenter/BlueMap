@@ -1,0 +1,26 @@
+Port 22
+ListenAddress 0.0.0.0
+Protocol 2
+PidFile /run/sshd.pid
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile /bootstrap/authorized_keys
+PermitEmptyPasswords no
+UsePAM no
+AllowAgentForwarding no
+AllowTcpForwarding yes
+GatewayPorts clientspecified
+PermitTunnel no
+X11Forwarding no
+PrintMotd no
+PrintLastLog no
+TCPKeepAlive yes
+ClientAliveInterval 30
+ClientAliveCountMax 3
+Subsystem sftp internal-sftp
+

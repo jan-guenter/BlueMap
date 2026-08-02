@@ -1,0 +1,400 @@
+name: RunPod throughput benchmark images
+
+on:
+  push:
+    branches:
+      - benchmark/runpod-mariadb-throughput-v1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runpod-throughput-images-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate immutable role images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Validate comparator and immutable pins
+        run: python3 benchmarks/web-throughput/images/validate.py
+      - name: Test benchmark harness
+        run: >-
+          python3 -m unittest discover
+          -s benchmarks/web-throughput/tests
+          -p 'test_*.py'
+      - name: Prove pinned k6 zstd decoding and HTTP framing
+        env:
+          RUN_K6_INTEGRATION: "1"
+        run: python3 benchmarks/web-throughput/tests/test_k6_zstd_integration.py -v
+      - name: Check harness syntax
+        run: |
+          python3 -m py_compile benchmarks/web-throughput/run_benchmark.py
+          node --check benchmarks/web-throughput/throughput.js
+          bash -n benchmarks/web-throughput/run.sh
+          shellcheck benchmarks/web-throughput/run.sh
+      - name: Check shell syntax
+        run: |
+          for file in \
+            benchmarks/web-throughput/images/common/bootstrap.sh \
+            benchmarks/web-throughput/images/*/entrypoint.sh
+          do
+            bash -n "${file}"
+          done
+          shellcheck -x \
+            benchmarks/web-throughput/images/common/bootstrap.sh \
+            benchmarks/web-throughput/images/*/entrypoint.sh
+      - name: Check Python syntax
+        run: |
+          python3 -m py_compile \
+            benchmarks/web-throughput/images/validate.py \
+            benchmarks/web-throughput/images/write_build_lock.py
+
+  java-release:
+    name: Build exact Java webserver release
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Set up Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: gradle
+      - name: Test and assemble standalone server
+        run: >-
+          ./gradlew --configure-on-demand
+          :core:spotlessCheck :core:test
+          :common:spotlessCheck :common:test
+          :webserver:spotlessCheck :webserver:test :webserver:release
+          --stacktrace
+      - name: Upload exact webserver release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runpod-throughput-webserver-${{ github.sha }}
+          path: build/release/*-webserver.jar
+          if-no-files-found: error
+          retention-days: 14
+
+  images:
+    name: Publish immutable linux/amd64 role images
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+      - java-release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Download exact webserver release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: runpod-throughput-webserver-${{ github.sha }}
+          path: build/release
+      - name: Derive run-scoped image identities
+        id: identity
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          suffix="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-sha-${GITHUB_SHA}"
+          created="$(git show -s --format=%cI "${GITHUB_SHA}")"
+          source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          {
+            echo "upstream-image=ghcr.io/${owner}/bluemap-perf-loadgen:upstream-${suffix}"
+            echo "php-image=ghcr.io/${owner}/bluemap-web-php:${suffix}"
+            echo "java-image=ghcr.io/${owner}/bluemap-web:${suffix}"
+            echo "loadgen-image=ghcr.io/${owner}/bluemap-perf-loadgen:loadgen-${suffix}"
+            echo "mariadb-image=ghcr.io/${owner}/bluemap-perf-loadgen:mariadb-${suffix}"
+            echo "created=${created}"
+            echo "source=${source}"
+            echo "version=${suffix}"
+          } >> "${GITHUB_OUTPUT}"
+      - name: Write planned transient-image receipt
+        env:
+          UPSTREAM_IMAGE: ${{ steps.identity.outputs.upstream-image }}
+          PHP_IMAGE: ${{ steps.identity.outputs.php-image }}
+          JAVA_IMAGE: ${{ steps.identity.outputs.java-image }}
+          LOADGEN_IMAGE: ${{ steps.identity.outputs.loadgen-image }}
+          MARIADB_IMAGE: ${{ steps.identity.outputs.mariadb-image }}
+        run: |
+          mkdir -p build/runpod-throughput
+          jq -n \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg revision "${GITHUB_SHA}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg upstream "${UPSTREAM_IMAGE}" \
+            --arg php "${PHP_IMAGE}" \
+            --arg java "${JAVA_IMAGE}" \
+            --arg loadgen "${LOADGEN_IMAGE}" \
+            --arg mariadb "${MARIADB_IMAGE}" \
+            '{
+              schemaVersion: 1,
+              repository: $repository,
+              revision: $revision,
+              workflowRunId: $runId,
+              workflowRunAttempt: $runAttempt,
+              plannedTags: {
+                upstream: $upstream,
+                php: $php,
+                java: $java,
+                loadGenerator: $loadgen,
+                mariadb: $mariadb
+              }
+            }' > build/runpod-throughput/planned-images.json
+      - name: Upload planned transient-image receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runpod-throughput-image-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/runpod-throughput/planned-images.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Build exact upstream wrapper
+        id: upstream
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: benchmarks/web-throughput/images/upstream/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.identity.outputs.upstream-image }}
+          build-args: |
+            CREATED=${{ steps.identity.outputs.created }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ steps.identity.outputs.source }}
+            VERSION=${{ steps.identity.outputs.version }}
+          cache-from: type=gha,scope=runpod-throughput-upstream
+          cache-to: type=gha,mode=max,scope=runpod-throughput-upstream
+          provenance: mode=max
+          sbom: true
+      - name: Build exact upstream PHP wrapper
+        id: php
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: benchmarks/web-throughput/images/php/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.identity.outputs.php-image }}
+          build-args: |
+            CREATED=${{ steps.identity.outputs.created }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ steps.identity.outputs.source }}
+            VERSION=${{ steps.identity.outputs.version }}
+          cache-from: type=gha,scope=runpod-throughput-php
+          cache-to: type=gha,mode=max,scope=runpod-throughput-php
+          provenance: mode=max
+          sbom: true
+      - name: Build exact Java wrapper
+        id: java
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: benchmarks/web-throughput/images/java/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.identity.outputs.java-image }}
+          build-args: |
+            CREATED=${{ steps.identity.outputs.created }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ steps.identity.outputs.source }}
+            VERSION=${{ steps.identity.outputs.version }}
+          cache-from: type=gha,scope=runpod-throughput-java
+          cache-to: type=gha,mode=max,scope=runpod-throughput-java
+          provenance: mode=max
+          sbom: true
+      - name: Build exact load-generator controller
+        id: loadgen
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: benchmarks/web-throughput/images/loadgen/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.identity.outputs.loadgen-image }}
+          build-args: |
+            CREATED=${{ steps.identity.outputs.created }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ steps.identity.outputs.source }}
+            VERSION=${{ steps.identity.outputs.version }}
+          cache-from: type=gha,scope=runpod-throughput-loadgen
+          cache-to: type=gha,mode=max,scope=runpod-throughput-loadgen
+          provenance: mode=max
+          sbom: true
+      - name: Build exact MariaDB wrapper
+        id: mariadb
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: benchmarks/web-throughput/images/mariadb/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.identity.outputs.mariadb-image }}
+          build-args: |
+            CREATED=${{ steps.identity.outputs.created }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ steps.identity.outputs.source }}
+            VERSION=${{ steps.identity.outputs.version }}
+          cache-from: type=gha,scope=runpod-throughput-mariadb
+          cache-to: type=gha,mode=max,scope=runpod-throughput-mariadb
+          provenance: mode=max
+          sbom: true
+      - name: Smoke exact MariaDB no-USE snapshot import
+        shell: bash
+        env:
+          MARIADB_IMAGE: ${{ steps.identity.outputs.mariadb-image }}
+          MARIADB_DIGEST: ${{ steps.mariadb.outputs.digest }}
+        run: |
+          set -euo pipefail
+          smoke_root="${RUNNER_TEMP}/bluemap-mariadb-smoke"
+          container="bluemap-mariadb-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "${smoke_root}/bootstrap/database" "${smoke_root}/bootstrap/tls"
+          ssh-keygen -q -t ed25519 -N '' -f "${smoke_root}/ssh-key"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=BlueMap benchmark smoke CA' \
+            -keyout "${smoke_root}/ca.key" \
+            -out "${smoke_root}/bootstrap/tls/ca.crt" >/dev/null 2>&1
+          openssl req -newkey rsa:2048 -nodes \
+            -subj '/CN=localhost' \
+            -keyout "${smoke_root}/bootstrap/tls/server.key" \
+            -out "${smoke_root}/server.csr" >/dev/null 2>&1
+          printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' > "${smoke_root}/server.ext"
+          openssl x509 -req -days 1 \
+            -in "${smoke_root}/server.csr" \
+            -CA "${smoke_root}/bootstrap/tls/ca.crt" \
+            -CAkey "${smoke_root}/ca.key" -CAcreateserial \
+            -extfile "${smoke_root}/server.ext" \
+            -out "${smoke_root}/bootstrap/tls/server.crt" >/dev/null 2>&1
+          printf '%s\n' \
+            'CREATE TABLE smoke_import (id INTEGER PRIMARY KEY);' \
+            'INSERT INTO smoke_import (id) VALUES (1);' \
+            | zstd --compress --stdout --quiet \
+            > "${smoke_root}/bootstrap/database/snapshot.sql.zst"
+          printf '%s\n' '-- no benchmark users required for import smoke' \
+            > "${smoke_root}/bootstrap/database/020-benchmark-users.sql"
+          printf '%s\n' 'smoke-root-password' \
+            > "${smoke_root}/bootstrap/database/root-password"
+          printf '%s\n' \
+            '[client]' \
+            'user=root' \
+            'password=smoke-root-password' \
+            'socket=/run/mysqld/mysqld.sock' \
+            > "${smoke_root}/bootstrap/database/smoke-client.cnf"
+          printf '%s\n' \
+            '[client]' \
+            'user=root' \
+            'password=smoke-root-password' \
+            'host=localhost' \
+            'port=3306' \
+            'protocol=tcp' \
+            'ssl-ca=/bootstrap/tls/ca.crt' \
+            'ssl-verify-server-cert' \
+            > "${smoke_root}/bootstrap/database/smoke-client-tls.cnf"
+          touch "${smoke_root}/bootstrap/start"
+          chmod 0400 \
+            "${smoke_root}/bootstrap/database/root-password" \
+            "${smoke_root}/bootstrap/database/smoke-client.cnf" \
+            "${smoke_root}/bootstrap/database/smoke-client-tls.cnf" \
+            "${smoke_root}/bootstrap/tls/server.key"
+          docker pull "${MARIADB_IMAGE}"
+          pulled="$(docker image inspect --format '{{index .RepoDigests 0}}' "${MARIADB_IMAGE}")"
+          case "${pulled}" in
+            *@"${MARIADB_DIGEST}") ;;
+            *) echo "pulled MariaDB digest mismatch: ${pulled}" >&2; exit 1 ;;
+          esac
+          cleanup() {
+            docker logs "${container}" > build/runpod-throughput/mariadb-smoke.log 2>&1 || true
+            docker rm --force "${container}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name "${container}" \
+            -e "BENCHMARK_SSH_PUBLIC_KEY=$(cat "${smoke_root}/ssh-key.pub")" \
+            -v "${smoke_root}/bootstrap:/bootstrap" \
+            "${MARIADB_IMAGE}" >/dev/null
+          for attempt in $(seq 1 120); do
+            if docker exec "${container}" mariadb \
+              --defaults-extra-file=/bootstrap/database/smoke-client.cnf \
+              --batch --skip-column-names \
+              -e 'SELECT 1' >/dev/null 2>&1; then
+              break
+            fi
+            if [ "${attempt}" -eq 120 ]; then
+              echo 'MariaDB import smoke timed out' >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          result="$(docker exec "${container}" mariadb \
+            --defaults-extra-file=/bootstrap/database/smoke-client-tls.cnf \
+            --batch --skip-column-names \
+            -e "SELECT CONCAT(SUM(TABLE_SCHEMA='bluemap'), ':', COUNT(*)) FROM information_schema.TABLES WHERE TABLE_NAME='smoke_import'; SELECT id FROM bluemap.smoke_import;")"
+          test "${result}" = $'1:1\n1'
+          mkdir -p build/runpod-throughput
+          printf '%s\n' \
+            "image=${MARIADB_IMAGE}@${MARIADB_DIGEST}" \
+            'no-use-snapshot-import=pass' \
+            'target-database=bluemap' \
+            'same-named-tables-outside-target=0' \
+            'tcp-tls-ca-host-verification=pass' \
+            > build/runpod-throughput/mariadb-smoke.txt
+          docker logs "${container}" > build/runpod-throughput/mariadb-smoke.log 2>&1
+          docker rm --force "${container}" >/dev/null
+          trap - EXIT
+      - name: Write immutable build lock
+        env:
+          UPSTREAM_IMAGE: ${{ steps.identity.outputs.upstream-image }}
+          UPSTREAM_DIGEST: ${{ steps.upstream.outputs.digest }}
+          PHP_IMAGE: ${{ steps.identity.outputs.php-image }}
+          PHP_DIGEST: ${{ steps.php.outputs.digest }}
+          JAVA_IMAGE: ${{ steps.identity.outputs.java-image }}
+          JAVA_DIGEST: ${{ steps.java.outputs.digest }}
+          LOADGEN_IMAGE: ${{ steps.identity.outputs.loadgen-image }}
+          LOADGEN_DIGEST: ${{ steps.loadgen.outputs.digest }}
+          MARIADB_IMAGE: ${{ steps.identity.outputs.mariadb-image }}
+          MARIADB_DIGEST: ${{ steps.mariadb.outputs.digest }}
+          SOURCE_URL: ${{ steps.identity.outputs.source }}
+          IMAGE_CREATED: ${{ steps.identity.outputs.created }}
+          BUILD_LOCK_PATH: build/runpod-throughput/build-lock.json
+        run: python3 benchmarks/web-throughput/images/write_build_lock.py
+      - name: Validate build lock
+        run: |
+          python3 -m json.tool build/runpod-throughput/build-lock.json >/dev/null
+          jq -e '
+            .platform == "linux/amd64" and
+            (.built | length == 5) and
+            ([.built[].digest | test("^sha256:[0-9a-f]{64}$")] | all) and
+            ([.built[].immutableRef | contains("@sha256:")] | all) and
+            ([.built[].deletionIdentity | contains("@sha256:")] | all)
+          ' build/runpod-throughput/build-lock.json >/dev/null
+      - name: Upload immutable build lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runpod-throughput-build-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/runpod-throughput/build-lock.json
+            build/runpod-throughput/mariadb-smoke.txt
+            build/runpod-throughput/mariadb-smoke.log
+          if-no-files-found: error
+          retention-days: 90
