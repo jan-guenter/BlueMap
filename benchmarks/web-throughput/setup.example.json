@@ -1,0 +1,37 @@
+{
+  "formatVersion": 1,
+  "environment": "replace with the host or VM image and CPU identity",
+  "protocol": "HTTP/1.1 over direct-origin HTTP",
+  "database": {
+    "snapshotId": "replace-with-DATASET_ID",
+    "aggregateConnectionCeiling": 12
+  },
+  "resourceLimits": {
+    "upstream": {
+      "cpu": "2 cores",
+      "memory": "2 GiB"
+    },
+    "upstream-php": {
+      "cpu": "2 cores",
+      "memory": "2 GiB"
+    },
+    "new-java": {
+      "cpu": "2 cores",
+      "memory": "2 GiB"
+    }
+  },
+  "targets": {
+    "upstream": {
+      "runtime": "replace with image digest and Java/runtime version",
+      "configuration": "replace with immutable configuration digest or description"
+    },
+    "upstream-php": {
+      "runtime": "replace with HTTP server and PHP-FPM image/version identities",
+      "configuration": "replace with immutable HTTP, PHP-FPM, and PHP configuration digests"
+    },
+    "new-java": {
+      "runtime": "replace with image digest and Java/runtime version",
+      "configuration": "replace with immutable configuration digest or description"
+    }
+  }
+}

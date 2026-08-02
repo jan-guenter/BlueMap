@@ -1,0 +1,7 @@
+# Replace these example entries with existing objects from one immutable map.
+# Keep the same file and SQL snapshot for all three targets.
+/maps/world/settings.json
+/maps/world/textures.json
+/maps/world/live/markers.json
+/maps/world/live/players.json
+/maps/world/tiles/0/x0z0
