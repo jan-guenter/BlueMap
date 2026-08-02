@@ -14,14 +14,13 @@ LABEL org.opencontainers.image.title="BlueMap Java RunPod benchmark wrapper" \
       org.opencontainers.image.created="${CREATED}" \
       org.opencontainers.image.base.name="docker.io/library/eclipse-temurin:25-jre-jammy" \
       org.opencontainers.image.base.digest="sha256:b8ba5fca9d88b6ecc3a46c8e75b744f84aca9a9d08587901b5ab480baf641ab5" \
-      io.bluemap.benchmark.wrapper.packages="openssh-server,curl,iproute2,iptables,procps,util-linux"
+      io.bluemap.benchmark.wrapper.packages="openssh-server,curl,iproute2,procps,util-linux"
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         ca-certificates \
         curl \
         iproute2 \
-        iptables \
         openssh-server \
         procps \
         util-linux \
@@ -39,6 +38,6 @@ COPY benchmarks/web-throughput/images/common/bootstrap.sh /usr/local/libexec/blu
 COPY benchmarks/web-throughput/images/common/sshd_config /etc/ssh/sshd_config
 COPY --chmod=0755 benchmarks/web-throughput/images/java/entrypoint.sh /usr/local/bin/bluemap-java-entrypoint
 
-EXPOSE 22 8100
+EXPOSE 22
 
 ENTRYPOINT ["/usr/local/bin/bluemap-java-entrypoint"]

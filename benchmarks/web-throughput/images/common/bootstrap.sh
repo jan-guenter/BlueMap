@@ -120,4 +120,21 @@ bootstrap_validate_java_webserver_config() {
     ' "$webserver_config")"
     [ "$configured_ports" = "8100" ] || \
         bootstrap_fail "webserver config must contain exactly one active port: 8100 setting"
+
+    configured_ips="$(awk '
+        {
+            sub(/#.*/, "")
+            if ($0 ~ /^[[:space:]]*ip[[:space:]]*[:=]/) {
+                sub(/^[[:space:]]*ip[[:space:]]*[:=][[:space:]]*/, "")
+                sub(/[[:space:]]*$/, "")
+                if ($0 ~ /^"[^"]*"$/) {
+                    sub(/^"/, "")
+                    sub(/"$/, "")
+                }
+                print
+            }
+        }
+    ' "$webserver_config")"
+    [ "$configured_ips" = "127.0.0.1" ] || \
+        bootstrap_fail "webserver config must contain exactly one active ip: 127.0.0.1 setting"
 }

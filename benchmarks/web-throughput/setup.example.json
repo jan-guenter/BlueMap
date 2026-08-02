@@ -1,17 +1,27 @@
 {
   "formatVersion": 2,
   "environment": "RunPod CPU Pods with immutable images and pod-local disks",
-  "protocol": "HTTP/1.1 over direct RunPod TCP origin; no HTTP intermediary",
+  "protocol": "HTTP/1.1 over host-key-pinned SSH L4 forwarding; no HTTP intermediary",
   "directOrigin": true,
+  "transport": {
+    "type": "host-key-pinned SSH local forwarding",
+    "initiator": "load-generator",
+    "sshHostKeysPinned": true,
+    "laneCountPerTarget": 12,
+    "originBindAddress": "127.0.0.1",
+    "originPort": 8100,
+    "loadGeneratorTcpBalancer": "HAProxy mode tcp",
+    "candidatePublicHttp": false
+  },
   "runpod": {
     "region": "EU-NL-1",
-    "topology": "three isolated target Pods, one MariaDB Pod, one load-generator Pod"
+    "topology": "three loopback-only target Pods, one public-TLS MariaDB Pod, one load-generator Pod"
   },
   "database": {
     "snapshotId": "replace-with-DATASET_ID",
     "engine": "MariaDB",
     "version": "replace with immutable MariaDB image/version",
-    "aggregateConnectionCeiling": 12,
+    "perCandidateConnectionCeiling": 12,
     "tls": {
       "required": true,
       "verified": true,
@@ -36,7 +46,7 @@
   "targets": {
     "upstream": {
       "runtime": "replace with immutable image digest and runtime version",
-      "configuration": "replace with immutable configuration digest",
+      "configuration": "replace with immutable configuration digest including ip=127.0.0.1 and port=8100",
       "runtimeIdentity": "replace with frozen RunPod API and SSH runtime identity",
       "runpodPodId": "replace with frozen RunPod Pod ID",
       "imageDigest": "sha256:replace-with-64-lowercase-hex-digest",
@@ -48,7 +58,7 @@
     },
     "upstream-php": {
       "runtime": "replace with immutable nginx/PHP-FPM image identities",
-      "configuration": "replace with immutable nginx/PHP/TLS configuration digests",
+      "configuration": "replace with immutable loopback-only nginx/PHP/TLS configuration digests",
       "runtimeIdentity": "replace with frozen RunPod API and SSH runtime identity",
       "runpodPodId": "replace with frozen RunPod Pod ID",
       "imageDigest": "sha256:replace-with-64-lowercase-hex-digest",
@@ -60,7 +70,7 @@
     },
     "new-java": {
       "runtime": "replace with immutable image digest and runtime version",
-      "configuration": "replace with immutable configuration digest",
+      "configuration": "replace with immutable configuration digest including ip=127.0.0.1 and port=8100",
       "runtimeIdentity": "replace with frozen RunPod API and SSH runtime identity",
       "runpodPodId": "replace with frozen RunPod Pod ID",
       "imageDigest": "sha256:replace-with-64-lowercase-hex-digest",
@@ -73,7 +83,7 @@
   },
   "loadGenerator": {
     "runtime": "replace with immutable load-generator image digest and k6 version",
-    "configuration": "replace with immutable command/configuration digest",
+    "configuration": "replace with immutable command, pinned known-hosts, 12-lane-per-target SSH and TCP-balancer configuration digest",
     "hardware": {
       "podId": "replace with frozen RunPod Pod ID",
       "podType": "replace with exact RunPod CPU Pod type",

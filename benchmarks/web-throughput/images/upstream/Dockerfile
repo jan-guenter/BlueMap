@@ -15,14 +15,13 @@ LABEL org.opencontainers.image.title="BlueMap upstream RunPod benchmark wrapper"
       org.opencontainers.image.base.name="ghcr.io/bluemap-minecraft/bluemap" \
       org.opencontainers.image.base.digest="sha256:5760d82b0cc3dbc1ef2482a45a8d283e680687e60c57aa17dd9fa083184dc062" \
       io.bluemap.benchmark.application-revision="e664c1abdf697c64703401dca1d7e1956f755f65" \
-      io.bluemap.benchmark.wrapper.packages="openssh-server,curl,iproute2,iptables,procps,util-linux"
+      io.bluemap.benchmark.wrapper.packages="openssh-server,curl,iproute2,procps,util-linux"
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         ca-certificates \
         curl \
         iproute2 \
-        iptables \
         openssh-server \
         procps \
         util-linux \
@@ -37,6 +36,6 @@ COPY benchmarks/web-throughput/images/common/bootstrap.sh /usr/local/libexec/blu
 COPY benchmarks/web-throughput/images/common/sshd_config /etc/ssh/sshd_config
 COPY --chmod=0755 benchmarks/web-throughput/images/upstream/entrypoint.sh /usr/local/bin/bluemap-upstream-entrypoint
 
-EXPOSE 22 8100
+EXPOSE 22
 
 ENTRYPOINT ["/usr/local/bin/bluemap-upstream-entrypoint"]

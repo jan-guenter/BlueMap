@@ -16,12 +16,11 @@ LABEL org.opencontainers.image.title="BlueMap PHP RunPod benchmark wrapper" \
       org.opencontainers.image.base.digest="sha256:e0f1ffe8bd43a137facdccdcac41cabdfc23e8d0fdd0665916a062f16e2f4058" \
       io.bluemap.benchmark.application-revision="e664c1abdf697c64703401dca1d7e1956f755f65" \
       io.bluemap.benchmark.sql-php-sha256="e160a9ecbd996b5c701f172a7b22bf73eec96670cf6508034e18251067bebb6b" \
-      io.bluemap.benchmark.wrapper.packages="openssh-server,curl,iproute2,iptables,procps,nginx,stunnel"
+      io.bluemap.benchmark.wrapper.packages="openssh-server,curl,iproute2,procps,nginx,stunnel"
 
 RUN apk add --no-cache \
         curl \
         iproute2 \
-        iptables \
         nginx \
         openssh-server \
         procps \
@@ -43,7 +42,7 @@ COPY benchmarks/web-throughput/images/php/php-fpm-www.conf /usr/local/etc/php-fp
 COPY benchmarks/web-throughput/images/php/php.ini /usr/local/etc/php/conf.d/zz-benchmark.ini
 COPY --chmod=0755 benchmarks/web-throughput/images/php/entrypoint.sh /usr/local/bin/bluemap-php-entrypoint
 
-EXPOSE 22 8100
+EXPOSE 22
 
 STOPSIGNAL SIGQUIT
 

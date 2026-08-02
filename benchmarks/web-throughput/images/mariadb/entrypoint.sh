@@ -73,4 +73,6 @@ exec docker-entrypoint.sh mariadbd \
     --ssl-ca="$ca_file" \
     --ssl-cert="$certificate_file" \
     --ssl-key="$key_file" \
+    --connect-timeout=5 \
+    --max-connections=64 \
     --skip-name-resolve

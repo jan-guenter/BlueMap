@@ -15,13 +15,12 @@ LABEL org.opencontainers.image.title="MariaDB RunPod benchmark wrapper" \
       org.opencontainers.image.base.name="docker.io/library/mariadb:11.8.8" \
       org.opencontainers.image.base.digest="sha256:09336a8c0cff9f363e133d8a245cca5ad3eeb326e0ffaedf74d49214c4571486" \
       io.bluemap.benchmark.mariadb-version="11.8.8" \
-      io.bluemap.benchmark.wrapper.packages="openssh-server,iproute2,iptables,procps,zstd"
+      io.bluemap.benchmark.wrapper.packages="openssh-server,iproute2,procps,zstd"
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         ca-certificates \
         iproute2 \
-        iptables \
         openssh-server \
         openssl \
         procps \

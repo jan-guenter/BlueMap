@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 
@@ -332,14 +332,14 @@ def load_setup_manifest(path: Path, dataset_id: str) -> tuple[dict[str, Any], by
         raise BenchmarkError(
             "setup manifest database.snapshotId must equal --dataset-id"
         )
-    connection_ceiling = database.get("aggregateConnectionCeiling")
+    connection_ceiling = database.get("perCandidateConnectionCeiling")
     if (
         isinstance(connection_ceiling, bool)
         or not isinstance(connection_ceiling, int)
         or connection_ceiling != APPROVED_VUS
     ):
         raise BenchmarkError(
-            "setup manifest database.aggregateConnectionCeiling must be exactly "
+            "setup manifest database.perCandidateConnectionCeiling must be exactly "
             f"{APPROVED_VUS}"
         )
 
@@ -1180,6 +1180,7 @@ class ProcessResourceSampler:
         expected_phase_duration_seconds: float,
         target_upload_bits_per_second: int,
         interval_seconds: float = 1.0,
+        proc_root: Path = Path("/proc"),
     ) -> None:
         if (
             not math.isfinite(expected_phase_duration_seconds)
@@ -1199,8 +1200,15 @@ class ProcessResourceSampler:
         self.expected_phase_duration_seconds = expected_phase_duration_seconds
         self.target_upload_bits_per_second = target_upload_bits_per_second
         self.interval_seconds = interval_seconds
+        self._proc_root = proc_root
         self._stop = threading.Event()
         self._samples: list[dict[str, Any]] = []
+        self._capture_errors: list[str] = []
+        self._source_discovery_valid = False
+        self._cgroup_version: int | None = None
+        self._cgroup_cpu_path: Path | None = None
+        self._cgroup_memory_path: Path | None = None
+        self._network_interface: str | None = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._capture_start_monotonic_seconds: float | None = None
         self._capture_stop_monotonic_seconds: float | None = None
@@ -1211,6 +1219,7 @@ class ProcessResourceSampler:
     def start(self, phase_start_monotonic_seconds: float) -> None:
         self._phase_start_monotonic_seconds = phase_start_monotonic_seconds
         self._capture_start_monotonic_seconds = time.monotonic()
+        self._initialize_sources()
         self._capture()
         self._thread.start()
 
@@ -1226,52 +1235,255 @@ class ProcessResourceSampler:
         while not self._stop.wait(self.interval_seconds):
             self._capture()
 
+    @staticmethod
+    def _decode_mountinfo_field(value: str) -> str:
+        return re.sub(
+            r"\\([0-7]{3})",
+            lambda match: chr(int(match.group(1), 8)),
+            value,
+        )
+
+    @staticmethod
+    def _resolve_cgroup_mount_path(
+        mount_root: str, mount_point: str, cgroup_path: str
+    ) -> Path | None:
+        root = PurePosixPath(mount_root)
+        member = PurePosixPath(cgroup_path)
+        if not root.is_absolute() or not member.is_absolute():
+            return None
+        try:
+            relative = member.relative_to(root)
+        except ValueError:
+            return None
+        return Path(mount_point).joinpath(*relative.parts)
+
+    def _mountinfo_entries(self) -> list[dict[str, Any]]:
+        lines = (self._proc_root / str(self.pid) / "mountinfo").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        entries: list[dict[str, Any]] = []
+        for line_number, line in enumerate(lines, start=1):
+            fields = line.split()
+            try:
+                separator = fields.index("-")
+            except ValueError as error:
+                raise ValueError(
+                    f"mountinfo line {line_number} has no separator"
+                ) from error
+            if separator < 6 or len(fields) <= separator + 3:
+                raise ValueError(f"mountinfo line {line_number} is malformed")
+            entries.append(
+                {
+                    "root": self._decode_mountinfo_field(fields[3]),
+                    "mountPoint": self._decode_mountinfo_field(fields[4]),
+                    "filesystemType": fields[separator + 1],
+                    "superOptions": set(fields[separator + 3].split(",")),
+                }
+            )
+        return entries
+
+    def _discover_cgroup_sources(self) -> tuple[int, Path, Path]:
+        cgroup_lines = (self._proc_root / str(self.pid) / "cgroup").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        parsed: list[tuple[str, set[str], str]] = []
+        for line_number, line in enumerate(cgroup_lines, start=1):
+            parts = line.split(":", 2)
+            if len(parts) != 3 or not parts[2].startswith("/"):
+                raise ValueError(f"cgroup line {line_number} is malformed")
+            parsed.append(
+                (parts[0], set(filter(None, parts[1].split(","))), parts[2])
+            )
+
+        mountinfo = self._mountinfo_entries()
+        unified = [
+            path
+            for hierarchy, controllers, path in parsed
+            if hierarchy == "0" and not controllers
+        ]
+        if unified:
+            if len(unified) != 1:
+                raise ValueError("cgroup v2 membership is ambiguous")
+            candidates: set[tuple[Path, Path]] = set()
+            for entry in mountinfo:
+                if entry["filesystemType"] != "cgroup2":
+                    continue
+                base = self._resolve_cgroup_mount_path(
+                    entry["root"], entry["mountPoint"], unified[0]
+                )
+                if base is None:
+                    continue
+                cpu_path = base / "cpu.stat"
+                memory_path = base / "memory.current"
+                if cpu_path.is_file() and memory_path.is_file():
+                    candidates.add((cpu_path, memory_path))
+            if len(candidates) != 1:
+                raise ValueError(
+                    "expected exactly one readable cgroup v2 CPU/memory source"
+                )
+            cpu_path, memory_path = next(iter(candidates))
+            return 2, cpu_path, memory_path
+
+        cpu_memberships = [
+            path for _, controllers, path in parsed if "cpuacct" in controllers
+        ]
+        memory_memberships = [
+            path for _, controllers, path in parsed if "memory" in controllers
+        ]
+        if len(cpu_memberships) != 1 or len(memory_memberships) != 1:
+            raise ValueError(
+                "cgroup v1 CPU or memory membership is missing or ambiguous"
+            )
+
+        def v1_candidates(
+            controller: str, membership: str, filename: str
+        ) -> set[Path]:
+            candidates: set[Path] = set()
+            for entry in mountinfo:
+                if entry["filesystemType"] != "cgroup":
+                    continue
+                mount_controllers = set(entry["superOptions"])
+                mount_controllers.update(Path(entry["mountPoint"]).name.split(","))
+                if controller not in mount_controllers:
+                    continue
+                base = self._resolve_cgroup_mount_path(
+                    entry["root"], entry["mountPoint"], membership
+                )
+                if base is not None and (base / filename).is_file():
+                    candidates.add(base / filename)
+            return candidates
+
+        cpu_candidates = v1_candidates("cpuacct", cpu_memberships[0], "cpuacct.usage")
+        memory_candidates = v1_candidates(
+            "memory", memory_memberships[0], "memory.usage_in_bytes"
+        )
+        if len(cpu_candidates) != 1 or len(memory_candidates) != 1:
+            raise ValueError(
+                "expected exactly one readable cgroup v1 CPU and memory source"
+            )
+        return 1, next(iter(cpu_candidates)), next(iter(memory_candidates))
+
+    def _network_counters(self) -> dict[str, tuple[int, int]]:
+        lines = (self._proc_root / "net" / "dev").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        counters: dict[str, tuple[int, int]] = {}
+        for line_number, line in enumerate(lines[2:], start=3):
+            if not line.strip():
+                continue
+            if ":" not in line:
+                raise ValueError(f"network counter line {line_number} is malformed")
+            interface, data = line.split(":", 1)
+            interface = interface.strip()
+            if not interface or not re.fullmatch(r"[A-Za-z0-9_.:-]+", interface):
+                raise ValueError(f"network interface on line {line_number} is invalid")
+            if interface in counters:
+                raise ValueError(f"network interface {interface!r} is duplicated")
+            fields = data.split()
+            if len(fields) != 16:
+                raise ValueError(f"network counters for {interface!r} are malformed")
+            values = [int(field) for field in fields]
+            if any(value < 0 for value in values):
+                raise ValueError(f"network counters for {interface!r} are negative")
+            counters[interface] = (values[0], values[8])
+        return counters
+
+    def _discover_external_network_interface(self) -> str:
+        external = sorted(
+            interface
+            for interface in self._network_counters()
+            if interface != "lo"
+        )
+        if len(external) != 1:
+            raise ValueError(
+                "expected exactly one non-loopback external network interface"
+            )
+        return external[0]
+
+    def _initialize_sources(self) -> None:
+        try:
+            version, cpu_path, memory_path = self._discover_cgroup_sources()
+            network_interface = self._discover_external_network_interface()
+        except (OSError, ValueError) as error:
+            self._capture_errors.append(f"telemetry source discovery failed: {error}")
+            return
+        self._cgroup_version = version
+        self._cgroup_cpu_path = cpu_path
+        self._cgroup_memory_path = memory_path
+        self._network_interface = network_interface
+        self._source_discovery_valid = True
+
+    def _read_cpu_usage_nanoseconds(self) -> int:
+        assert self._cgroup_cpu_path is not None
+        value = self._cgroup_cpu_path.read_text(encoding="utf-8").strip()
+        if self._cgroup_version == 2:
+            usage_values = []
+            for line in value.splitlines():
+                fields = line.split()
+                if len(fields) == 2 and fields[0] == "usage_usec":
+                    usage_values.append(int(fields[1]))
+            if len(usage_values) != 1 or usage_values[0] < 0:
+                raise ValueError("cgroup v2 cpu.stat has invalid usage_usec")
+            return usage_values[0] * 1000
+        if self._cgroup_version != 1 or not re.fullmatch(r"[0-9]+", value):
+            raise ValueError("cgroup v1 cpuacct.usage is invalid")
+        return int(value)
+
+    def _read_memory_current_bytes(self) -> int:
+        assert self._cgroup_memory_path is not None
+        value = self._cgroup_memory_path.read_text(encoding="utf-8").strip()
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ValueError("cgroup memory usage is invalid")
+        return int(value)
+
     def _capture(self) -> None:
+        if not self._source_discovery_valid:
+            return
         try:
             captured_at = time.monotonic()
-            stat_parts = Path(f"/proc/{self.pid}/stat").read_text(
-                encoding="utf-8"
-            ).split()
-            status_lines = Path(f"/proc/{self.pid}/status").read_text(
-                encoding="utf-8"
-            ).splitlines()
-            network_lines = Path("/proc/net/dev").read_text(
-                encoding="utf-8"
-            ).splitlines()[2:]
-            cpu_ticks = int(stat_parts[13]) + int(stat_parts[14])
-            rss_kib = None
-            for line in status_lines:
-                if line.startswith("VmRSS:"):
-                    rss_kib = int(line.split()[1])
-                    break
-            if rss_kib is None:
-                raise ValueError("VmRSS missing")
-            receive_bytes = 0
-            transmit_bytes = 0
-            for line in network_lines:
-                _, data = line.split(":", 1)
-                fields = data.split()
-                receive_bytes += int(fields[0])
-                transmit_bytes += int(fields[8])
+            cpu_usage_nanoseconds = self._read_cpu_usage_nanoseconds()
+            memory_current_bytes = self._read_memory_current_bytes()
+            network_counters = self._network_counters()
+            external_interfaces = sorted(
+                interface for interface in network_counters if interface != "lo"
+            )
+            if external_interfaces != [self._network_interface]:
+                raise ValueError(
+                    "non-loopback network interface set changed after discovery"
+                )
+            receive_bytes, transmit_bytes = network_counters[self._network_interface]
             self._samples.append(
                 {
                     "monotonicSeconds": captured_at,
-                    "cpuTicks": cpu_ticks,
-                    "rssBytes": rss_kib * 1024,
+                    "cpuUsageNanoseconds": cpu_usage_nanoseconds,
+                    "memoryCurrentBytes": memory_current_bytes,
                     "networkReceiveBytes": receive_bytes,
                     "networkTransmitBytes": transmit_bytes,
                 }
             )
-        except (OSError, ValueError, IndexError):
-            # A final capture can race with process exit. Completeness is
-            # decided from the retained samples, not from an optimistic default.
-            return
+        except (OSError, ValueError, KeyError) as error:
+            self._capture_errors.append(f"telemetry capture failed: {error}")
 
     def _summarize(self) -> dict[str, Any]:
-        clock_ticks = os.sysconf("SC_CLK_TCK")
         evidence_errors: list[str] = []
+        evidence_errors.extend(self._capture_errors)
         intervals: list[dict[str, float]] = []
         raw_samples = [dict(sample) for sample in self._samples]
+
+        source_evidence_valid = (
+            self._source_discovery_valid
+            and self._cgroup_version in {1, 2}
+            and isinstance(self._cgroup_cpu_path, Path)
+            and isinstance(self._cgroup_memory_path, Path)
+            and isinstance(self._network_interface, str)
+            and bool(self._network_interface)
+            and self._network_interface != "lo"
+            and not self._capture_errors
+        )
+        if not source_evidence_valid:
+            evidence_errors.append(
+                "telemetry source identity or capture evidence is invalid"
+            )
 
         capture_start = self._capture_start_monotonic_seconds
         capture_stop = self._capture_stop_monotonic_seconds
@@ -1314,8 +1526,8 @@ class ProcessResourceSampler:
 
         required_raw_fields = (
             "monotonicSeconds",
-            "cpuTicks",
-            "rssBytes",
+            "cpuUsageNanoseconds",
+            "memoryCurrentBytes",
             "networkReceiveBytes",
             "networkTransmitBytes",
         )
@@ -1368,7 +1580,10 @@ class ProcessResourceSampler:
                     evidence_errors.append(
                         f"telemetry interval {index} exceeds the maximum interval"
                     )
-                cpu_ticks_delta = current["cpuTicks"] - previous["cpuTicks"]
+                cpu_usage_delta = (
+                    current["cpuUsageNanoseconds"]
+                    - previous["cpuUsageNanoseconds"]
+                )
                 receive_delta = (
                     current["networkReceiveBytes"]
                     - previous["networkReceiveBytes"]
@@ -1377,23 +1592,25 @@ class ProcessResourceSampler:
                     current["networkTransmitBytes"]
                     - previous["networkTransmitBytes"]
                 )
-                if cpu_ticks_delta < 0:
+                if cpu_usage_delta < 0:
                     evidence_errors.append(
-                        f"telemetry interval {index} has regressed CPU ticks"
+                        f"telemetry interval {index} has regressed cgroup CPU usage"
                     )
                 if receive_delta < 0 or transmit_delta < 0:
                     evidence_errors.append(
                         f"telemetry interval {index} has regressed network counters"
                     )
-                if cpu_ticks_delta < 0 or receive_delta < 0 or transmit_delta < 0:
+                if cpu_usage_delta < 0 or receive_delta < 0 or transmit_delta < 0:
                     continue
                 cpu_utilization = (
-                    (cpu_ticks_delta / clock_ticks)
+                    (cpu_usage_delta / 1_000_000_000.0)
                     / (elapsed * self.admission.cpu_count)
                     * 100.0
                 )
                 memory_utilization = (
-                    current["rssBytes"] / self.admission.memory_bytes * 100.0
+                    current["memoryCurrentBytes"]
+                    / self.admission.memory_bytes
+                    * 100.0
                 )
                 receive_rate = receive_delta / elapsed
                 transmit_rate = transmit_delta / elapsed
@@ -1444,7 +1661,8 @@ class ProcessResourceSampler:
             else None
         )
         timing_valid = (
-            raw_samples_valid
+            source_evidence_valid
+            and raw_samples_valid
             and capture_bounds_valid
             and phase_bounds_valid
             and phase_capture_order_valid
@@ -1481,7 +1699,9 @@ class ProcessResourceSampler:
         # delta. Omitting rawSamples[0] could hide start-of-phase saturation.
         raw_memory_utilization = (
             [
-                sample["rssBytes"] / self.admission.memory_bytes * 100.0
+                sample["memoryCurrentBytes"]
+                / self.admission.memory_bytes
+                * 100.0
                 for sample in raw_samples
             ]
             if raw_samples_valid
@@ -1520,8 +1740,19 @@ class ProcessResourceSampler:
         return {
             "formatVersion": FORMAT_VERSION,
             "pid": self.pid,
-            "source": "procfs-process-and-network",
-            "clockTicksPerSecond": clock_ticks,
+            "source": "container-cgroup-and-network-interface",
+            "resourceScope": "container-cgroup",
+            "cgroupVersion": self._cgroup_version,
+            "cgroupCpuPath": (
+                str(self._cgroup_cpu_path) if self._cgroup_cpu_path is not None else None
+            ),
+            "cgroupMemoryPath": (
+                str(self._cgroup_memory_path)
+                if self._cgroup_memory_path is not None
+                else None
+            ),
+            "networkInterface": self._network_interface,
+            "sourceEvidenceValid": source_evidence_valid,
             "samplingIntervalSeconds": self.interval_seconds,
             "captureStartMonotonicSeconds": capture_start,
             "captureStopMonotonicSeconds": capture_stop,

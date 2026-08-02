@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import re
 import subprocess
@@ -176,31 +177,39 @@ def main() -> None:
         "data directory is not empty",
         "export MARIADB_DATABASE=bluemap",
         "docker-entrypoint.sh mariadbd",
+        "--connect-timeout=5",
+        "--max-connections=64",
     ):
         if fragment not in mariadb_entrypoint:
             fail(f"MariaDB wrapper is missing fail-closed fragment: {fragment}")
-    if "iptables" not in (IMAGES / "mariadb" / "Dockerfile").read_text(
-        encoding="utf-8"
-    ):
-        fail("MariaDB wrapper lacks the pre-start source-IP firewall tool")
+    if "iptables" in (IMAGES / "mariadb" / "Dockerfile").read_text(encoding="utf-8"):
+        fail("MariaDB wrapper must not depend on unavailable firewall privileges")
 
     for candidate in ("upstream", "php", "java"):
         dockerfile = (IMAGES / candidate / "Dockerfile").read_text(encoding="utf-8")
-        if "EXPOSE 22 8100" not in dockerfile:
-            fail(f"{candidate} wrapper must expose SSH and the common candidate port 8100")
-        for tool in ("iptables", "curl"):
-            if tool not in dockerfile:
-                fail(f"{candidate} wrapper lacks required network tool {tool}")
-    if "listen 8100;" not in (IMAGES / "php" / "nginx.conf").read_text(encoding="utf-8"):
-        fail("PHP nginx must listen on the common candidate port 8100")
-    if "access_log off;" not in (IMAGES / "php" / "nginx.conf").read_text(encoding="utf-8"):
+        exposed = re.findall(r"(?m)^EXPOSE[ \t]+(.+)$", dockerfile)
+        if exposed != ["22"]:
+            fail(f"{candidate} wrapper must expose only SSH; HTTP remains loopback-only")
+        if "curl" not in dockerfile:
+            fail(f"{candidate} wrapper lacks required network tool curl")
+        if "iptables" in dockerfile:
+            fail(f"{candidate} wrapper must not depend on unavailable HTTP firewall privileges")
+
+    php_nginx = (IMAGES / "php" / "nginx.conf").read_text(encoding="utf-8")
+    php_listeners = re.findall(r"(?m)^[ \t]*listen[ \t]+([^;]+);", php_nginx)
+    if php_listeners != ["127.0.0.1:8100"]:
+        fail("PHP nginx must contain exactly one loopback-only 127.0.0.1:8100 listener")
+    if "access_log off;" not in php_nginx:
         fail("PHP nginx request logging must be disabled")
     for candidate in ("upstream", "java"):
         entrypoint = (IMAGES / candidate / "entrypoint.sh").read_text(encoding="utf-8")
         if 'bootstrap_wait_for_path /bootstrap/tls/ca.crt' not in entrypoint:
             fail(f"{candidate} wrapper does not fail closed on the uploaded MariaDB CA")
         if "bootstrap_validate_java_webserver_config" not in entrypoint:
-            fail(f"{candidate} wrapper does not enforce port 8100 and disabled request logging")
+            fail(
+                f"{candidate} wrapper does not enforce loopback port 8100 and "
+                "disabled request logging"
+            )
     upstream_entrypoint = (IMAGES / "upstream" / "entrypoint.sh").read_text(encoding="utf-8")
     if " -b" in upstream_entrypoint or "--verbose" in upstream_entrypoint:
         fail("upstream CLI verbose request logging must remain disabled")
@@ -213,6 +222,8 @@ def main() -> None:
         "/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config &",
         "printf '%s\\n' \"$sshd_pid\" > /run/sshd.pid",
         'kill -0 "$sshd_pid"',
+        'configured_ips="$(awk',
+        'bootstrap_fail "webserver config must contain exactly one active ip: 127.0.0.1 setting"',
     ):
         if fragment not in bootstrap:
             fail(f"shared bootstrap is missing explicit sshd lifecycle fragment: {fragment}")
@@ -240,6 +251,29 @@ def main() -> None:
             fail(f"workflow is missing required fragment: {fragment}")
     if "linux/arm64" in workflow:
         fail("benchmark workflow must not build arm64 images")
+
+    setup_example = json.loads(
+        (ROOT / "benchmarks" / "web-throughput" / "setup.example.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    transport = setup_example.get("transport")
+    expected_transport = {
+        "type": "host-key-pinned SSH local forwarding",
+        "initiator": "load-generator",
+        "sshHostKeysPinned": True,
+        "laneCountPerTarget": 12,
+        "originBindAddress": "127.0.0.1",
+        "originPort": 8100,
+        "loadGeneratorTcpBalancer": "HAProxy mode tcp",
+        "candidatePublicHttp": False,
+    }
+    if transport != expected_transport:
+        fail("setup example does not freeze the reviewed loopback/SSH-lane transport")
+    if setup_example.get("directOrigin") is not True:
+        fail("setup example must retain direct-origin HTTP semantics")
+    if "SSH L4 forwarding" not in setup_example.get("protocol", ""):
+        fail("setup example protocol does not describe the SSH L4 transport")
 
     print("five immutable benchmark role images validated")
 

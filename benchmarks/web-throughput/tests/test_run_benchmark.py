@@ -28,7 +28,7 @@ def setup_manifest(snapshot_id: str = "snapshot-1") -> dict:
             "snapshotId": snapshot_id,
             "engine": "MariaDB",
             "version": "mariadb@sha256:test",
-            "aggregateConnectionCeiling": 12,
+            "perCandidateConnectionCeiling": 12,
             "tls": {
                 "required": True,
                 "verified": True,
@@ -195,6 +195,11 @@ def sampler_with_receive_rates(
         expected_phase_duration_seconds=expected_duration,
         target_upload_bits_per_second=16_000,
     )
+    sampler._source_discovery_valid = True
+    sampler._cgroup_version = 2
+    sampler._cgroup_cpu_path = Path("/sys/fs/cgroup/cpu.stat")
+    sampler._cgroup_memory_path = Path("/sys/fs/cgroup/memory.current")
+    sampler._network_interface = "eth0"
     if timestamps is None:
         timestamps = [float(index) for index in range(len(rates) + 1)]
     receive_total = 0
@@ -205,8 +210,8 @@ def sampler_with_receive_rates(
         sampler._samples.append(
             {
                 "monotonicSeconds": monotonic_seconds,
-                "cpuTicks": 0,
-                "rssBytes": 100,
+                "cpuUsageNanoseconds": 0,
+                "memoryCurrentBytes": 100,
                 "networkReceiveBytes": receive_total,
                 "networkTransmitBytes": index,
             }
@@ -300,6 +305,24 @@ def stop_servers(servers_and_threads) -> None:
 
 
 class BenchmarkHelpersTest(unittest.TestCase):
+    @staticmethod
+    def _write_network_counters(
+        proc_root: Path, interfaces: list[tuple[str, int, int]]
+    ) -> None:
+        (proc_root / "net").mkdir(parents=True, exist_ok=True)
+        lines = [
+            "Inter-|   Receive                                                |  Transmit",
+            " face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed",
+        ]
+        for interface, receive_bytes, transmit_bytes in interfaces:
+            lines.append(
+                f"{interface}: {receive_bytes} 1 0 0 0 0 0 0 "
+                f"{transmit_bytes} 1 0 0 0 0 0 0"
+            )
+        (proc_root / "net" / "dev").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
     def test_timed_javascript_rejects_the_preflight_proxy_header_set(self):
         source = (Path(__file__).resolve().parents[1] / "throughput.js").read_text(
             encoding="utf-8"
@@ -444,8 +467,8 @@ class BenchmarkHelpersTest(unittest.TestCase):
         self.assertFalse(incomplete["valid"])
         sampler = sampler_with_receive_rates([10] * 30)
         for index, sample in enumerate(sampler._samples):
-            sample["rssBytes"] = 900
-            sample["cpuTicks"] = index * 100
+            sample["memoryCurrentBytes"] = 900
+            sample["cpuUsageNanoseconds"] = index * 1_000_000_000
         sampler.admission = benchmark.LoadGeneratorAdmission(
             1, 1000, 50.0, 50.0, 1, 1, 8_000
         )
@@ -458,7 +481,7 @@ class BenchmarkHelpersTest(unittest.TestCase):
         phase_start_only.admission = benchmark.LoadGeneratorAdmission(
             1, 1000, 90.0, 50.0, 1, 1, 8_000
         )
-        phase_start_only._samples[0]["rssBytes"] = 900
+        phase_start_only._samples[0]["memoryCurrentBytes"] = 900
         start_saturated = phase_start_only._summarize()
         self.assertEqual(90.0, start_saturated["maximumMemoryUtilizationPercent"])
         self.assertEqual(
@@ -466,6 +489,144 @@ class BenchmarkHelpersTest(unittest.TestCase):
         )
         self.assertTrue(start_saturated["saturated"])
         self.assertFalse(start_saturated["valid"])
+
+    def test_process_sampler_captures_cgroup_v2_and_excludes_loopback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc_root = root / "proc"
+            process_root = proc_root / "123"
+            cgroup = root / "cgroup2" / "loadgen"
+            process_root.mkdir(parents=True)
+            cgroup.mkdir(parents=True)
+            (process_root / "cgroup").write_text(
+                "0::/loadgen\n", encoding="utf-8"
+            )
+            (process_root / "mountinfo").write_text(
+                f"1 0 0:1 / {root / 'cgroup2'} rw - cgroup2 cgroup2 rw\n",
+                encoding="utf-8",
+            )
+            (cgroup / "cpu.stat").write_text(
+                "usage_usec 123\nuser_usec 100\nsystem_usec 23\n",
+                encoding="utf-8",
+            )
+            (cgroup / "memory.current").write_text("456\n", encoding="utf-8")
+            self._write_network_counters(
+                proc_root, [("lo", 9_999, 8_888), ("eth0", 100, 200)]
+            )
+
+            sampler = benchmark.ProcessResourceSampler(
+                123,
+                benchmark.LoadGeneratorAdmission(1, 1000, 90, 90, 1, 1, 8_000),
+                1.0,
+                8_000,
+                proc_root=proc_root,
+            )
+            sampler._initialize_sources()
+            sampler._capture()
+
+            self.assertTrue(sampler._source_discovery_valid)
+            self.assertEqual(2, sampler._cgroup_version)
+            self.assertEqual("eth0", sampler._network_interface)
+            self.assertEqual(123_000, sampler._samples[0]["cpuUsageNanoseconds"])
+            self.assertEqual(456, sampler._samples[0]["memoryCurrentBytes"])
+            self.assertEqual(100, sampler._samples[0]["networkReceiveBytes"])
+            self.assertEqual(200, sampler._samples[0]["networkTransmitBytes"])
+
+    def test_process_sampler_captures_cgroup_v1_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc_root = root / "proc"
+            process_root = proc_root / "321"
+            cpu_cgroup = root / "cpu,cpuacct" / "loadgen"
+            memory_cgroup = root / "memory" / "loadgen"
+            process_root.mkdir(parents=True)
+            cpu_cgroup.mkdir(parents=True)
+            memory_cgroup.mkdir(parents=True)
+            (process_root / "cgroup").write_text(
+                "2:cpu,cpuacct:/loadgen\n3:memory:/loadgen\n",
+                encoding="utf-8",
+            )
+            (process_root / "mountinfo").write_text(
+                f"1 0 0:1 / {root / 'cpu,cpuacct'} rw - cgroup cgroup rw,cpu,cpuacct\n"
+                f"2 0 0:2 / {root / 'memory'} rw - cgroup cgroup rw,memory\n",
+                encoding="utf-8",
+            )
+            (cpu_cgroup / "cpuacct.usage").write_text(
+                "123000000\n", encoding="utf-8"
+            )
+            (memory_cgroup / "memory.usage_in_bytes").write_text(
+                "456\n", encoding="utf-8"
+            )
+            self._write_network_counters(
+                proc_root, [("lo", 9_999, 8_888), ("eth0", 100, 200)]
+            )
+
+            sampler = benchmark.ProcessResourceSampler(
+                321,
+                benchmark.LoadGeneratorAdmission(1, 1000, 90, 90, 1, 1, 8_000),
+                1.0,
+                8_000,
+                proc_root=proc_root,
+            )
+            sampler._initialize_sources()
+            sampler._capture()
+
+            self.assertTrue(sampler._source_discovery_valid)
+            self.assertEqual(1, sampler._cgroup_version)
+            self.assertEqual(123_000_000, sampler._samples[0]["cpuUsageNanoseconds"])
+            self.assertEqual(456, sampler._samples[0]["memoryCurrentBytes"])
+
+    def test_process_sampler_fails_closed_on_ambiguous_external_interfaces(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc_root = Path(directory) / "proc"
+            self._write_network_counters(
+                proc_root,
+                [("lo", 1, 1), ("eth0", 100, 200), ("eth1", 300, 400)],
+            )
+            sampler = benchmark.ProcessResourceSampler(
+                1,
+                benchmark.LoadGeneratorAdmission(1, 1000, 90, 90, 1, 1, 8_000),
+                1.0,
+                8_000,
+                proc_root=proc_root,
+            )
+
+            with self.assertRaisesRegex(ValueError, "exactly one non-loopback"):
+                sampler._discover_external_network_interface()
+
+    def test_process_sampler_fails_closed_on_missing_cgroup_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc_root = root / "proc"
+            process_root = proc_root / "123"
+            cgroup = root / "cgroup2" / "loadgen"
+            process_root.mkdir(parents=True)
+            cgroup.mkdir(parents=True)
+            (process_root / "cgroup").write_text(
+                "0::/loadgen\n", encoding="utf-8"
+            )
+            (process_root / "mountinfo").write_text(
+                f"1 0 0:1 / {root / 'cgroup2'} rw - cgroup2 cgroup2 rw\n",
+                encoding="utf-8",
+            )
+            (cgroup / "cpu.stat").write_text(
+                "usage_usec 123\n", encoding="utf-8"
+            )
+            self._write_network_counters(proc_root, [("eth0", 100, 200)])
+            sampler = benchmark.ProcessResourceSampler(
+                123,
+                benchmark.LoadGeneratorAdmission(1, 1000, 90, 90, 1, 1, 8_000),
+                1.0,
+                8_000,
+                proc_root=proc_root,
+            )
+
+            sampler._initialize_sources()
+
+            self.assertFalse(sampler._source_discovery_valid)
+            self.assertTrue(
+                any("cgroup v2" in error for error in sampler._capture_errors)
+            )
 
     def test_process_sampler_recomputes_nearest_rank_p95_and_link_headroom(self):
         sampler = sampler_with_receive_rates([10] * 28 + [650, 900])
@@ -479,7 +640,9 @@ class BenchmarkHelpersTest(unittest.TestCase):
         self.assertEqual(700.0, telemetry["networkLinkAdmissionBytesPerSecond"])
         self.assertTrue(telemetry["networkLinkHeadroomValid"])
         self.assertTrue(telemetry["valid"])
-        self.assertGreater(telemetry["clockTicksPerSecond"], 0)
+        self.assertEqual("container-cgroup", telemetry["resourceScope"])
+        self.assertEqual(2, telemetry["cgroupVersion"])
+        self.assertEqual("eth0", telemetry["networkInterface"])
         self.assertEqual(31, len(telemetry["rawSamples"]))
         self.assertEqual(30, len(telemetry["samples"]))
         self.assertEqual(0.0, telemetry["samples"][0]["startMonotonicSeconds"])
@@ -517,6 +680,19 @@ class BenchmarkHelpersTest(unittest.TestCase):
         regression_evidence = regressed._summarize()
         self.assertFalse(regression_evidence["timingEvidenceValid"])
         self.assertTrue(regression_evidence["evidenceErrors"])
+
+        cpu_regressed = sampler_with_receive_rates([10] * 30)
+        for index, sample in enumerate(cpu_regressed._samples):
+            sample["cpuUsageNanoseconds"] = index * 1_000_000
+        cpu_regressed._samples[10]["cpuUsageNanoseconds"] = 0
+        cpu_regression_evidence = cpu_regressed._summarize()
+        self.assertFalse(cpu_regression_evidence["timingEvidenceValid"])
+        self.assertTrue(
+            any(
+                "regressed cgroup CPU usage" in error
+                for error in cpu_regression_evidence["evidenceErrors"]
+            )
+        )
 
     def test_run_k6_preserves_summary_log_and_loadgen_telemetry(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -680,7 +856,7 @@ print('fake k6 output')
             for mutate in (
                 lambda value: value["database"].__setitem__("snapshotId", "wrong"),
                 lambda value: value["database"].__setitem__(
-                    "aggregateConnectionCeiling", 11
+                    "perCandidateConnectionCeiling", 11
                 ),
                 lambda value: value["database"]["tls"].__setitem__("verified", False),
                 lambda value: value["loadGenerator"]["hardware"].__setitem__("logicalCpuCount", 0),

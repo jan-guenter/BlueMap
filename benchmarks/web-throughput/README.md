@@ -10,24 +10,33 @@ data paths:
 
 The runner does not deploy those targets. The approved execution topology uses
 five disposable, digest-pinned RunPod CPU Pods in one EU region: three target
-Pods, one MariaDB Pod, and one load-generator Pod. All measured HTTP originates
-on the load-generator Pod and reaches the candidates through direct RunPod
-public TCP mappings without an HTTP intermediary. Cloudflare, the Rancher
-cluster, and the workstation are outside the
-measured path. This benchmark infrastructure is not part of the production
-image or Helm chart.
+Pods, one MariaDB Pod, and one load-generator Pod. Every candidate HTTP server
+binds only `127.0.0.1:8100`; candidate HTTP is never published directly. The
+load-generator initiates twelve independent, strict-host-key-pinned SSH local
+forwarding lanes to each candidate and balances its local target URL across
+those lanes with HAProxy in TCP mode. HAProxy does not parse or transform HTTP.
+All measured HTTP therefore originates on the load-generator Pod and reaches
+the direct application origin through an authenticated L4 carrier. Cloudflare,
+the Rancher cluster, the workstation, and public candidate HTTP ports are
+outside the measured path. MariaDB remains separately reachable through its
+identity-verified public TLS endpoint. This benchmark infrastructure is not
+part of the production image or Helm chart.
 
 ## Fair setup
 
 All three targets must:
 
-- use distinct direct-origin URLs, without a CDN, caching reverse proxy, or
-  workstation HTTP proxy;
+- use distinct load-generator-loopback URLs, each carried to exactly one
+  loopback-only candidate origin through its frozen SSH lanes, without a CDN,
+  caching reverse proxy, or workstation HTTP proxy;
+- bind the candidate application only to `127.0.0.1:8100`; fail the run if a
+  candidate HTTP listener is reachable directly or bound to any non-loopback
+  address;
 - read the same immutable, sanitized MariaDB snapshot over identity-verified
   TLS;
 - receive the same CPU and memory limits and run on otherwise idle comparable
   hardware;
-- use the same aggregate database-connection ceiling of exactly 12;
+- use the same per-candidate database-connection ceiling of exactly 12;
 - serve the exact profile path list supplied to this runner;
 - return the same stored content coding, normally `zstd`.
 
@@ -46,18 +55,23 @@ static web-app paths are deliberately rejected. Start from
 objects that exist in the frozen dataset.
 
 Copy [setup.example.json](setup.example.json), replace every placeholder, and
-review it before the run. It records immutable image and Pod identities,
+review it before the run. Its transport contract freezes twelve
+load-generator-initiated SSH lanes per target, exact pinned SSH host keys,
+loopback-only origins, and a load-generator-local TCP balancer. It also records
+immutable image and Pod identities,
 out-of-band process/runtime/configuration hashes, equal CPU/memory limits, the
 database TLS identity and snapshot, load-generator hardware, and the shared
-aggregate connection ceiling. Freeze the load-generator download cap and each
+per-candidate connection ceiling. Freeze the load-generator download cap and each
 target's upload cap from the RunPod identities as positive bits-per-second
 values; they are admission inputs, not estimates derived from benchmark
 traffic. Its `database.snapshotId` must exactly match
 `DATASET_ID`; declared CPU and memory limits must match across all targets.
 Keep credentials and other secrets out of this manifest.
 
-Before any timed request, the runner fetches every path from all three targets
-without an HTTP proxy. It requires HTTP 200, the configured stored encoding,
+Before any timed request, the controller proves every expected SSH lane and
+the candidate listener identity, proves that direct candidate HTTP is
+unreachable, and then the runner fetches every path from all three local TCP
+frontends without an HTTP proxy. It requires HTTP 200, the configured stored encoding,
 content type, and byte-identical stored HTTP representations. The frozen zstd
 tool inside the immutable load-generator image independently decodes each
 representation; its path, version, and executable hash are evidence. Preflight
@@ -100,8 +114,8 @@ OUTPUT_DIR=/tmp/bluemap-throughput \
 benchmarks/web-throughput/run.sh
 ```
 
-The approved comparison freezes concurrency at 12 VUs, matching the aggregate
-database connection ceiling. Retain every block including failures; do not
+The approved comparison freezes concurrency at 12 VUs and gives each candidate
+an identical 12-connection database ceiling. Retain every block including failures; do not
 search for a favorable concurrency while collecting the reported matrix.
 
 ## Evidence and metrics
@@ -168,8 +182,10 @@ This deliberately small comparison has important limits:
 - One RunPod region, CPU generation, database, small hot dataset, object
   distribution, concurrency, and cache state cannot represent every
   deployment.
-- It measures direct-origin map-data reads. MariaDB uses TLS, while measured
-  HTTP deliberately does not include TLS termination, ingress, CDN, browser
+- It measures direct-origin map-data reads carried inside SSH. SSH encryption,
+  lane scheduling, and the load-generator-local TCP balancer are part of the
+  measured transport overhead. MariaDB uses TLS, while measured HTTP
+  deliberately does not include HTTP TLS termination, ingress, CDN, browser
   rendering, static assets, or geographically distributed clients.
 - Database and operating-system caches warm over time. Warmups and rotated
   order reduce but do not remove that effect.
@@ -185,6 +201,10 @@ This deliberately small comparison has important limits:
   retransmissions, candidate or MariaDB utilization, or connection-pool
   counters. It can reject insufficient advertised-link headroom, but cannot
   diagnose a bottleneck or attribute a throughput plateau.
+- Multiple SSH lanes reduce, but cannot eliminate, shared-path packet loss,
+  TCP retransmission, or per-lane head-of-line effects. Lane identity and
+  liveness are admission checks; this small benchmark does not generalize the
+  resulting transport behavior to other regions or providers.
 - k6 summary exports are aggregate evidence, not per-request traces. They cannot
   reconstruct an individual request timeline after the run.
 - Full stored and decoded response bytes are hashed and compared during
@@ -195,6 +215,6 @@ This deliberately small comparison has important limits:
   implementation returning same-length corrupt bytes only during a timed phase
   could therefore evade that phase's checks.
 - The PHP endpoint's per-request connection lifecycle and Java's connection
-  pool remain architectural differences even with equal aggregate ceilings.
+  pool remain architectural differences even with equal per-candidate ceilings.
 - Results are comparable only while all correctness preflight checks pass and
   every measured repetition is retained.
