@@ -324,8 +324,16 @@ jobs:
             *@"${MARIADB_DIGEST}") ;;
             *) echo "pulled MariaDB digest mismatch: ${pulled}" >&2; exit 1 ;;
           esac
+          mkdir -p build/runpod-throughput
           cleanup() {
-            docker logs "${container}" > build/runpod-throughput/mariadb-smoke.log 2>&1 || true
+            {
+              printf '%s\n' '=== container state ==='
+              docker inspect --format \
+                'status={{.State.Status}} exitCode={{.State.ExitCode}} error={{json .State.Error}}' \
+                "${container}" 2>&1 || true
+              printf '%s\n' '=== container log ==='
+              docker logs "${container}" 2>&1 || true
+            } | tee build/runpod-throughput/mariadb-smoke.log >&2
             docker rm --force "${container}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
@@ -339,6 +347,10 @@ jobs:
               --batch --skip-column-names \
               -e 'SELECT 1' >/dev/null 2>&1; then
               break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null || true)" != true ]; then
+              echo 'MariaDB import smoke container exited before readiness' >&2
+              exit 1
             fi
             if [ "${attempt}" -eq 120 ]; then
               echo 'MariaDB import smoke timed out' >&2
@@ -362,6 +374,16 @@ jobs:
           docker logs "${container}" > build/runpod-throughput/mariadb-smoke.log 2>&1
           docker rm --force "${container}" >/dev/null
           trap - EXIT
+      - name: Upload MariaDB smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runpod-throughput-mariadb-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/runpod-throughput/mariadb-smoke.log
+            build/runpod-throughput/mariadb-smoke.txt
+          if-no-files-found: warn
+          retention-days: 90
       - name: Write immutable build lock
         env:
           UPSTREAM_IMAGE: ${{ steps.identity.outputs.upstream-image }}
