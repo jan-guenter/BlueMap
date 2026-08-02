@@ -127,8 +127,9 @@ contains:
   dataset identities, settings, tool versions, and benchmark-file hashes;
 - the exact `setup-manifest.json`, its hash, `paths.txt`, and incremental
   `preflight.json`;
-- unmodified k6 summary JSON, load-generator procfs/disk telemetry, and a
-  console log for every attempted warmup and measurement;
+- unmodified k6 summary JSON, load-generator whole-container cgroup,
+  external-interface network, and disk telemetry, plus a console log for every
+  attempted warmup and measurement;
 - `runs.json` and `measurements.csv` for individual measurements;
 - `summary.json`, `summary.csv`, and `SUMMARY.md` with per-target medians.
 
@@ -149,16 +150,17 @@ when all fifteen measurements are present and valid; an incomplete matrix
 retains its rows but publishes no medians.
 
 All fifteen warmups and all fifteen measurements are independently admitted
-from raw one-second load-generator counters. Each telemetry file retains the
-cumulative procfs samples, interval start/end times, interval lengths, phase
-and capture boundaries, edge lag, and derived rates. A phase requires at least
-90% of its exact duration in intervals (27 for a 30-second warmup and 108 for a
-120-second measurement), at least 90% time coverage, no interval longer than
-two seconds, and start/end evidence within two seconds of the k6 subprocess
-boundaries. The runner recomputes nearest-rank p95 receive bytes per second and
-requires it to be no more than 70% of the lower of the frozen load-generator
-download and active-target upload caps. Failure is retained per phase and
-prevents publication of aggregate results.
+from raw one-second load-generator counters. Each telemetry file retains raw
+whole-container cgroup CPU/memory readings, cumulative network counters from
+exactly one non-loopback interface, interval start/end times, interval lengths,
+phase and capture boundaries, edge lag, and derived rates. A phase requires at
+least 90% of its exact duration in intervals (27 for a 30-second warmup and 108
+for a 120-second measurement), at least 90% time coverage, no interval longer
+than two seconds, and start/end evidence within two seconds of the k6
+subprocess boundaries. The runner recomputes nearest-rank p95 receive bytes per
+second from that external interface and requires it to be no more than 70% of
+the lower of the frozen load-generator download and active-target upload caps.
+Failure is retained per phase and prevents publication of aggregate results.
 
 Run the benchmark-local tests with:
 
