@@ -234,10 +234,15 @@ public class Plugin implements ServerEventListener {
                                     null;
                             LiveMarkersDataSupplier liveMarkersDataSupplier = new LiveMarkersDataSupplier(map.getMarkerSets());
 
-                            mapRequestHandler = new MapRequestHandler(map, livePlayersDataSupplier, liveMarkersDataSupplier, webserverConfig.isSseEnabled());
+                            mapRequestHandler = new MapRequestHandler(
+                                    map, livePlayersDataSupplier, liveMarkersDataSupplier,
+                                    webserverConfig.isSseEnabled(), webserverConfig.getTileCacheMaxAge()
+                            );
                         } else {
                             Storage storage = blueMap.getOrLoadStorage(mapConfig.getStorage());
-                            mapRequestHandler = new MapRequestHandler(storage.map(id));
+                            mapRequestHandler = new MapRequestHandler(
+                                    storage.map(id), webserverConfig.getTileCacheMaxAge()
+                            );
                         }
 
                         webRequestHandler.register(
@@ -261,11 +266,13 @@ public class Plugin implements ServerEventListener {
                     try {
                         webServer = new HttpServer(
                                 "BlueMap-Webserver",
-                                new LoggingRequestHandler(
+                                LoggingRequestHandler.wrap(
                                         webRequestHandler,
                                         webserverConfig.getLog().getFormat(),
-                                        webLogger
-                                )
+                                        webLogger,
+                                        !webLoggerList.isEmpty()
+                                ),
+                                webserverConfig.createHttpServerSettings()
                         );
                         webServer.bind(new InetSocketAddress(
                                 webserverConfig.resolveIp(),

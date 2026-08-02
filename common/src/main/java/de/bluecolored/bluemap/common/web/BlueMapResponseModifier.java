@@ -33,6 +33,8 @@ import lombok.Getter;
 import lombok.NonNull;
 import lombok.Setter;
 
+import java.util.Locale;
+
 @Getter @Setter
 public class BlueMapResponseModifier implements HttpRequestHandler {
 
@@ -49,13 +51,26 @@ public class BlueMapResponseModifier implements HttpRequestHandler {
         HttpResponse response = delegate.handle(request);
 
         HttpStatusCode status = response.getStatusCode();
-        if (status.getCode() >= 400 && response.getBody() != null){
+        if (status.getCode() >= 400
+                && response.getBody() != null
+                && !isProblemResponse(response)) {
             response.setBody(status.getCode() + " - " + status.getMessage() + "\n" + this.serverName);
         }
+        if (status.getCode() >= 400
+                && response.getHeader("Cache-Control") == null) {
+            response.addHeader("Cache-Control", "no-store,no-transform");
+        }
+        if (request.getMethod().equalsIgnoreCase("HEAD")) response.setBodySuppressed(true);
 
         response.addHeader("Server", this.serverName);
 
         return response;
+    }
+
+    private static boolean isProblemResponse(HttpResponse response) {
+        var contentType = response.getHeader("Content-Type");
+        return contentType != null
+                && contentType.getValue().toLowerCase(Locale.ROOT).startsWith("application/problem+json");
     }
 
 }

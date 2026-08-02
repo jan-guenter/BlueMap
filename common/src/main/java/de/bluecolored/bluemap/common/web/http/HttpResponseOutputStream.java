@@ -27,6 +27,7 @@ package de.bluecolored.bluemap.common.web.http;
 import lombok.RequiredArgsConstructor;
 
 import java.io.Closeable;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -39,18 +40,30 @@ public class HttpResponseOutputStream implements Closeable {
 
     private final OutputStream outputStream;
 
-    private final byte[] byteBuffer = new byte[1024];
+    static final int COPY_BUFFER_SIZE = 64 * 1024;
+
+    private final byte[] byteBuffer = new byte[COPY_BUFFER_SIZE];
 
     public void write(HttpResponse response) throws IOException {
         HttpStatusCode statusCode = response.getStatusCode();
         InputStream body = response.getBody();
+        boolean bodyAllowed = !response.isBodySuppressed()
+                && statusCode.getCode() >= 200
+                && statusCode != HttpStatusCode.NO_CONTENT
+                && statusCode != HttpStatusCode.NOT_MODIFIED;
+        HttpHeader contentLengthHeader = response.getHeader("Content-Length");
+        Long contentLength = contentLengthHeader == null
+                ? null
+                : parseContentLength(contentLengthHeader.getValue());
+        boolean fixedLength = contentLength != null;
+        boolean chunked = body != null && bodyAllowed && !fixedLength;
 
         writeLine(response.getVersion() + " " + statusCode.getCode() + " " + statusCode.getMessage());
 
         // headers
-        if (body != null) {
-            response.addHeader("Transfer-Encoding","chunked");
-        } else {
+        if (chunked) {
+            response.addHeader("Transfer-Encoding", "chunked");
+        } else if (bodyAllowed && !fixedLength) {
             response.addHeader("Content-Length", "0");
         }
         for (HttpHeader header : response.getHeaders().values()) {
@@ -59,7 +72,9 @@ public class HttpResponseOutputStream implements Closeable {
         writeLine();
 
         // body
-        if (body != null) {
+        if (bodyAllowed && fixedLength) {
+            writeFixedLengthBody(body, contentLength);
+        } else if (chunked) {
 
             while (true) {
                 int read = body.read(byteBuffer);
@@ -68,7 +83,9 @@ public class HttpResponseOutputStream implements Closeable {
                 writeLine(Integer.toHexString(read));
                 outputStream.write(byteBuffer, 0, read);
                 writeLine();
-                outputStream.flush();  // prevent SSE from being buffered
+                if (response.isFlushAfterEachChunk()) {
+                    outputStream.flush();
+                }
             }
 
             writeLine(Integer.toHexString(0));
@@ -76,6 +93,43 @@ public class HttpResponseOutputStream implements Closeable {
         }
 
         outputStream.flush();
+    }
+
+    private static long parseContentLength(String value) throws IOException {
+        try {
+            long parsed = Long.parseLong(value.trim());
+            if (parsed < 0) throw new NumberFormatException("negative");
+            return parsed;
+        } catch (NumberFormatException e) {
+            throw new IOException("Invalid response Content-Length: " + value, e);
+        }
+    }
+
+    private void writeFixedLengthBody(InputStream body, long contentLength)
+            throws IOException {
+        if (body == null) {
+            if (contentLength == 0) return;
+            throw new EOFException("Response body is shorter than Content-Length");
+        }
+
+        long remaining = contentLength;
+        while (remaining > 0) {
+            int read = body.read(
+                    byteBuffer,
+                    0,
+                    (int) Math.min(byteBuffer.length, remaining)
+            );
+            if (read == -1) {
+                throw new EOFException("Response body is shorter than Content-Length");
+            }
+            if (read == 0) continue;
+            outputStream.write(byteBuffer, 0, read);
+            remaining -= read;
+        }
+
+        if (body.read() != -1) {
+            throw new IOException("Response body is longer than Content-Length");
+        }
     }
 
     private void writeLine() throws IOException {

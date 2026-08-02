@@ -30,26 +30,35 @@ import de.bluecolored.bluemap.core.storage.Storage;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.storage.sql.commandset.CommandSet;
 import de.bluecolored.bluemap.core.util.Caches;
-import lombok.RequiredArgsConstructor;
-
 import java.io.IOException;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-@RequiredArgsConstructor
 public class SQLStorage implements Storage {
 
     private final CommandSet sql;
     private final Compression compression;
+    private final boolean readOnly;
     private final LoadingCache<String, SQLMapStorage> mapStorages = Caches.build(this::create);
+
+    public SQLStorage(CommandSet sql, Compression compression) {
+        this(sql, compression, false);
+    }
+
+    public SQLStorage(CommandSet sql, Compression compression, boolean readOnly) {
+        this.sql = sql;
+        this.compression = compression;
+        this.readOnly = readOnly;
+    }
 
     @Override
     public void initialize() throws IOException {
-        sql.initializeTables();
+        if (readOnly) sql.validateTables();
+        else sql.initializeTables();
     }
 
     private SQLMapStorage create(String mapId) {
-        return new SQLMapStorage(mapId, sql, compression);
+        return new SQLMapStorage(mapId, sql, compression, readOnly);
     }
 
     @Override
@@ -72,6 +81,11 @@ public class SQLStorage implements Storage {
     @Override
     public boolean isClosed() {
         return sql.isClosed();
+    }
+
+    @Override
+    public boolean isHealthy() {
+        return sql.isHealthy();
     }
 
     @Override

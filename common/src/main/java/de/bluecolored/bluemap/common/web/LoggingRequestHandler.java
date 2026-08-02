@@ -31,6 +31,8 @@ import lombok.Getter;
 import lombok.NonNull;
 import lombok.Setter;
 
+import java.util.Objects;
+
 @Getter @Setter
 @AllArgsConstructor
 public class LoggingRequestHandler implements HttpRequestHandler {
@@ -49,6 +51,20 @@ public class LoggingRequestHandler implements HttpRequestHandler {
 
     public LoggingRequestHandler(HttpRequestHandler delegate, String format) {
         this(delegate, format, Logger.global);
+    }
+
+    /**
+     * Adds request formatting only when a log destination is active.
+     */
+    public static HttpRequestHandler wrap(
+            HttpRequestHandler delegate,
+            String format,
+            Logger logger,
+            boolean enabled
+    ) {
+        Objects.requireNonNull(delegate, "delegate");
+        if (!enabled) return delegate;
+        return new LoggingRequestHandler(delegate, format, logger);
     }
 
     @Override

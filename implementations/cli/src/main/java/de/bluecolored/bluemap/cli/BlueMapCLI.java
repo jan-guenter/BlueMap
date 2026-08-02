@@ -301,8 +301,11 @@ public class BlueMapCLI {
             BmMap map = blueMap.getMaps().get(mapConfigEntry.getKey());
 
             MapRequestHandler mapRequestHandler = map != null ?
-                    new MapRequestHandler(map, null, new LiveMarkersDataSupplier(map.getMarkerSets()), config.isSseEnabled()) :
-                    new MapRequestHandler(storage);
+                    new MapRequestHandler(
+                            map, null, new LiveMarkersDataSupplier(map.getMarkerSets()),
+                            config.isSseEnabled(), config.getTileCacheMaxAge()
+                    ) :
+                    new MapRequestHandler(storage, config.getTileCacheMaxAge());
 
             routingRequestHandler.register(
                     "maps/" + Pattern.quote(mapConfigEntry.getKey()) + "/(.*)",
@@ -322,15 +325,20 @@ public class BlueMapCLI {
         }
 
         HttpRequestHandler handler = new BlueMapResponseModifier(routingRequestHandler);
-        handler = new LoggingRequestHandler(
+        handler = LoggingRequestHandler.wrap(
                 handler,
                 config.getLog().getFormat(),
-                Logger.combine(webLoggerList)
+                Logger.combine(webLoggerList),
+                !webLoggerList.isEmpty()
         );
 
         try {
             //noinspection resource
-            HttpServer webServer = new HttpServer("BlueMap-Webserver", handler);
+            HttpServer webServer = new HttpServer(
+                    "BlueMap-Webserver",
+                    handler,
+                    config.createHttpServerSettings()
+            );
             webServer.bind(new InetSocketAddress(
                     config.resolveIp(),
                     config.getPort()

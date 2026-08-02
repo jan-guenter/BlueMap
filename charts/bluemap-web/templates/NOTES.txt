@@ -1,0 +1,11 @@
+BlueMap Web is available inside the cluster at:
+  http://{{ include "bluemap-web.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Health endpoints:
+  /health/live
+  /health/ready
+{{- if gt (int .Values.replicaCount) 1 }}
+
+The {{ .Values.replicaCount }} web replicas use external SQL storage and
+pod-local web roots, so requests can be distributed without session affinity.
+{{- end }}

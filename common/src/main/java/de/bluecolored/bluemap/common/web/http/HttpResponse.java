@@ -41,6 +41,8 @@ public class HttpResponse implements Closeable, HttpHeaderCarrier {
     private @NonNull HttpStatusCode statusCode;
     private @NonNull @Singular Map<String, HttpHeader> headers = new LinkedHashMap<>();
     private @Nullable InputStream body;
+    private boolean bodySuppressed;
+    private boolean flushAfterEachChunk;
 
     public void setBody(@Nullable InputStream body) {
         this.body = body;

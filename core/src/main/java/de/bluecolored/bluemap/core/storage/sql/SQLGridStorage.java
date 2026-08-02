@@ -24,30 +24,55 @@
  */
 package de.bluecolored.bluemap.core.storage.sql;
 
+import de.bluecolored.bluemap.core.storage.CacheMetadata;
 import de.bluecolored.bluemap.core.storage.ItemStorage;
+import de.bluecolored.bluemap.core.storage.StoredDataMetadata;
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.storage.GridStorage;
 import de.bluecolored.bluemap.core.storage.sql.commandset.CommandSet;
 import de.bluecolored.bluemap.core.util.Key;
 import de.bluecolored.bluemap.core.util.stream.OnCloseOutputStream;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.*;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-@RequiredArgsConstructor
 public class SQLGridStorage implements GridStorage {
 
     private final CommandSet sql;
     private final String map;
     private final Key storage;
     private final Compression compression;
+    private final boolean readOnly;
+
+    public SQLGridStorage(
+            CommandSet sql,
+            String map,
+            Key storage,
+            Compression compression
+    ) {
+        this(sql, map, storage, compression, false);
+    }
+
+    public SQLGridStorage(
+            CommandSet sql,
+            String map,
+            Key storage,
+            Compression compression,
+            boolean readOnly
+    ) {
+        this.sql = sql;
+        this.map = map;
+        this.storage = storage;
+        this.compression = compression;
+        this.readOnly = readOnly;
+    }
 
     @Override
     public OutputStream write(int x, int z) throws IOException {
+        requireWritable();
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         return new OnCloseOutputStream(compression.compress(bytes),
                 () -> sql.writeGridItem(map, storage, x, z, compression, bytes.toByteArray())
@@ -56,13 +81,38 @@ public class SQLGridStorage implements GridStorage {
 
     @Override
     public @Nullable CompressedInputStream read(int x, int z) throws IOException {
-        byte[] data = sql.readGridItem(map, storage, x, z, compression);
-        if (data == null) return null;
-        return new CompressedInputStream(new ByteArrayInputStream(data), compression);
+        CommandSet.StoredData stored =
+                sql.readGridItemData(map, storage, x, z, compression);
+        if (stored == null) return null;
+        byte[] data = stored.data();
+        return new CompressedInputStream(
+                new ByteArrayInputStream(data),
+                compression,
+                new CacheMetadata(stored.contentHash(), stored.updatedAt()),
+                data.length
+        );
+    }
+
+    @Override
+    public @Nullable StoredDataMetadata readMetadata(int x, int z) throws IOException {
+        CommandSet.StoredMetadata stored =
+                sql.readGridItemMetadata(map, storage, x, z, compression);
+        if (stored == null) return null;
+        return new StoredDataMetadata(
+                compression,
+                new CacheMetadata(stored.contentHash(), stored.updatedAt()),
+                stored.contentLength()
+        );
+    }
+
+    @Override
+    public Compression compression() {
+        return compression;
     }
 
     @Override
     public void delete(int x, int z) throws IOException {
+        requireWritable();
         sql.deleteGridItem(map, storage, x, z);
     }
 
@@ -91,6 +141,12 @@ public class SQLGridStorage implements GridStorage {
     @Override
     public boolean isClosed() {
         return sql.isClosed();
+    }
+
+    private void requireWritable() throws IOException {
+        if (readOnly) {
+            throw new IOException("SQL storage is configured read-only");
+        }
     }
 
 }

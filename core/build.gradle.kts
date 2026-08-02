@@ -12,6 +12,8 @@ dependencies {
     api ( libs.configurate.hocon )
     api ( libs.configurate.gson )
     api ( libs.lz4 )
+
+    testImplementation ( "org.xerial:sqlite-jdbc:3.46.1.0" )
 }
 
 tasks.register("zipResourceExtensions", type = Zip::class) {
