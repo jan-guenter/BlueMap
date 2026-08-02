@@ -1,0 +1,12 @@
+**
+!benchmarks/
+!benchmarks/web-throughput/
+!benchmarks/web-throughput/run.sh
+!benchmarks/web-throughput/run_benchmark.py
+!benchmarks/web-throughput/throughput.js
+!benchmarks/web-throughput/images/
+!benchmarks/web-throughput/images/common/
+!benchmarks/web-throughput/images/common/bootstrap.sh
+!benchmarks/web-throughput/images/common/sshd_config
+!benchmarks/web-throughput/images/loadgen/
+!benchmarks/web-throughput/images/loadgen/entrypoint.sh

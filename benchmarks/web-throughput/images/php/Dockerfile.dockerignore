@@ -1,0 +1,16 @@
+**
+!common/
+!common/webapp/
+!common/webapp/public/
+!common/webapp/public/sql.php
+!benchmarks/
+!benchmarks/web-throughput/
+!benchmarks/web-throughput/images/
+!benchmarks/web-throughput/images/common/
+!benchmarks/web-throughput/images/common/bootstrap.sh
+!benchmarks/web-throughput/images/common/sshd_config
+!benchmarks/web-throughput/images/php/
+!benchmarks/web-throughput/images/php/entrypoint.sh
+!benchmarks/web-throughput/images/php/nginx.conf
+!benchmarks/web-throughput/images/php/php-fpm-www.conf
+!benchmarks/web-throughput/images/php/php.ini

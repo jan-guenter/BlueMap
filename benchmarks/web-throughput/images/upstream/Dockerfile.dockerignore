@@ -1,0 +1,9 @@
+**
+!benchmarks/
+!benchmarks/web-throughput/
+!benchmarks/web-throughput/images/
+!benchmarks/web-throughput/images/common/
+!benchmarks/web-throughput/images/common/bootstrap.sh
+!benchmarks/web-throughput/images/common/sshd_config
+!benchmarks/web-throughput/images/upstream/
+!benchmarks/web-throughput/images/upstream/entrypoint.sh

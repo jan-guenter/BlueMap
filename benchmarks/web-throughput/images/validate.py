@@ -29,6 +29,76 @@ EXPECTED_FROM = {
         "mariadb@sha256:09336a8c0cff9f363e133d8a245cca5ad3eeb326e0ffaedf74d49214c4571486"
     ],
 }
+EXPECTED_DOCKERIGNORE = {
+    "upstream": (
+        "**",
+        "!benchmarks/",
+        "!benchmarks/web-throughput/",
+        "!benchmarks/web-throughput/images/",
+        "!benchmarks/web-throughput/images/common/",
+        "!benchmarks/web-throughput/images/common/bootstrap.sh",
+        "!benchmarks/web-throughput/images/common/sshd_config",
+        "!benchmarks/web-throughput/images/upstream/",
+        "!benchmarks/web-throughput/images/upstream/entrypoint.sh",
+    ),
+    "php": (
+        "**",
+        "!common/",
+        "!common/webapp/",
+        "!common/webapp/public/",
+        "!common/webapp/public/sql.php",
+        "!benchmarks/",
+        "!benchmarks/web-throughput/",
+        "!benchmarks/web-throughput/images/",
+        "!benchmarks/web-throughput/images/common/",
+        "!benchmarks/web-throughput/images/common/bootstrap.sh",
+        "!benchmarks/web-throughput/images/common/sshd_config",
+        "!benchmarks/web-throughput/images/php/",
+        "!benchmarks/web-throughput/images/php/entrypoint.sh",
+        "!benchmarks/web-throughput/images/php/nginx.conf",
+        "!benchmarks/web-throughput/images/php/php-fpm-www.conf",
+        "!benchmarks/web-throughput/images/php/php.ini",
+    ),
+    "java": (
+        "**",
+        "!build/",
+        "!build/release/",
+        "!build/release/*-webserver.jar",
+        "!benchmarks/",
+        "!benchmarks/web-throughput/",
+        "!benchmarks/web-throughput/images/",
+        "!benchmarks/web-throughput/images/common/",
+        "!benchmarks/web-throughput/images/common/bootstrap.sh",
+        "!benchmarks/web-throughput/images/common/sshd_config",
+        "!benchmarks/web-throughput/images/java/",
+        "!benchmarks/web-throughput/images/java/entrypoint.sh",
+    ),
+    "loadgen": (
+        "**",
+        "!benchmarks/",
+        "!benchmarks/web-throughput/",
+        "!benchmarks/web-throughput/run.sh",
+        "!benchmarks/web-throughput/run_benchmark.py",
+        "!benchmarks/web-throughput/throughput.js",
+        "!benchmarks/web-throughput/images/",
+        "!benchmarks/web-throughput/images/common/",
+        "!benchmarks/web-throughput/images/common/bootstrap.sh",
+        "!benchmarks/web-throughput/images/common/sshd_config",
+        "!benchmarks/web-throughput/images/loadgen/",
+        "!benchmarks/web-throughput/images/loadgen/entrypoint.sh",
+    ),
+    "mariadb": (
+        "**",
+        "!benchmarks/",
+        "!benchmarks/web-throughput/",
+        "!benchmarks/web-throughput/images/",
+        "!benchmarks/web-throughput/images/common/",
+        "!benchmarks/web-throughput/images/common/bootstrap.sh",
+        "!benchmarks/web-throughput/images/common/sshd_config",
+        "!benchmarks/web-throughput/images/mariadb/",
+        "!benchmarks/web-throughput/images/mariadb/entrypoint.sh",
+    ),
+}
 
 
 def fail(message: str) -> None:
@@ -52,6 +122,15 @@ def main() -> None:
         fail("working-tree sql.php does not have the recorded upstream digest")
     if working_sql != upstream_sql:
         fail("working-tree sql.php is not byte-identical to the exact upstream revision")
+
+    for role, expected_lines in EXPECTED_DOCKERIGNORE.items():
+        ignore_file = IMAGES / role / "Dockerfile.dockerignore"
+        actual_lines = tuple(ignore_file.read_text(encoding="utf-8").splitlines())
+        if actual_lines != expected_lines:
+            fail(
+                f"{role}/Dockerfile.dockerignore does not expose only the reviewed "
+                "repository-root build inputs"
+            )
 
     for relative, expected_from in EXPECTED_FROM.items():
         dockerfile = IMAGES / relative

@@ -1,0 +1,12 @@
+**
+!build/
+!build/release/
+!build/release/*-webserver.jar
+!benchmarks/
+!benchmarks/web-throughput/
+!benchmarks/web-throughput/images/
+!benchmarks/web-throughput/images/common/
+!benchmarks/web-throughput/images/common/bootstrap.sh
+!benchmarks/web-throughput/images/common/sshd_config
+!benchmarks/web-throughput/images/java/
+!benchmarks/web-throughput/images/java/entrypoint.sh
