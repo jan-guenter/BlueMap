@@ -454,6 +454,19 @@ class BenchmarkHelpersTest(unittest.TestCase):
         self.assertFalse(saturated["valid"])
         self.assertEqual(10.0, saturated["p95NetworkReceiveBytesPerSecond"])
 
+        phase_start_only = sampler_with_receive_rates([10] * 30)
+        phase_start_only.admission = benchmark.LoadGeneratorAdmission(
+            1, 1000, 90.0, 50.0, 1, 1, 8_000
+        )
+        phase_start_only._samples[0]["rssBytes"] = 900
+        start_saturated = phase_start_only._summarize()
+        self.assertEqual(90.0, start_saturated["maximumMemoryUtilizationPercent"])
+        self.assertEqual(
+            10.0, start_saturated["samples"][0]["memoryUtilizationPercent"]
+        )
+        self.assertTrue(start_saturated["saturated"])
+        self.assertFalse(start_saturated["valid"])
+
     def test_process_sampler_recomputes_nearest_rank_p95_and_link_headroom(self):
         sampler = sampler_with_receive_rates([10] * 28 + [650, 900])
         telemetry = sampler._summarize()
@@ -541,7 +554,7 @@ print('fake k6 output')
             log = root / "run.log"
             telemetry = root / "telemetry.json"
             admission = benchmark.LoadGeneratorAdmission(
-                1, 1024**3, 99.0, 99.0, 1, 1, 10_000_000_000
+                1, 1024**3, 1000.0, 1000.0, 1, 1, 10_000_000_000
             )
             exit_code, metrics = benchmark.run_k6(
                 k6_binary=str(fake_k6),

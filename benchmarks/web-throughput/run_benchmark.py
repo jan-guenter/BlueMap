@@ -1476,9 +1476,18 @@ class ProcessResourceSampler:
         maximum_cpu = max(
             (sample["cpuUtilizationPercent"] for sample in intervals), default=None
         )
-        maximum_memory = max(
-            (sample["memoryUtilizationPercent"] for sample in intervals), default=None
+        # Memory is an instantaneous gauge, so include the phase-start raw
+        # sample as well as every interval endpoint. CPU remains an interval
+        # delta. Omitting rawSamples[0] could hide start-of-phase saturation.
+        raw_memory_utilization = (
+            [
+                sample["rssBytes"] / self.admission.memory_bytes * 100.0
+                for sample in raw_samples
+            ]
+            if raw_samples_valid
+            else []
         )
+        maximum_memory = max(raw_memory_utilization, default=None)
         def nearest_rank(field: str, percentile: float) -> float | None:
             values = sorted(float(sample[field]) for sample in intervals)
             if not values:
