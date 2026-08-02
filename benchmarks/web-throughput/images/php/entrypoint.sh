@@ -16,10 +16,12 @@ bootstrap_wait_for_path "$database_json" "uploaded PHP database configuration"
 bootstrap_wait_for_path "$ca_file" "uploaded MariaDB CA certificate"
 bootstrap_wait_for_start
 
-[ -f "$database_json" ] && [ ! -L "$database_json" ] || \
+if [ ! -f "$database_json" ] || [ -L "$database_json" ]; then
     bootstrap_fail "PHP database configuration must be a regular non-symlink file"
-[ -f "$ca_file" ] && [ ! -L "$ca_file" ] || \
+fi
+if [ ! -f "$ca_file" ] || [ -L "$ca_file" ]; then
     bootstrap_fail "MariaDB CA certificate must be a regular non-symlink file"
+fi
 chmod 0600 "$database_json"
 chmod 0444 "$ca_file"
 

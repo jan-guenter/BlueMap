@@ -86,8 +86,9 @@ bootstrap_wait_for_start() {
 
 bootstrap_validate_java_webserver_config() {
     webserver_config="$1"
-    [ -f "$webserver_config" ] && [ ! -L "$webserver_config" ] || \
+    if [ ! -f "$webserver_config" ] || [ -L "$webserver_config" ]; then
         bootstrap_fail "webserver config must be a regular non-symlink file: $webserver_config"
+    fi
 
     if awk '
         {

@@ -28,8 +28,9 @@ for required_file in \
     "$users_file" \
     "$root_password_file"
 do
-    [ -f "$required_file" ] && [ ! -L "$required_file" ] || \
+    if [ ! -f "$required_file" ] || [ -L "$required_file" ]; then
         bootstrap_fail "required MariaDB input must be a regular non-symlink file: $required_file"
+    fi
 done
 
 [ -s "$root_password_file" ] || bootstrap_fail "MariaDB root password file is empty"
