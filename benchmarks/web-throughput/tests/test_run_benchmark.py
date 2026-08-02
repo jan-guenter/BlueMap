@@ -9,6 +9,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -23,6 +24,16 @@ def setup_manifest(snapshot_id: str = "snapshot-1") -> dict:
         "environment": "test RunPod host",
         "protocol": "HTTP/1.1 direct origin",
         "directOrigin": True,
+        "transport": {
+            "type": "host-key-pinned SSH local forwarding",
+            "initiator": "load-generator",
+            "sshHostKeysPinned": True,
+            "laneCountPerTarget": 12,
+            "originBindAddress": "127.0.0.1",
+            "originPort": 8100,
+            "loadGeneratorTcpBalancer": "HAProxy mode tcp",
+            "candidatePublicHttp": False,
+        },
         "runpod": {"region": "EU-NL-1", "topology": "five isolated Pods"},
         "database": {
             "snapshotId": snapshot_id,
@@ -179,6 +190,7 @@ def sampler_with_receive_rates(
     *,
     expected_duration: float = 30.0,
     timestamps: list[float] | None = None,
+    sampler_type: type[benchmark.ProcessResourceSampler] = benchmark.ProcessResourceSampler,
 ) -> benchmark.ProcessResourceSampler:
     admission = benchmark.LoadGeneratorAdmission(
         1,
@@ -189,7 +201,7 @@ def sampler_with_receive_rates(
         1,
         8_000,
     )
-    sampler = benchmark.ProcessResourceSampler(
+    sampler = sampler_type(
         1,
         admission,
         expected_phase_duration_seconds=expected_duration,
@@ -732,31 +744,52 @@ print('fake k6 output')
             admission = benchmark.LoadGeneratorAdmission(
                 1, 1024**3, 1000.0, 1000.0, 1, 1, 10_000_000_000
             )
-            exit_code, metrics = benchmark.run_k6(
-                k6_binary=str(fake_k6),
-                script=Path(__file__),
-                target=benchmark.Target(
-                    "upstream",
-                    "http://example.test",
-                    "id",
-                    upload_bits_per_second=10_000_000_000,
-                ),
-                path_file=paths,
-                vus=benchmark.APPROVED_VUS,
-                duration="100ms",
-                accept_encoding="zstd",
-                required_content_encoding="zstd",
-                summary_path=summary,
-                log_path=log,
-                expectations_path=expectations,
-                telemetry_path=telemetry,
-                load_generator_admission=admission,
-                sampler_interval_seconds=0.01,
-            )
+            class DeterministicSampler:
+                def __init__(self, *args, **kwargs):
+                    self.started = 0.0
+
+                def start(self, phase_start_monotonic_seconds):
+                    self.started = phase_start_monotonic_seconds
+
+                def stop(self, phase_end_monotonic_seconds):
+                    sampler = sampler_with_receive_rates(
+                        [1],
+                        expected_duration=0.1,
+                        timestamps=[self.started, phase_end_monotonic_seconds],
+                    )
+                    return sampler._summarize()
+
+            with mock.patch.object(
+                benchmark, "ProcessResourceSampler", DeterministicSampler
+            ):
+                exit_code, metrics = benchmark.run_k6(
+                    k6_binary=str(fake_k6),
+                    script=Path(__file__),
+                    target=benchmark.Target(
+                        "upstream",
+                        "http://example.test",
+                        "id",
+                        upload_bits_per_second=10_000_000_000,
+                    ),
+                    path_file=paths,
+                    vus=benchmark.APPROVED_VUS,
+                    duration="100ms",
+                    accept_encoding="zstd",
+                    required_content_encoding="zstd",
+                    summary_path=summary,
+                    log_path=log,
+                    expectations_path=expectations,
+                    telemetry_path=telemetry,
+                    load_generator_admission=admission,
+                    sampler_interval_seconds=0.01,
+                )
             self.assertEqual(0, exit_code)
             self.assertTrue(metrics["summaryEvidenceValid"])
             self.assertEqual(1, metrics["observedResponses"])
-            self.assertTrue(metrics["loadGeneratorEvidenceValid"])
+            self.assertTrue(
+                metrics["loadGeneratorEvidenceValid"],
+                telemetry.read_text(encoding="utf-8"),
+            )
             self.assertTrue(metrics["loadGeneratorTimingEvidenceValid"])
             self.assertTrue(metrics["networkLinkHeadroomValid"])
             self.assertTrue(metrics["loadGeneratorDiskEvidenceValid"])
@@ -854,6 +887,11 @@ print('fake k6 output')
             with self.assertRaises(benchmark.BenchmarkError):
                 benchmark.load_setup_manifest(path, "snapshot-1")
             for mutate in (
+                lambda value: value.pop("transport"),
+                lambda value: value["transport"].__setitem__("laneCountPerTarget", 1),
+                lambda value: value["transport"].__setitem__(
+                    "originBindAddress", "0.0.0.0"
+                ),
                 lambda value: value["database"].__setitem__("snapshotId", "wrong"),
                 lambda value: value["database"].__setitem__(
                     "perCandidateConnectionCeiling", 11

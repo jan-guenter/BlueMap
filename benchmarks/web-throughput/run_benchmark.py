@@ -316,6 +316,22 @@ def load_setup_manifest(path: Path, dataset_id: str) -> tuple[dict[str, Any], by
     if manifest.get("directOrigin") is not True:
         raise BenchmarkError("setup manifest directOrigin must be true")
 
+    expected_transport = {
+        "type": "host-key-pinned SSH local forwarding",
+        "initiator": "load-generator",
+        "sshHostKeysPinned": True,
+        "laneCountPerTarget": 12,
+        "originBindAddress": "127.0.0.1",
+        "originPort": 8100,
+        "loadGeneratorTcpBalancer": "HAProxy mode tcp",
+        "candidatePublicHttp": False,
+    }
+    if manifest.get("transport") != expected_transport:
+        raise BenchmarkError(
+            "setup manifest transport must exactly match the approved "
+            "12-lane loopback SSH forwarding contract"
+        )
+
     runpod = manifest.get("runpod")
     if not isinstance(runpod, dict):
         raise BenchmarkError("setup manifest runpod must be an object")
