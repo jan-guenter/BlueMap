@@ -208,6 +208,14 @@ def main() -> None:
     bootstrap = (IMAGES / "common" / "bootstrap.sh").read_text(encoding="utf-8")
     if "BENCHMARK_SSH_PUBLIC_KEY" not in bootstrap:
         fail("shared bootstrap does not consume the RunPod public-key input")
+    for fragment in (
+        "/usr/sbin/sshd -t -f /etc/ssh/sshd_config",
+        "/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config &",
+        "printf '%s\\n' \"$sshd_pid\" > /run/sshd.pid",
+        'kill -0 "$sshd_pid"',
+    ):
+        if fragment not in bootstrap:
+            fail(f"shared bootstrap is missing explicit sshd lifecycle fragment: {fragment}")
     for candidate in EXPECTED_FROM:
         if "images/common/bootstrap.sh" not in (IMAGES / candidate).read_text(encoding="utf-8"):
             fail(f"{candidate} does not consume the shared public-key bootstrap")

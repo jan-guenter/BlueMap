@@ -51,14 +51,22 @@ bootstrap_start_ssh() {
     bootstrap_validate_timeout
     bootstrap_install_public_key
     ssh-keygen -A >/dev/null
-    /usr/sbin/sshd -f /etc/ssh/sshd_config
-    [ -s /run/sshd.pid ] || bootstrap_fail "sshd did not create its pid file"
+    /usr/sbin/sshd -t -f /etc/ssh/sshd_config || \
+        bootstrap_fail "sshd configuration validation failed"
+    /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config &
+    sshd_pid="$!"
+    printf '%s\n' "$sshd_pid" > /run/sshd.pid
+    sleep 1
+    bootstrap_assert_ssh_alive
     echo "benchmark bootstrap: SSH ready; waiting for explicit start marker" >&2
 }
 
 bootstrap_assert_ssh_alive() {
     sshd_pid="$(cat /run/sshd.pid 2>/dev/null || true)"
-    if [ -z "$sshd_pid" ] || ! kill -0 "$sshd_pid" 2>/dev/null; then
+    case "$sshd_pid" in
+        "" | *[!0-9]*) bootstrap_fail "sshd pid file is missing or malformed" ;;
+    esac
+    if ! kill -0 "$sshd_pid" 2>/dev/null; then
         bootstrap_fail "sshd exited during bootstrap"
     fi
 }
