@@ -1,0 +1,16 @@
+storage:
+  id: sql
+  type: sql
+  sql:
+    databaseType: postgresql
+    host: postgresql.database.svc
+    port: 5432
+    database: bluemap
+    maxConnections: 10
+    credentials:
+      existingSecret: bluemap-database
+    driver:
+      className: org.postgresql.Driver
+      download:
+        url: https://example.com/postgresql.jar
+        sha256: ""

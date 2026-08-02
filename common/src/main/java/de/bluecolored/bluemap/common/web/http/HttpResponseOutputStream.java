@@ -27,7 +27,9 @@ package de.bluecolored.bluemap.common.web.http;
 import lombok.RequiredArgsConstructor;
 
 import java.io.Closeable;
+import java.io.EOFException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
@@ -38,32 +40,108 @@ public class HttpResponseOutputStream implements Closeable {
 
     private final OutputStream outputStream;
 
+    static final int COPY_BUFFER_SIZE = 64 * 1024;
+
+    private final byte[] byteBuffer = new byte[COPY_BUFFER_SIZE];
+
     public void write(HttpResponse response) throws IOException {
         HttpStatusCode statusCode = response.getStatusCode();
-        HttpResponseStreamWriter streamWriter = response.getBody();
+        InputStream body = response.getBody();
+        HttpResponseStreamWriter streamWriter = response.getStreamWriter();
+        boolean bodyAllowed = !response.isBodySuppressed()
+                && statusCode.getCode() >= 200
+                && statusCode != HttpStatusCode.NO_CONTENT
+                && statusCode != HttpStatusCode.NOT_MODIFIED;
+        HttpHeader contentLengthHeader = response.getHeader("Content-Length");
+        Long contentLength = contentLengthHeader == null
+                ? null
+                : parseContentLength(contentLengthHeader.getValue());
+        boolean fixedLength = contentLength != null;
+        if (bodyAllowed && streamWriter != null && fixedLength) {
+            throw new IOException("Streaming response cannot use Content-Length");
+        }
+        boolean chunked = (body != null || streamWriter != null)
+                && bodyAllowed
+                && !fixedLength;
 
         writeLine(response.getVersion() + " " + statusCode.getCode() + " " + statusCode.getMessage());
 
         // headers
-        if (streamWriter != null) {
-            response.addHeader("Transfer-Encoding","chunked");
-        } else {
+        if (chunked) {
+            response.addHeader("Transfer-Encoding", "chunked");
+        } else if (bodyAllowed && !fixedLength) {
             response.addHeader("Content-Length", "0");
         }
         for (HttpHeader header : response.getHeaders().values()) {
             writeLine(header.getKey() + ": " + header.getValue());
         }
         writeLine();
-        outputStream.flush();  // ensure headers are always immediately pushed to the client
 
         // body
-        if (streamWriter != null) {
-            try (ChunkedOutputStream chunkedOut = new ChunkedOutputStream(outputStream)){
+        if (bodyAllowed && fixedLength) {
+            writeFixedLengthBody(body, contentLength);
+        } else if (bodyAllowed && streamWriter != null) {
+            outputStream.flush();
+            try (ChunkedOutputStream chunkedOut =
+                         new ChunkedOutputStream(outputStream)) {
                 streamWriter.write(chunkedOut);
             }
+        } else if (chunked) {
+
+            while (true) {
+                int read = body.read(byteBuffer);
+                if (read == -1) break;
+                if (read == 0) continue;
+                writeLine(Integer.toHexString(read));
+                outputStream.write(byteBuffer, 0, read);
+                writeLine();
+                if (response.isFlushAfterEachChunk()) {
+                    outputStream.flush();
+                }
+            }
+
+            writeLine(Integer.toHexString(0));
+            writeLine();
         }
 
         outputStream.flush();
+    }
+
+    private static long parseContentLength(String value) throws IOException {
+        try {
+            long parsed = Long.parseLong(value.trim());
+            if (parsed < 0) throw new NumberFormatException("negative");
+            return parsed;
+        } catch (NumberFormatException e) {
+            throw new IOException("Invalid response Content-Length: " + value, e);
+        }
+    }
+
+    private void writeFixedLengthBody(InputStream body, long contentLength)
+            throws IOException {
+        if (body == null) {
+            if (contentLength == 0) return;
+            throw new EOFException("Response body is shorter than Content-Length");
+        }
+
+        long remaining = contentLength;
+        while (remaining > 0) {
+            int read = body.read(
+                    byteBuffer,
+                    0,
+                    (int) Math.min(byteBuffer.length, remaining)
+            );
+            if (read == -1) {
+                throw new EOFException("Response body is shorter than Content-Length");
+            }
+            if (read == 0) continue;
+            outputStream.write(byteBuffer, 0, read);
+            remaining -= read;
+        }
+
+        if (body.read() != -1) {
+            throw new IOException("Response body is longer than Content-Length");
+        }
     }
 
     private void writeLine() throws IOException {

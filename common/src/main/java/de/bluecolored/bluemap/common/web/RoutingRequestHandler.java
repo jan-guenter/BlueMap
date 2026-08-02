@@ -67,7 +67,7 @@ public class RoutingRequestHandler implements HttpRequestHandler {
     @Override
     public HttpResponse handle(HttpRequest request) {
         String path = request.getPath();
-        if (path == null) return new HttpResponse(HttpStatusCode.BAD_REQUEST);
+        if (path == null) return badRequest();
 
         // normalize path
         if (path.startsWith("/")) path = path.substring(1);
@@ -81,7 +81,13 @@ public class RoutingRequestHandler implements HttpRequestHandler {
             }
         }
 
-        return new HttpResponse(HttpStatusCode.BAD_REQUEST);
+        return badRequest();
+    }
+
+    private static HttpResponse badRequest() {
+        HttpResponse response = new HttpResponse(HttpStatusCode.BAD_REQUEST);
+        response.addHeader("Cache-Control", "no-store,no-transform");
+        return response;
     }
 
     @AllArgsConstructor
