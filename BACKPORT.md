@@ -1,7 +1,9 @@
 # BlueMap 5.22 backport
 
-This fork backports BlueMap 5.22 to the All the Mons 1.1.1 server baseline:
+This fork backports BlueMap 5.22 to the All the Mons 1.2.0 server baseline:
 
+- All the Mons: `1.2.0`
+- Pack repository commit: `c7bb230f21d14d26859d0b92548f089b3a493ad9`
 - BlueMap upstream tag: `v5.22`
 - Upstream commit: `fe5115d5548a30d34175b8e0449aaca280af199f`
 - BlueMapAPI 2.8 upstream base:
@@ -9,7 +11,7 @@ This fork backports BlueMap 5.22 to the All the Mons 1.1.1 server baseline:
 - Java 21 BlueMapAPI fork commit:
   `285c9a6` on `jan-guenter/BlueMapAPI`
 - Minecraft: 1.21.1
-- NeoForge: 21.1.234
+- NeoForge: 21.1.248
 - Java: 21
 
 The fork retains the BlueMap 5.22 API, core, common code, renderer, resource
@@ -31,19 +33,20 @@ be used as writable test targets.
 
 1. Compile API, core, and common code as Java 21 bytecode.
 2. Compile the NeoForge implementation against Minecraft 1.21.1 and NeoForge
-   21.1.234.
+   21.1.248.
 3. Start and stop a minimal dedicated server on Java 21.
 4. Validate commands, permissions, dimensions, resources, web server, player
    data, and incremental updates.
-5. Validate the exact All the Mons 1.1.1 staging pack with a fresh BlueMap
+5. Validate the exact All the Mons 1.2.0 staging pack with a fresh BlueMap
    setup and an unmodified client.
 6. In the separate FramedBlocks add-on project, compile and load its first
    renderer skeleton against this build to exercise the external extension ABI.
 
 ## Validation status
 
-The backport implementation is complete. The exact branch commit tested before
-this status update was `fe79cf5b9f4d8ca28f4e41c2aeb9ef792e336a8d`.
+The original 1.1.1 backport implementation is complete. The exact branch
+commit tested before its validation status update was
+`fe79cf5b9f4d8ca28f4e41c2aeb9ef792e336a8d`.
 
 Automated validation:
 
@@ -84,3 +87,11 @@ The public API remains BlueMapAPI 2.8 from the exact BlueMap 5.22 dependency,
 retargeted only from Java 22 to Java 21. Building and loading the future
 FramedBlocks renderer add-on is intentionally deferred to that add-on's
 separate development session.
+
+### All the Mons 1.2.0 loader refresh
+
+The branch now targets NeoForge 21.1.248. The Java 21 compile/test gate,
+merged-JAR audit, and a fresh minimal dedicated-server startup and clean
+shutdown passed with exact NeoForge 21.1.248. Full-pack staging remains the
+final release gate; an unmodified-client connection is tracked separately from
+the server-side loader compatibility claim.

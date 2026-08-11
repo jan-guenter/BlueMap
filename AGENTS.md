@@ -9,7 +9,7 @@ This is the `jan-guenter/BlueMap` fork of upstream
 `BlueMap-Minecraft/BlueMap`, based on the exact `v5.22` commit documented in
 `BACKPORT.md`.
 
-The supported runtime is only Minecraft 1.21.1, NeoForge 21.1.234, and Java
+The supported runtime is only Minecraft 1.21.1, NeoForge 21.1.248, and Java
 21. Preserve the upstream BlueMap 5.22 API/core/common behaviour wherever it
 does not depend on newer Minecraft or Java APIs.
 

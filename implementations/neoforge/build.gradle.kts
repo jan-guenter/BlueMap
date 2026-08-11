@@ -10,7 +10,7 @@ val supportedMinecraftVersions = listOf(
 )
 
 val minecraftVersion = supportedMinecraftVersions.first()
-val neoVersion = "21.1.234"
+val neoVersion = "21.1.248"
 val loaderVersion = "4"
 
 val shadowInclude: Configuration by configurations.creating
