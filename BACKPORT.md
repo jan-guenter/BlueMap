@@ -90,8 +90,15 @@ separate development session.
 
 ### All the Mons 1.2.0 loader refresh
 
-The branch now targets NeoForge 21.1.248. The Java 21 compile/test gate,
-merged-JAR audit, and a fresh minimal dedicated-server startup and clean
-shutdown passed with exact NeoForge 21.1.248. Full-pack staging remains the
-final release gate; an unmodified-client connection is tracked separately from
-the server-side loader compatibility claim.
+The branch now targets NeoForge 21.1.248. The Java 21 compile/test gate and
+merged-JAR audit passed. Dedicated-server validation passed both with a fresh
+minimal NeoForge 21.1.248 installation and with the exact All the Mons 1.2.0
+server archive (SHA-256
+`de112ed8d79b3ff027e399a5108b706f6a2db3be74b15d0db6f6b9d6ac268e6c`).
+The complete pack reached the ready state, BlueMap downloaded and loaded its
+Minecraft resources, initialized all 17 dimensions, started its web server,
+reloaded successfully, and then unloaded during a clean server shutdown. The
+expected AE2 spatial-storage dimension metadata fallback remained unchanged.
+
+This validates the server-side loader refresh. An unmodified All the Mons 1.2.0
+client connection was not repeated as part of this loader-only update.
