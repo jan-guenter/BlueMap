@@ -25,6 +25,7 @@
 package de.bluecolored.bluemap.core.storage;
 
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
+import de.bluecolored.bluemap.core.storage.compression.Compression;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.Nullable;
@@ -51,6 +52,54 @@ public interface GridStorage {
      * The CompressedInputStream is expected to be closed by the caller of this method.
      */
     @Nullable CompressedInputStream read(int x, int z) throws IOException;
+
+    /**
+     * Reads the item only if its stored representation still has the expected
+     * length. Implementations that cannot perform this check atomically retain
+     * the original {@link #read(int, int)} behavior.
+     *
+     * @param expectedContentLength admitted stored-representation length
+     */
+    default @Nullable CompressedInputStream read(
+            int x, int z, long expectedContentLength
+    ) throws IOException {
+        if (expectedContentLength < 0) {
+            throw new IllegalArgumentException(
+                    "expectedContentLength must not be negative"
+            );
+        }
+        return read(x, z);
+    }
+
+    /**
+     * Returns whether {@link #read(int, int, long)} checks the expected stored
+     * length in the same operation that reads the body.
+     */
+    default boolean supportsAtomicLengthRead() {
+        return false;
+    }
+
+    /**
+     * Returns metadata for the stored representation without reading its
+     * content, or null if the item is missing or this operation is unsupported.
+     *
+     * The default keeps custom storage implementations source-compatible. A
+     * caller must fall back to {@link #read(int, int)} when null is returned.
+     */
+    default @Nullable StoredDataMetadata readMetadata(int x, int z) throws IOException {
+        return null;
+    }
+
+    /**
+     * Returns the configured representation compression without accessing an
+     * item, or null when the implementation cannot determine it without a
+     * read.
+     *
+     * The default keeps custom storage implementations source-compatible.
+     */
+    default @Nullable Compression compression() {
+        return null;
+    }
 
     /**
      * Deletes the item from this storage at the given position
@@ -107,6 +156,27 @@ public interface GridStorage {
         @Override
         public CompressedInputStream read() throws IOException {
             return storage.read(x, z);
+        }
+
+        @Override
+        public CompressedInputStream read(long expectedContentLength)
+                throws IOException {
+            return storage.read(x, z, expectedContentLength);
+        }
+
+        @Override
+        public boolean supportsAtomicLengthRead() {
+            return storage.supportsAtomicLengthRead();
+        }
+
+        @Override
+        public @Nullable StoredDataMetadata readMetadata() throws IOException {
+            return storage.readMetadata(x, z);
+        }
+
+        @Override
+        public @Nullable Compression compression() {
+            return storage.compression();
         }
 
         @Override

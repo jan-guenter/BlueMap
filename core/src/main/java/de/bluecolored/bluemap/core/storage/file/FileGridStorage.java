@@ -26,6 +26,7 @@ package de.bluecolored.bluemap.core.storage.file;
 
 import de.bluecolored.bluemap.core.storage.GridStorage;
 import de.bluecolored.bluemap.core.storage.ItemStorage;
+import de.bluecolored.bluemap.core.storage.StoredDataMetadata;
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.util.FileHelper;
@@ -61,6 +62,16 @@ public class FileGridStorage implements GridStorage {
     @Override
     public @Nullable CompressedInputStream read(int x, int z) throws IOException {
         return cell(x, z).read();
+    }
+
+    @Override
+    public @Nullable StoredDataMetadata readMetadata(int x, int z) throws IOException {
+        return cell(x, z).readMetadata();
+    }
+
+    @Override
+    public Compression compression() {
+        return compression;
     }
 
     @Override

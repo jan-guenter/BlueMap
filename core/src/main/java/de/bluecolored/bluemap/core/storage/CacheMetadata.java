@@ -24,42 +24,34 @@
  */
 package de.bluecolored.bluemap.core.storage;
 
-import java.io.Closeable;
-import java.io.IOException;
-import java.util.stream.Stream;
+import org.jetbrains.annotations.Nullable;
 
-public interface Storage extends Closeable {
-
-    /**
-     * Does everything necessary to initialize this storage.
-     * (E.g. create tables on a database if they don't exist or upgrade older data).
-     */
-    void initialize() throws IOException;
-
-    /**
-     * Returns the {@link MapStorage} for the given mapId.<br>
-     * <br>
-     * If this method is invoked multiple times with the same <code>mapId</code>, it is important that the returned MapStorage should at least
-     * be equal (<code>equals() == true</code>) to the previously returned storages!
-     */
-    MapStorage map(String mapId);
+/**
+ * Cache validators associated with a stored representation of an item.
+ *
+ * @param weak whether the content hash is only a weak representation
+ *             validator
+ */
+public record CacheMetadata(
+        byte @Nullable [] contentHash,
+        long updatedAt,
+        boolean weak
+) {
 
     /**
-     * Fetches and returns a stream of all map-id's in this storage
+     * Creates cache metadata with a strong content validator.
      */
-    Stream<String> mapIds() throws IOException;
+    public CacheMetadata(byte @Nullable [] contentHash, long updatedAt) {
+        this(contentHash, updatedAt, false);
+    }
 
-    /**
-     * Checks if this storage is closed
-     */
-    boolean isClosed();
+    public CacheMetadata {
+        contentHash = contentHash == null ? null : contentHash.clone();
+    }
 
-    /**
-     * Returns the latest non-blocking dependency-health state for this storage.
-     * Storages without an external dependency retain the closed-state behavior.
-     */
-    default boolean isHealthy() {
-        return !isClosed();
+    @Override
+    public byte @Nullable [] contentHash() {
+        return contentHash == null ? null : contentHash.clone();
     }
 
 }

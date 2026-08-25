@@ -62,6 +62,9 @@ public class SQLConfig extends StorageConfig {
     private String driverJar = null;
     private String driverClass = null;
     private int maxConnections = -1;
+    private long maxInFlightResponseBytes =
+            Database.DEFAULT_MAX_IN_FLIGHT_RESPONSE_BYTES;
+    private boolean readOnly = false;
 
     private String compression = Compression.GZIP.getKey().getFormatted();
 
@@ -117,15 +120,44 @@ public class SQLConfig extends StorageConfig {
 
     @Override
     public SQLStorage createStorage() throws ConfigurationException {
+        if (maxInFlightResponseBytes <= 0) {
+            throw new ConfigurationException(
+                    "max-in-flight-response-bytes must be positive"
+            );
+        }
+        Dialect dialect = getDialect();
+        Map<String, String> connectionProperties =
+                effectiveConnectionProperties(dialect);
+
         Driver driver = createDriver();
         Database database;
         if (driver != null) {
-            database = new Database(getConnectionUrl(), getConnectionProperties(), getMaxConnections(), driver);
+            database = new Database(
+                    getConnectionUrl(), connectionProperties,
+                    getMaxConnections(), driver,
+                    getMaxInFlightResponseBytes(), isReadOnly()
+            );
         } else {
-            database = new Database(getConnectionUrl(), getConnectionProperties(), getMaxConnections());
+            database = new Database(
+                    getConnectionUrl(), connectionProperties,
+                    getMaxConnections(),
+                    getMaxInFlightResponseBytes(), isReadOnly()
+            );
         }
-        CommandSet commandSet = getDialect().createCommandSet(database);
-        return new SQLStorage(commandSet, getCompression());
+        CommandSet commandSet = dialect.createCommandSet(database);
+        return new SQLStorage(commandSet, getCompression(), isReadOnly());
+    }
+
+    Map<String, String> effectiveConnectionProperties(Dialect dialect) {
+        Map<String, String> effective =
+                new HashMap<>(getConnectionProperties());
+        if (isReadOnly() && dialect == Dialect.SQLITE) {
+            // Xerial SQLite cannot switch an established connection to
+            // read-only mode. Opening it with READONLY from the outset keeps
+            // the same fail-closed contract as the network SQL drivers.
+            effective.put("open_mode", "1");
+        }
+        return effective;
     }
 
     private @Nullable Driver createDriver() throws ConfigurationException {

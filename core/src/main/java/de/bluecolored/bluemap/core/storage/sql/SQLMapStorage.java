@@ -32,6 +32,7 @@ import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.storage.sql.commandset.CommandSet;
 import de.bluecolored.bluemap.core.util.Caches;
 import de.bluecolored.bluemap.core.util.Key;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.util.function.DoublePredicate;
@@ -40,15 +41,57 @@ public class SQLMapStorage extends KeyedMapStorage {
 
     private final String mapId;
     private final CommandSet sql;
+    private final boolean readOnly;
 
     private final Cache<Key, ItemStorage> itemStorages = Caches.build();
     private final Cache<Key, GridStorage> gridStorages = Caches.build();
 
     public SQLMapStorage(String mapId, CommandSet sql, Compression compression) {
+        this(mapId, sql, compression, false);
+    }
+
+    public SQLMapStorage(
+            String mapId,
+            CommandSet sql,
+            Compression compression,
+            boolean readOnly
+    ) {
         super(compression);
 
         this.mapId = mapId;
         this.sql = sql;
+        this.readOnly = readOnly;
+    }
+
+    @Override
+    public @Nullable ReadPermit tryAcquireReadPermit() {
+        CommandSet.ReadPermit permit = sql.tryAcquireReadPermit();
+        return permit == null ? null : permit::close;
+    }
+
+    @Override
+    public @Nullable ResponsePermit tryAcquireResponsePermit(
+            long contentLength
+    ) {
+        CommandSet.ResponsePermit permit =
+                sql.tryAcquireResponsePermit(contentLength);
+        if (permit == null) return null;
+        return new ResponsePermit() {
+            @Override
+            public boolean tryResize(long newContentLength) {
+                return permit.tryResize(newContentLength);
+            }
+
+            @Override
+            public void close() {
+                permit.close();
+            }
+        };
+    }
+
+    @Override
+    public boolean requiresResponseAdmission() {
+        return true;
     }
 
     @Override
@@ -56,7 +99,12 @@ public class SQLMapStorage extends KeyedMapStorage {
         ItemStorage item = itemStorages.getIfPresent(key);
         if (item != null) return item;
 
-        return itemStorages.get(key, k -> new SQLItemStorage(sql, mapId, key, compression));
+        return itemStorages.get(
+                key,
+                k -> new SQLItemStorage(
+                        sql, mapId, key, compression, readOnly
+                )
+        );
     }
 
     @Override
@@ -64,11 +112,17 @@ public class SQLMapStorage extends KeyedMapStorage {
         GridStorage grid = gridStorages.getIfPresent(key);
         if (grid != null) return grid;
 
-        return gridStorages.get(key, k -> new SQLGridStorage(sql, mapId, key, compression));
+        return gridStorages.get(
+                key,
+                k -> new SQLGridStorage(
+                        sql, mapId, key, compression, readOnly
+                )
+        );
     }
 
     @Override
     public void delete(DoublePredicate onProgress) throws IOException {
+        requireWritable();
 
         // delete tiles in 1000er steps to track progress
         int tileCount = sql.countMapGridsItems(mapId);
@@ -98,6 +152,12 @@ public class SQLMapStorage extends KeyedMapStorage {
     @Override
     public boolean isClosed() {
         return sql.isClosed();
+    }
+
+    private void requireWritable() throws IOException {
+        if (readOnly) {
+            throw new IOException("SQL storage is configured read-only");
+        }
     }
 
 }

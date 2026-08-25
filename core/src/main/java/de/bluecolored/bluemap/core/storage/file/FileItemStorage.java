@@ -24,7 +24,9 @@
  */
 package de.bluecolored.bluemap.core.storage.file;
 
+import de.bluecolored.bluemap.core.storage.CacheMetadata;
 import de.bluecolored.bluemap.core.storage.ItemStorage;
+import de.bluecolored.bluemap.core.storage.StoredDataMetadata;
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.util.FileHelper;
@@ -34,10 +36,14 @@ import org.jetbrains.annotations.Nullable;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Objects;
 
 @RequiredArgsConstructor
 public class FileItemStorage implements ItemStorage {
@@ -59,12 +65,118 @@ public class FileItemStorage implements ItemStorage {
 
     @Override
     public @Nullable CompressedInputStream read() throws IOException {
-        if (!Files.exists(file)) return null;
+        OpenedFile openedFile;
         try {
-            return new CompressedInputStream(Files.newInputStream(file), compression);
+            openedFile = openStableFile(file);
         } catch (FileNotFoundException | NoSuchFileException ex) {
             return null;
         }
+
+        BasicFileAttributes attributes = openedFile.attributes();
+        if (!attributes.isRegularFile()) {
+            openedFile.close();
+            return null;
+        }
+
+        try {
+            return new CompressedInputStream(
+                    Channels.newInputStream(openedFile.channel()),
+                    compression,
+                    cacheMetadata(attributes),
+                    attributes.size()
+            );
+        } catch (RuntimeException e) {
+            openedFile.close();
+            throw e;
+        }
+    }
+
+    @Override
+    public @Nullable StoredDataMetadata readMetadata() throws IOException {
+        try {
+            BasicFileAttributes attributes =
+                    Files.readAttributes(file, BasicFileAttributes.class);
+            if (!attributes.isRegularFile()) return null;
+            return new StoredDataMetadata(
+                    compression,
+                    cacheMetadata(attributes),
+                    attributes.size()
+            );
+        } catch (FileNotFoundException | NoSuchFileException ex) {
+            return null;
+        }
+    }
+
+    @Override
+    public Compression compression() {
+        return compression;
+    }
+
+    static OpenedFile openStableFile(Path path) throws IOException {
+        return openStableFile(path, () -> {});
+    }
+
+    static OpenedFile openStableFile(
+            Path path,
+            OpenHook afterInitialMetadata
+    ) throws IOException {
+        IOException lastFailure = null;
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            BasicFileAttributes before =
+                    Files.readAttributes(path, BasicFileAttributes.class);
+            afterInitialMetadata.run();
+            FileChannel channel = null;
+
+            try {
+                channel = FileChannel.open(path, StandardOpenOption.READ);
+                BasicFileAttributes after =
+                        Files.readAttributes(path, BasicFileAttributes.class);
+
+                if (sameFileVersion(before, after)
+                        && channel.size() == after.size()) {
+                    return new OpenedFile(channel, after);
+                }
+
+                lastFailure = new IOException(
+                        "File changed while it was being opened: " + path
+                );
+            } catch (IOException e) {
+                lastFailure = e;
+            }
+
+            if (channel != null) channel.close();
+        }
+
+        throw Objects.requireNonNullElseGet(
+                lastFailure,
+                () -> new IOException("Failed to open file: " + path)
+        );
+    }
+
+    private static boolean sameFileVersion(
+            BasicFileAttributes before,
+            BasicFileAttributes after
+    ) {
+        Object beforeKey = before.fileKey();
+        Object afterKey = after.fileKey();
+        if ((beforeKey != null || afterKey != null)
+                && !Objects.equals(beforeKey, afterKey)) {
+            return false;
+        }
+
+        return before.isRegularFile() == after.isRegularFile()
+                && before.size() == after.size()
+                && before.lastModifiedTime().equals(after.lastModifiedTime());
+    }
+
+    private static CacheMetadata cacheMetadata(BasicFileAttributes attributes) {
+        // File metadata cannot prove representation identity when content can
+        // be rewritten in place. Keep Last-Modified, but omit the ETag input.
+        return new CacheMetadata(
+                null,
+                attributes.lastModifiedTime().toMillis()
+        );
     }
 
     @Override
@@ -80,6 +192,25 @@ public class FileItemStorage implements ItemStorage {
     @Override
     public boolean isClosed() {
         return false;
+    }
+
+    @FunctionalInterface
+    interface OpenHook {
+
+        void run() throws IOException;
+
+    }
+
+    record OpenedFile(
+            FileChannel channel,
+            BasicFileAttributes attributes
+    ) implements AutoCloseable {
+
+        @Override
+        public void close() throws IOException {
+            channel.close();
+        }
+
     }
 
 }

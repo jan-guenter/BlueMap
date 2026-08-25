@@ -24,10 +24,45 @@
  */
 package de.bluecolored.bluemap.core.storage;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.io.IOException;
 import java.util.function.DoublePredicate;
 
 public interface MapStorage {
+
+    /**
+     * Tries to reserve capacity for one storage read operation. A null return
+     * rejects the read without queueing. The permit may be released as soon as
+     * the storage operation has returned.
+     */
+    default @Nullable ReadPermit tryAcquireReadPermit() {
+        return ReadPermit.NOOP;
+    }
+
+    /**
+     * Tries to reserve capacity for an externally streamed response body. The
+     * permit remains held until the response body is closed. Storages without
+     * retained-body admission control use the default no-op permit.
+     *
+     * @param contentLength retained response bytes, or {@code -1} if unknown;
+     *                      admission-controlled implementations must reserve
+     *                      exclusive unknown-length capacity before reading
+     */
+    default @Nullable ResponsePermit tryAcquireResponsePermit(
+            long contentLength
+    ) {
+        return ResponsePermit.NOOP;
+    }
+
+    /**
+     * Returns whether response capacity must be reserved before a stored body
+     * is materialized. Implementations returning true should also provide
+     * exact content lengths through their storage metadata methods.
+     */
+    default boolean requiresResponseAdmission() {
+        return false;
+    }
 
     /**
      * Returns the {@link GridStorage} holding the maps hires-tiles
@@ -109,6 +144,34 @@ public interface MapStorage {
         return name
                 .replaceAll("[^\\w\\d.\\-_/]", "_")
                 .replace("..", "_.");
+    }
+
+    @FunctionalInterface
+    interface ReadPermit extends AutoCloseable {
+
+        ReadPermit NOOP = () -> {};
+
+        @Override
+        void close();
+
+    }
+
+    @FunctionalInterface
+    interface ResponsePermit extends AutoCloseable {
+
+        ResponsePermit NOOP = () -> {};
+
+        /**
+         * Reconciles a metadata-based reservation with the body that will
+         * actually be retained. False rejects the response.
+         */
+        default boolean tryResize(long contentLength) {
+            return contentLength >= 0;
+        }
+
+        @Override
+        void close();
+
     }
 
 }

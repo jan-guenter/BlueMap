@@ -24,42 +24,26 @@
  */
 package de.bluecolored.bluemap.core.storage;
 
-import java.io.Closeable;
-import java.io.IOException;
-import java.util.stream.Stream;
+import de.bluecolored.bluemap.core.storage.compression.Compression;
 
-public interface Storage extends Closeable {
+import java.util.Objects;
 
-    /**
-     * Does everything necessary to initialize this storage.
-     * (E.g. create tables on a database if they don't exist or upgrade older data).
-     */
-    void initialize() throws IOException;
+/**
+ * Metadata for one exact stored representation, available without reading its
+ * content when supported by the storage implementation.
+ */
+public record StoredDataMetadata(
+        Compression compression,
+        CacheMetadata cacheMetadata,
+        long contentLength
+) {
 
-    /**
-     * Returns the {@link MapStorage} for the given mapId.<br>
-     * <br>
-     * If this method is invoked multiple times with the same <code>mapId</code>, it is important that the returned MapStorage should at least
-     * be equal (<code>equals() == true</code>) to the previously returned storages!
-     */
-    MapStorage map(String mapId);
-
-    /**
-     * Fetches and returns a stream of all map-id's in this storage
-     */
-    Stream<String> mapIds() throws IOException;
-
-    /**
-     * Checks if this storage is closed
-     */
-    boolean isClosed();
-
-    /**
-     * Returns the latest non-blocking dependency-health state for this storage.
-     * Storages without an external dependency retain the closed-state behavior.
-     */
-    default boolean isHealthy() {
-        return !isClosed();
+    public StoredDataMetadata {
+        Objects.requireNonNull(compression, "compression");
+        Objects.requireNonNull(cacheMetadata, "cacheMetadata");
+        if (contentLength < 0) {
+            throw new IllegalArgumentException("contentLength must not be negative");
+        }
     }
 
 }

@@ -33,11 +33,77 @@ import java.io.IOException;
 
 public interface CommandSet extends Closeable {
 
+    /** Tries to reserve capacity for one SQL read operation. */
+    default @Nullable ReadPermit tryAcquireReadPermit() {
+        return () -> {};
+    }
+
+    /**
+     * Tries to reserve retained-memory capacity for a SQL-backed response body.
+     * The permit remains held until the body is closed.
+     */
+    default @Nullable ResponsePermit tryAcquireResponsePermit(
+            long contentLength
+    ) {
+        return () -> {};
+    }
+
     void initializeTables() throws IOException;
+
+    /**
+     * Verifies that the storage schema is ready for reads without creating or
+     * migrating database objects.
+     *
+     * <p>Read-only server processes call this instead of
+     * {@link #initializeTables()}. Custom command sets must opt in explicitly
+     * so a read-only process can never fall back to schema-changing work.</p>
+     */
+    default void validateTables() throws IOException {
+        throw new IOException(
+                "This SQL dialect does not support read-only schema validation"
+        );
+    }
 
     void writeItem(String mapId, Key key, Compression compression, byte[] bytes) throws IOException;
 
     byte @Nullable [] readItem(String mapId, Key key, Compression compression) throws IOException;
+
+    /**
+     * Reads an item together with cache metadata when available.
+     *
+     * <p>The default preserves compatibility with command sets implementing
+     * the original byte-array read contract.</p>
+     */
+    default @Nullable StoredData readItemData(
+            String mapId, Key key, Compression compression
+    ) throws IOException {
+        byte[] data = readItem(mapId, key, compression);
+        return data == null ? null : new StoredData(data, null, 0);
+    }
+
+    /**
+     * Reads an item only if its stored representation still has the admitted
+     * length. The compatibility default cannot make that check atomically.
+     */
+    default @Nullable StoredData readItemData(
+            String mapId,
+            Key key,
+            Compression compression,
+            long expectedContentLength
+    ) throws IOException {
+        if (expectedContentLength < 0) {
+            throw new IllegalArgumentException(
+                    "expectedContentLength must not be negative"
+            );
+        }
+        return readItemData(mapId, key, compression);
+    }
+
+    default @Nullable StoredMetadata readItemMetadata(
+            String mapId, Key key, Compression compression
+    ) throws IOException {
+        return null;
+    }
 
     void deleteItem(String mapId, Key key) throws IOException;
 
@@ -51,6 +117,54 @@ public interface CommandSet extends Closeable {
     byte @Nullable [] readGridItem(
             String mapId, Key key, int x, int z, Compression compression
     ) throws IOException;
+
+    /**
+     * Reads a grid item together with cache metadata when available.
+     *
+     * <p>The default preserves compatibility with command sets implementing
+     * the original byte-array read contract.</p>
+     */
+    default @Nullable StoredData readGridItemData(
+            String mapId, Key key, int x, int z, Compression compression
+    ) throws IOException {
+        byte[] data = readGridItem(mapId, key, x, z, compression);
+        return data == null ? null : new StoredData(data, null, 0);
+    }
+
+    /**
+     * Reads a grid item only if its stored representation still has the
+     * admitted length. The compatibility default cannot make that check
+     * atomically.
+     */
+    default @Nullable StoredData readGridItemData(
+            String mapId,
+            Key key,
+            int x,
+            int z,
+            Compression compression,
+            long expectedContentLength
+    ) throws IOException {
+        if (expectedContentLength < 0) {
+            throw new IllegalArgumentException(
+                    "expectedContentLength must not be negative"
+            );
+        }
+        return readGridItemData(mapId, key, x, z, compression);
+    }
+
+    /**
+     * Returns whether the expected-length read methods bind the length check to
+     * the same database operation that materializes the body.
+     */
+    default boolean supportsAtomicLengthRead() {
+        return false;
+    }
+
+    default @Nullable StoredMetadata readGridItemMetadata(
+            String mapId, Key key, int x, int z, Compression compression
+    ) throws IOException {
+        return null;
+    }
 
     void deleteGridItem(
             String mapId, Key key, int x, int z
@@ -77,6 +191,63 @@ public interface CommandSet extends Closeable {
 
     boolean isClosed();
 
+    default boolean isHealthy() {
+        return !isClosed();
+    }
+
     record TilePosition (int x, int z) {}
+
+    record StoredData(byte[] data, byte @Nullable [] contentHash, long updatedAt) {
+
+        public StoredData {
+            contentHash = contentHash == null ? null : contentHash.clone();
+        }
+
+        @Override
+        public byte @Nullable [] contentHash() {
+            return contentHash == null ? null : contentHash.clone();
+        }
+
+    }
+
+    record StoredMetadata(
+            long contentLength,
+            byte @Nullable [] contentHash,
+            long updatedAt
+    ) {
+
+        public StoredMetadata {
+            if (contentLength < 0) {
+                throw new IllegalArgumentException("contentLength must not be negative");
+            }
+            contentHash = contentHash == null ? null : contentHash.clone();
+        }
+
+        @Override
+        public byte @Nullable [] contentHash() {
+            return contentHash == null ? null : contentHash.clone();
+        }
+
+    }
+
+    @FunctionalInterface
+    interface ReadPermit extends AutoCloseable {
+
+        @Override
+        void close();
+
+    }
+
+    @FunctionalInterface
+    interface ResponsePermit extends AutoCloseable {
+
+        default boolean tryResize(long contentLength) {
+            return contentLength >= 0;
+        }
+
+        @Override
+        void close();
+
+    }
 
 }
