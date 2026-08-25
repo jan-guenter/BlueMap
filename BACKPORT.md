@@ -108,5 +108,10 @@ client connection was not repeated as part of this loader-only update.
 The current branch rebases the NeoForge 1.21.1 and Java 21 adaptation onto the
 exact upstream BlueMap 5.23 tag. Upstream 5.23 uses the same BlueMapAPI commit
 as 5.22, so the existing Java 21 API fork remains the exact matching API base.
-The 5.23 build and runtime results are recorded only after their corresponding
-checks have run on the rebased branch.
+
+The Java 21 narrow compile gate and the full `spotlessCheck test release` gate
+pass on the rebased branch. The resulting NeoForge JAR contains no class file
+newer than Java 21, retains the Minecraft `[1.21.1,1.21.2)` and NeoForge
+`[21.1.248,21.2)` ranges, and contains only the intended Flow Math and BlueNBT
+nested dependencies. A fresh dedicated-server and full-pack smoke remain
+release gates and were not repeated for this branch-only rebase.
