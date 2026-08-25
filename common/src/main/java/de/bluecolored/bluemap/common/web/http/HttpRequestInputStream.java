@@ -30,6 +30,7 @@ import java.io.*;
 import java.net.InetAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -37,24 +38,28 @@ public class HttpRequestInputStream implements Closeable {
 
     private static final Pattern REQUEST_PATTERN = Pattern.compile("^(\\w+) (\\S+) (.+)$");
     private static final int MAX_CHUNK_SIZE = 0x100000;
+    private static final int MAX_CHUNK_COUNT = 1024;
 
     private final InetAddress source;
     private final DataInputStream in;
-    private final Reader reader;
+    private final HttpRequestLimits limits;
 
     private byte[] byteBuffer = new byte[1024];
-    private final char[] charBuffer = new char[1];
+    private byte[] lineBuffer = new byte[1024];
 
     public HttpRequestInputStream(InputStream in, InetAddress source) {
+        this(in, source, HttpRequestLimits.DEFAULT);
+    }
+
+    public HttpRequestInputStream(InputStream in, InetAddress source, HttpRequestLimits limits) {
         this.source = source;
         this.in = new DataInputStream(in);
-        this.reader = new InputStreamReader(this.in, StandardCharsets.UTF_8);
+        this.limits = limits;
     }
 
     public @Nullable HttpRequest read() throws IOException {
 
-        String requestLine;
-        requestLine = readLine();
+        String requestLine = readLine(limits.maxRequestLineBytes(), "request line").value();
 
         Matcher m = REQUEST_PATTERN.matcher(requestLine);
         if (!m.find()) throw new IOException("Invalid HTTP Request: Request-Pattern not matching '%s'".formatted(requestLine));
@@ -70,21 +75,24 @@ public class HttpRequestInputStream implements Closeable {
         request.setRawQueryString(address.getRawQuery());
 
         // headers
-        while (true) {
-            String line = readLine();
-            if (line.isBlank()) break;
-
-            String[] kv = line.split(":", 2);
-            if (kv.length < 2) continue;
-
-            request.addHeader(kv[0], kv[1].trim());
-        }
+        HeaderBudget headerBudget = new HeaderBudget();
+        readHeaders(request, headerBudget);
 
         // body
-        if (request.hasHeaderValue("transfer-encoding", "chunked")) {
-            request.setBody(readChunkedBody());
+        HttpHeader transferEncodingHeader = request.getHeader("transfer-encoding");
+        HttpHeader contentLengthHeader = request.getHeader("content-length");
+        if (transferEncodingHeader != null) {
+            if (contentLengthHeader != null) {
+                throw new IOException("Invalid HTTP Request: transfer-encoding and content-length cannot be combined");
+            }
+
+            List<String> transferEncodings = transferEncodingHeader.getValues();
+            if (transferEncodings.size() != 1 || !transferEncodings.getFirst().equalsIgnoreCase("chunked")) {
+                throw new IOException("Invalid HTTP Request: unsupported transfer-encoding");
+            }
+
+            request.setBody(readChunkedBody(headerBudget));
         } else {
-            HttpHeader contentLengthHeader = request.getHeader("content-length");
             int contentLength = 0;
             if (contentLengthHeader != null) {
                 try {
@@ -92,6 +100,10 @@ public class HttpRequestInputStream implements Closeable {
                 } catch (NumberFormatException ex) {
                     throw new IOException("Invalid HTTP Request: content-length is not a number", ex);
                 }
+            }
+
+            if (contentLength < 0 || contentLength > limits.maxBodyBytes()) {
+                throw new IOException("Invalid HTTP Request: body too large");
             }
 
             if (contentLength > 0) {
@@ -102,36 +114,137 @@ public class HttpRequestInputStream implements Closeable {
         return request;
     }
 
-    private String readLine() throws IOException {
+    private void readHeaders(@Nullable HttpRequest request, HeaderBudget budget) throws IOException {
+        while (true) {
+            Line line = readLine(limits.maxHeaderBytes(), request == null ? "trailer line" : "header line");
+            budget.add(line.bytes());
+            if (line.value().isEmpty()) return;
 
-        StringBuilder stringBuilder = new StringBuilder();
-        do {
-            if (reader.read(charBuffer, 0, 1) == -1) throw new EOFException();
-            stringBuilder.append(charBuffer, 0, 1);
-        } while (charBuffer[0] != '\n');
+            budget.addHeader();
+            int separator = line.value().indexOf(':');
+            if (separator <= 0) {
+                throw new IOException("Invalid HTTP Request: malformed header");
+            }
 
-        return stringBuilder.toString();
+            if (request != null) {
+                String name = line.value().substring(0, separator);
+                String value = line.value().substring(separator + 1).trim();
+                HttpHeader existingHeader = request.getHeader(name);
+                if (existingHeader == null) {
+                    request.addHeader(name, value);
+                } else {
+                    existingHeader.add(value);
+                }
+            }
+        }
     }
 
-    private byte[] readChunkedBody() throws IOException {
-        ByteArrayOutputStream body = new ByteArrayOutputStream(1024);
+    private Line readLine(int maxBytes, String part) throws IOException {
+        int length = 0;
 
         while (true) {
-            String prefix = readLine();
-            int size = Integer.valueOf(prefix.trim(), 16);
-            if (size < 0 || size > MAX_CHUNK_SIZE) throw new IOException("Invalid HTTP Request: Chunked body size is out of range");
+            int value = in.read();
+            if (value == -1) throw new EOFException();
+            if (length == maxBytes) {
+                throw new IOException("Invalid HTTP Request: " + part + " too large");
+            }
+            if (length == lineBuffer.length) {
+                int expanded = Math.min(maxBytes, lineBuffer.length * 2);
+                lineBuffer = java.util.Arrays.copyOf(lineBuffer, expanded);
+            }
+            lineBuffer[length++] = (byte) value;
+
+            if (value == '\n') {
+                if (length < 2 || lineBuffer[length - 2] != '\r') {
+                    throw new IOException("Invalid HTTP Request: " + part + " must end with CRLF");
+                }
+
+                return new Line(
+                        new String(
+                                lineBuffer, 0, length - 2,
+                                StandardCharsets.ISO_8859_1
+                        ),
+                        length
+                );
+            }
+        }
+    }
+
+    private byte[] readChunkedBody(HeaderBudget headerBudget) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream(1024);
+        int chunkCount = 0;
+
+        while (true) {
+            Line prefixLine = readLine(limits.maxHeaderBytes(), "chunk prefix");
+            headerBudget.add(prefixLine.bytes());
+            String prefix = prefixLine.value();
+            int extensionSeparator = prefix.indexOf(';');
+            String sizeText = (extensionSeparator < 0 ? prefix : prefix.substring(0, extensionSeparator)).trim();
+            long parsedSize;
+            try {
+                parsedSize = Long.parseLong(sizeText, 16);
+            } catch (NumberFormatException ex) {
+                throw new IOException("Invalid HTTP Request: chunk size is not a number", ex);
+            }
+            if (parsedSize < 0 || parsedSize > MAX_CHUNK_SIZE) {
+                throw new IOException("Invalid HTTP Request: body too large");
+            }
+
+            int size = (int) parsedSize;
+            if (body.size() > limits.maxBodyBytes() - size) {
+                throw new IOException("Invalid HTTP Request: body too large");
+            }
+
+            if (size == 0) {
+                readHeaders(null, headerBudget);
+                break;
+            }
+            if (++chunkCount > MAX_CHUNK_COUNT) {
+                throw new IOException("Invalid HTTP Request: too many chunks");
+            }
+
             if (size > byteBuffer.length) byteBuffer = new byte[size];
-            size = in.readNBytes(byteBuffer, 0, size);
+            in.readFully(byteBuffer, 0, size);
             body.write(byteBuffer, 0, size);
-            readLine(); // suffix
-            if (size == 0) break;
+            readCrlf("chunk data");
+            headerBudget.add(2);
         }
 
         return body.toByteArray();
     }
 
     private byte[] readBody(int contentLength) throws IOException {
-        return in.readNBytes(contentLength);
+        byte[] body = new byte[contentLength];
+        in.readFully(body);
+        return body;
+    }
+
+    private void readCrlf(String part) throws IOException {
+        if (in.read() != '\r' || in.read() != '\n') {
+            throw new IOException("Invalid HTTP Request: " + part + " must end with CRLF");
+        }
+    }
+
+    private record Line(String value, int bytes) {}
+
+    private final class HeaderBudget {
+
+        private int count;
+        private int bytes;
+
+        void addHeader() throws IOException {
+            count++;
+            if (count > limits.maxHeaderCount()) {
+                throw new IOException("Invalid HTTP Request: too many headers");
+            }
+        }
+
+        void add(int additionalBytes) throws IOException {
+            if (bytes > limits.maxHeaderBytes() - additionalBytes) {
+                throw new IOException("Invalid HTTP Request: headers too large");
+            }
+            bytes += additionalBytes;
+        }
     }
 
     @Override

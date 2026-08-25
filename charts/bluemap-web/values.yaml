@@ -1,0 +1,165 @@
+replicaCount: 1
+terminationGracePeriodSeconds: 30
+shutdownGracePeriodSeconds: 20
+
+image:
+  repository: ghcr.io/jan-guenter/bluemap-web
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+
+service:
+  type: ClusterIP
+  port: 8100
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: bluemap.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Empty selects RollingUpdate for multiple stateless SQL replicas and Recreate
+# for a single replica. Set this object to override that choice.
+strategy: {}
+
+# One storage configuration is generated as storages/<id>.conf. Map
+# configurations under config.files should reference this id.
+storage:
+  id: file
+  type: file
+  compression: gzip
+  file:
+    root: /data/maps
+  sql:
+    databaseType: mariadb
+    host: ""
+    port: 3306
+    database: bluemap
+    connectionUrl: ""
+    maxConnections: 10
+    properties: {}
+    credentials:
+      existingSecret: ""
+      usernameKey: username
+      passwordKey: password
+      username: ""
+      password: ""
+    driver:
+      className: ""
+      existingConfigMap:
+        name: ""
+        key: ""
+      download:
+        url: ""
+        sha256: ""
+        image:
+          repository: curlimages/curl
+          tag: "8.21.0"
+          pullPolicy: IfNotPresent
+
+config:
+  existingConfigMap: ""
+  items: []
+  files:
+    core.conf: |
+      accept-download: false
+      data: "/data"
+      render-thread-count: 1
+      scan-for-mod-resources: false
+      log: {}
+    webapp.conf: |
+      enabled: true
+      webroot: "/data/web"
+      update-settings-file: true
+    webserver.conf: |
+      enabled: true
+      webroot: "/data/web"
+      ip: "0.0.0.0"
+      port: 8100
+      sse-enabled: false
+      tile-cache-max-age: 60
+      max-active-connections: 256
+      connection-idle-timeout-seconds: 60
+      shutdown-grace-period-seconds: {{ .Values.shutdownGracePeriodSeconds }}
+      max-request-line-bytes: 8192
+      max-header-count: 100
+      max-header-bytes: 32768
+      max-body-bytes: 1048576
+      log: {}
+    maps/world.conf: |
+      name: "World"
+      storage: {{ .Values.storage.id | quote }}
+
+secretConfig:
+  existingSecret: ""
+  items: []
+  files: {}
+
+persistence:
+  # Persistence is for a single file-storage replica. SQL deployments and all
+  # horizontally scaled deployments keep their runtime data pod-local.
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+resources: {}
+
+livenessProbe:
+  tcpSocket:
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 5
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

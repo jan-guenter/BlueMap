@@ -54,4 +54,12 @@ public interface Storage extends Closeable {
      */
     boolean isClosed();
 
+    /**
+     * Returns the latest non-blocking dependency-health state for this storage.
+     * Storages without an external dependency retain the closed-state behavior.
+     */
+    default boolean isHealthy() {
+        return !isClosed();
+    }
+
 }

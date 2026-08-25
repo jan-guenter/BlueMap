@@ -16,8 +16,8 @@ This fork backports BlueMap 5.23 to the All the Mons 1.2.0 server baseline:
 
 The fork retains the BlueMap 5.23 API, core, common code, renderer, resource
 system, and web application. It provides a dedicated NeoForge 1.21.1 platform
-adapter and intentionally does not claim compatibility with BlueMap's other
-platform targets.
+adapter and a stateless standalone Java web server. It intentionally does not
+claim compatibility with BlueMap's other platform targets.
 
 ## Data and migration scope
 
@@ -115,3 +115,30 @@ newer than Java 21, retains the Minecraft `[1.21.1,1.21.2)` and NeoForge
 `[21.1.248,21.2)` ranges, and contains only the intended Flow Math and BlueNBT
 nested dependencies. A fresh dedicated-server and full-pack smoke remain
 release gates and were not repeated for this branch-only rebase.
+
+### Standalone Java web server
+
+The combined branch adds a Java 21 standalone web process, OCI image, and Helm
+chart. The server keeps generated runtime files local to each replica and can
+scale horizontally when map data is stored in MariaDB, MySQL, or PostgreSQL.
+It includes bounded HTTP request handling, connection and storage-read limits,
+graceful shutdown, and liveness and readiness endpoints.
+
+Storage-backed validators make conditional requests consistent across
+replicas. Stored map compression is passed through without recompressing normal
+responses, and unsupported client encodings receive an explicit `406` response.
+BlueMap's client-decompression `.gz` URLs remain compatible by returning raw
+gzip files. Static, mutable, and private live-data responses use separate cache
+policies so intermediaries do not retain player data or transform stored map
+representations.
+
+The standalone workflow and container use Java 21. The release build remains
+limited to the NeoForge and web-server modules, and the BlueMapAPI submodule
+stays pinned to the documented Java 21 fork commit.
+
+Local validation passed 106 Java tests, the web-application tests, the full
+`spotlessCheck test release` gate, workflow and shell checks, and all Helm chart
+contract cases. The resulting NeoForge and web-server JARs contain no class
+file newer than Java 21. The NeoForge JAR retains the documented Minecraft and
+NeoForge dependency ranges and only the intended Flow Math and BlueNBT nested
+libraries.

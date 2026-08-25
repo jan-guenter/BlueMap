@@ -23,6 +23,7 @@ include(":core")
 include(":common")
 
 implementation("neoforge")
+implementation("webserver")
 
 fun implementation(name: String) {
     val project = ":$name"

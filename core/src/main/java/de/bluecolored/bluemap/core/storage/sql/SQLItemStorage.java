@@ -24,27 +24,52 @@
  */
 package de.bluecolored.bluemap.core.storage.sql;
 
+import de.bluecolored.bluemap.core.storage.CacheMetadata;
+import de.bluecolored.bluemap.core.storage.StoredDataMetadata;
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
 import de.bluecolored.bluemap.core.storage.compression.Compression;
 import de.bluecolored.bluemap.core.storage.ItemStorage;
 import de.bluecolored.bluemap.core.storage.sql.commandset.CommandSet;
 import de.bluecolored.bluemap.core.util.Key;
 import de.bluecolored.bluemap.core.util.stream.OnCloseOutputStream;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.*;
 
-@RequiredArgsConstructor
 public class SQLItemStorage implements ItemStorage {
 
     private final CommandSet sql;
     private final String map;
     private final Key storage;
     private final Compression compression;
+    private final boolean readOnly;
+
+    public SQLItemStorage(
+            CommandSet sql,
+            String map,
+            Key storage,
+            Compression compression
+    ) {
+        this(sql, map, storage, compression, false);
+    }
+
+    public SQLItemStorage(
+            CommandSet sql,
+            String map,
+            Key storage,
+            Compression compression,
+            boolean readOnly
+    ) {
+        this.sql = sql;
+        this.map = map;
+        this.storage = storage;
+        this.compression = compression;
+        this.readOnly = readOnly;
+    }
 
     @Override
     public OutputStream write() throws IOException {
+        requireWritable();
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         return new OnCloseOutputStream(compression.compress(bytes),
                 () -> sql.writeItem(map, storage, compression, bytes.toByteArray())
@@ -53,13 +78,38 @@ public class SQLItemStorage implements ItemStorage {
 
     @Override
     public @Nullable CompressedInputStream read() throws IOException {
-        byte[] data = sql.readItem(map, storage, compression);
-        if (data == null) return null;
-        return new CompressedInputStream(new ByteArrayInputStream(data), compression);
+        CommandSet.StoredData stored =
+                sql.readItemData(map, storage, compression);
+        if (stored == null) return null;
+        byte[] data = stored.data();
+        return new CompressedInputStream(
+                new ByteArrayInputStream(data),
+                compression,
+                new CacheMetadata(stored.contentHash(), stored.updatedAt()),
+                data.length
+        );
+    }
+
+    @Override
+    public @Nullable StoredDataMetadata readMetadata() throws IOException {
+        CommandSet.StoredMetadata stored =
+                sql.readItemMetadata(map, storage, compression);
+        if (stored == null) return null;
+        return new StoredDataMetadata(
+                compression,
+                new CacheMetadata(stored.contentHash(), stored.updatedAt()),
+                stored.contentLength()
+        );
+    }
+
+    @Override
+    public Compression compression() {
+        return compression;
     }
 
     @Override
     public void delete() throws IOException {
+        requireWritable();
         sql.deleteItem(map, storage);
     }
 
@@ -71,6 +121,12 @@ public class SQLItemStorage implements ItemStorage {
     @Override
     public boolean isClosed() {
         return sql.isClosed();
+    }
+
+    private void requireWritable() throws IOException {
+        if (readOnly) {
+            throw new IOException("SQL storage is configured read-only");
+        }
     }
 
 }

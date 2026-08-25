@@ -33,7 +33,12 @@ import {MainMenu} from "./MainMenu";
 import {PopupMarker} from "./PopupMarker";
 import {MarkerSet} from "./markers/MarkerSet";
 import {getLocalStorage, round, setLocalStorage} from "./Utils";
-import {RevalidatingFileLoader} from "./util/RevalidatingFileLoader";
+import {
+    isRequiredEncodingError,
+    RevalidatingFileLoader,
+    rethrowRequiredEncodingError,
+    showRequiredEncodingError
+} from "./util/RevalidatingFileLoader";
 import {i18n, setLanguage} from "../i18n";
 import {PlayerMarkerManager} from "./markers/PlayerMarkerManager";
 import {NormalMarkerManager} from "./markers/NormalMarkerManager";
@@ -178,7 +183,13 @@ export class BlueMapApp {
                 this.resetCamera();
             }
         } catch (e) {
+            rethrowRequiredEncodingError(e);
             console.error("Failed to load map!", e);
+            alert(
+                this.events,
+                e instanceof Error ? e.message : `Failed to load map: ${e}`,
+                "error"
+            );
         }
 
         // map position address
@@ -323,6 +334,7 @@ export class BlueMapApp {
 
                 return map.loadSettings(this.mapViewer.revalidatedUrls)
                     .catch(error => {
+                        rethrowRequiredEncodingError(error);
                         alert(this.events, `Failed to load settings for map '${map.data.id}':` + error, "warning");
                     });
             })
@@ -384,7 +396,11 @@ export class BlueMapApp {
             loader.load("settings.json",
                 resolve,
                 () => {},
-                () => reject("Failed to load the settings.json!")
+                error => reject(
+                    error instanceof Error
+                        ? error
+                        : new Error("Failed to load the settings.json!")
+                )
             );
         });
     }
@@ -404,7 +420,11 @@ export class BlueMapApp {
                     else resolve(fileData);
                 },
                 () => {},
-                () => reject(`Failed to load '${this.fileUrl}'!`)
+                error => reject(
+                    error instanceof Error
+                        ? error
+                        : new Error(`Failed to load '${this.fileUrl}'!`)
+                )
             )
         });
     }
@@ -471,7 +491,13 @@ export class BlueMapApp {
                 this.playerMarkerManager.setAutoUpdateInterval(1000);
             })
             .catch(e => {
-                alert(this.events, e, "warning");
+                if (isRequiredEncodingError(e)) {
+                    if (showRequiredEncodingError(e)) {
+                        alert(this.events, e.message, "error");
+                    }
+                } else {
+                    alert(this.events, e, "warning");
+                }
                 this.playerMarkerManager.dispose();
             });
     }
@@ -489,7 +515,13 @@ export class BlueMapApp {
                 this.markerFileManager.setAutoUpdateInterval(1000 * 10);
             })
             .catch(e => {
-                alert(this.events, e, "warning");
+                if (isRequiredEncodingError(e)) {
+                    if (showRequiredEncodingError(e)) {
+                        alert(this.events, e.message, "error");
+                    }
+                } else {
+                    alert(this.events, e, "warning");
+                }
                 this.markerFileManager.dispose();
             });
     }

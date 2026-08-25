@@ -1,0 +1,266 @@
+name: Standalone Web
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      publish_artifacts:
+        description: Publish the image and Helm chart to GHCR
+        required: false
+        type: boolean
+        default: false
+      chart_version:
+        description: SemVer chart version for a manual publication
+        required: false
+        type: string
+        default: "0.1.0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: standalone-web-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+      - name: Validate chart contracts
+        run: charts/bluemap-web/ci/test-chart.sh
+      - name: Check chart shell scripts
+        run: shellcheck charts/bluemap-web/ci/*.sh
+
+  build:
+    name: Build web server
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - name: Test and build
+        run: >-
+          ./gradlew --configure-on-demand
+          :core:spotlessCheck :core:test
+          :common:spotlessCheck :common:test
+          :webserver:spotlessCheck :webserver:test :webserver:release
+          --stacktrace
+      - name: Upload web server
+        uses: actions/upload-artifact@v7
+        with:
+          name: bluemap-webserver
+          path: build/release/*-webserver.jar
+          if-no-files-found: error
+
+  image:
+    name: Build web image
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+      - build
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+      tags: ${{ steps.metadata.outputs.tags }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Normalize registry owner
+        id: registry
+        shell: bash
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "${GITHUB_OUTPUT}"
+      - name: Download web server
+        uses: actions/download-artifact@v8
+        with:
+          name: bluemap-webserver
+          path: build/release
+      - name: Determine publication and release tags
+        id: release
+        shell: bash
+        env:
+          MANUAL_PUBLISH: ${{ inputs.publish_artifacts }}
+        run: |
+          publish=false
+          is_stable=false
+          is_latest=false
+          current_tag="${GITHUB_REF#refs/tags/}"
+
+          if [[ "${GITHUB_REF}" == refs/tags/* ]] &&
+             [[ "${current_tag}" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            publish=true
+            is_stable=true
+            latest_tag="$(
+              git tag --list |
+                grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' |
+                sort -V |
+                tail -n 1
+            )"
+            [[ "${current_tag}" == "${latest_tag}" ]] && is_latest=true
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" &&
+                  "${MANUAL_PUBLISH}" == "true" ]]; then
+            publish=true
+          fi
+
+          {
+            echo "publish=${publish}"
+            echo "is-stable=${is_stable}"
+            echo "is-latest=${is_latest}"
+          } >> "${GITHUB_OUTPUT}"
+      - name: Log in to GHCR
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ steps.registry.outputs.owner }}/bluemap-web
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long,prefix=sha-
+            type=ref,event=tag,enable=${{ steps.release.outputs.is-stable == 'true' }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.is-latest == 'true' }}
+          labels: |
+            org.opencontainers.image.title=BlueMap Web
+            org.opencontainers.image.description=Standalone BlueMap Java web UI and map-data server
+      - name: Build and optionally publish image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/web/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.release.outputs.publish == 'true' }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.version }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=bluemap-web
+          cache-to: type=gha,mode=max,scope=bluemap-web
+          provenance: mode=max
+          sbom: true
+
+  chart:
+    name: Package Helm chart
+    runs-on: ubuntu-latest
+    needs: image
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+      - name: Determine chart and application versions
+        id: version
+        shell: bash
+        env:
+          MANUAL_VERSION: ${{ inputs.chart_version }}
+        run: |
+          app_version="sha-${GITHUB_SHA}"
+          chart_version="0.1.0-dev.sha.${GITHUB_SHA}"
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]] &&
+             [[ "${GITHUB_REF_NAME}" =~ ^v([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
+            patch="${BASH_REMATCH[4]:-0}"
+            chart_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${patch}"
+            app_version="${GITHUB_REF_NAME}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" &&
+                  "${{ needs.image.outputs.publish }}" == "true" ]]; then
+            if [[ ! "${MANUAL_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::chart_version must be a valid SemVer version"
+              exit 1
+            fi
+            chart_version="${MANUAL_VERSION}"
+          fi
+
+          {
+            echo "chart-version=${chart_version}"
+            echo "app-version=${app_version}"
+          } >> "${GITHUB_OUTPUT}"
+      - name: Verify chart application image tag
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app-version }}
+          IMAGE_TAGS: ${{ needs.image.outputs.tags }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          expected="ghcr.io/${owner}/bluemap-web:${APP_VERSION}"
+          if ! printf '%s\n' "${IMAGE_TAGS}" | grep -Fx "${expected}"; then
+            echo "::error::image metadata did not produce chart appVersion tag ${expected}"
+            exit 1
+          fi
+      - name: Package chart
+        run: |
+          mkdir -p build/charts
+          helm package charts/bluemap-web \
+            --destination build/charts \
+            --version "${{ steps.version.outputs.chart-version }}" \
+            --app-version "${{ steps.version.outputs.app-version }}"
+      - name: Verify packaged chart
+        shell: bash
+        run: |
+          package="build/charts/bluemap-web-${{ steps.version.outputs.chart-version }}.tgz"
+          actual="$(helm show chart "${package}" | awk '$1 == "appVersion:" {print $2}')"
+          expected="${{ steps.version.outputs.app-version }}"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "::error::packaged appVersion ${actual} does not match ${expected}"
+            exit 1
+          fi
+      - name: Upload chart
+        uses: actions/upload-artifact@v7
+        with:
+          name: bluemap-web-chart
+          path: build/charts/*.tgz
+          if-no-files-found: error
+      - name: Log in to GHCR
+        if: needs.image.outputs.publish == 'true'
+        shell: bash
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" |
+            helm registry login ghcr.io \
+              --username "${{ github.repository_owner }}" \
+              --password-stdin
+      - name: Publish chart
+        if: needs.image.outputs.publish == 'true'
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          helm push \
+            "build/charts/bluemap-web-${{ steps.version.outputs.chart-version }}.tgz" \
+            "oci://ghcr.io/${owner}/charts"

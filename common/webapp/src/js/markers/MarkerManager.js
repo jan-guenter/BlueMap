@@ -24,7 +24,11 @@
  */
 import {MarkerSet} from "./MarkerSet";
 import {alert} from "../util/Utils";
-import {RevalidatingFileLoader} from "../util/RevalidatingFileLoader";
+import {
+    isRequiredEncodingError,
+    RevalidatingFileLoader,
+    showRequiredEncodingError
+} from "../util/RevalidatingFileLoader";
 
 /**
  * A manager for loading and updating markers from a file
@@ -73,7 +77,13 @@ export class MarkerManager {
                         }
                     })
                     .catch(e => {
-                        alert(this.events, e, "warning");
+                        if (isRequiredEncodingError(e)) {
+                            if (showRequiredEncodingError(e)) {
+                                alert(this.events, e.message, "error");
+                            }
+                        } else {
+                            alert(this.events, e, "warning");
+                        }
                         if (!this._paused) this._updateInterval = setTimeout(autoUpdate, Math.max(ms, 1000 * 15));
                     });
             };
@@ -106,7 +116,10 @@ export class MarkerManager {
     update() {
         return this.loadMarkerFile()
             .then(markerFileData => this.updateFromData(markerFileData))
-            .catch(() => this.clear());
+            .catch(error => {
+                this.clear();
+                if (isRequiredEncodingError(error)) throw error;
+            });
     }
 
     /**
@@ -142,11 +155,15 @@ export class MarkerManager {
             loader.setResponseType("json");
             loader.load(this.fileUrl,
                 markerFileData => {
-                    if (!markerFileData) reject(`Failed to parse '${this.fileUrl}'!`);
+                    if (!markerFileData) reject(new Error(`Failed to parse '${this.fileUrl}'!`));
                     else resolve(markerFileData);
                 },
                 () => {},
-                () => reject(`Failed to load '${this.fileUrl}'!`)
+                error => reject(
+                    error instanceof Error
+                        ? error
+                        : new Error(`Failed to load '${this.fileUrl}'!`)
+                )
             )
         });
     }

@@ -52,4 +52,15 @@ public class Caches {
                 .build(loader);
     }
 
+    public static <K, V> LoadingCache<K, V> buildExpiringAfterWrite(
+            long duration,
+            TimeUnit unit,
+            CacheLoader<? super K, V> loader
+    ) {
+        return with()
+                .maximumSize(10000)
+                .expireAfterWrite(duration, unit)
+                .build(loader);
+    }
+
 }

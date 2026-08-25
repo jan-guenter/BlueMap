@@ -25,6 +25,7 @@
 package de.bluecolored.bluemap.core.storage;
 
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
+import de.bluecolored.bluemap.core.storage.compression.Compression;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.Nullable;
@@ -51,6 +52,28 @@ public interface GridStorage {
      * The CompressedInputStream is expected to be closed by the caller of this method.
      */
     @Nullable CompressedInputStream read(int x, int z) throws IOException;
+
+    /**
+     * Returns metadata for the stored representation without reading its
+     * content, or null if the item is missing or this operation is unsupported.
+     *
+     * The default keeps custom storage implementations source-compatible. A
+     * caller must fall back to {@link #read(int, int)} when null is returned.
+     */
+    default @Nullable StoredDataMetadata readMetadata(int x, int z) throws IOException {
+        return null;
+    }
+
+    /**
+     * Returns the configured representation compression without accessing an
+     * item, or null when the implementation cannot determine it without a
+     * read.
+     *
+     * The default keeps custom storage implementations source-compatible.
+     */
+    default @Nullable Compression compression() {
+        return null;
+    }
 
     /**
      * Deletes the item from this storage at the given position
@@ -107,6 +130,16 @@ public interface GridStorage {
         @Override
         public CompressedInputStream read() throws IOException {
             return storage.read(x, z);
+        }
+
+        @Override
+        public @Nullable StoredDataMetadata readMetadata() throws IOException {
+            return storage.readMetadata(x, z);
+        }
+
+        @Override
+        public @Nullable Compression compression() {
+            return storage.compression();
         }
 
         @Override

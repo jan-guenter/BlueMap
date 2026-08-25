@@ -25,6 +25,7 @@
 package de.bluecolored.bluemap.core.storage;
 
 import de.bluecolored.bluemap.core.storage.compression.CompressedInputStream;
+import de.bluecolored.bluemap.core.storage.compression.Compression;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
@@ -45,6 +46,28 @@ public interface ItemStorage {
      * The CompressedInputStream is expected to be closed by the caller of this method.
      */
     @Nullable CompressedInputStream read() throws IOException;
+
+    /**
+     * Returns metadata for the stored representation without reading its
+     * content, or null if the item is missing or this operation is unsupported.
+     *
+     * The default keeps custom storage implementations source-compatible. A
+     * caller must fall back to {@link #read()} when null is returned.
+     */
+    default @Nullable StoredDataMetadata readMetadata() throws IOException {
+        return null;
+    }
+
+    /**
+     * Returns the configured representation compression without accessing the
+     * stored content, or null when the implementation cannot determine it
+     * without a read.
+     *
+     * The default keeps custom storage implementations source-compatible.
+     */
+    default @Nullable Compression compression() {
+        return null;
+    }
 
     /**
      * Deletes the item from this storage

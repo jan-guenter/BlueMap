@@ -9,9 +9,10 @@ This is the `jan-guenter/BlueMap` fork of upstream
 `BlueMap-Minecraft/BlueMap`, based on the exact `v5.23` commit documented in
 `BACKPORT.md`.
 
-The supported runtime is only Minecraft 1.21.1, NeoForge 21.1.248, and Java
-21. Preserve the upstream BlueMap 5.23 API/core/common behaviour wherever it
-does not depend on newer Minecraft or Java APIs.
+The supported runtimes are Minecraft 1.21.1 with NeoForge 21.1.248 and the
+standalone web server, both on Java 21. Preserve the upstream BlueMap 5.23
+API/core/common behaviour wherever it does not depend on newer Minecraft or
+Java APIs.
 
 ## Invariants
 
@@ -19,8 +20,8 @@ does not depend on newer Minecraft or Java APIs.
   based on the exact API commit shipped by BlueMap 5.23, unless a separately
   reviewed API update is requested.
 - Do not cherry-pick the 5.23 feature set onto BlueMap 5.7.
-- Do not restore unsupported platform modules to the release build without
-  explicit scope expansion and validation.
+- Keep the release build limited to the NeoForge and standalone web-server
+  modules unless another platform is explicitly requested and validated.
 - Produce Java 21 class files only.
 - Preserve server-only behaviour and unmodified-client compatibility.
 - Use fresh configuration and storage for every runtime test. Migration from
@@ -32,6 +33,6 @@ does not depend on newer Minecraft or Java APIs.
 
 ## Validation
 
-Run the narrow compile/test gate first, followed by the merged NeoForge JAR
-build and class-version/JAR-content audit. Dedicated-server and full-pack
-staging gates remain required before release.
+Run the narrow core/common/web-server compile and test gate first, followed by
+the full release build and Java 21 class-version audit. Dedicated-server and
+full-pack staging gates remain required before release.
