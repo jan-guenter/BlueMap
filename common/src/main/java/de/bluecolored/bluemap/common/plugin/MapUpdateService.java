@@ -89,7 +89,7 @@ public class MapUpdateService extends Thread {
     public void run() {
         verboseLog.accept("Started watching map '" + map.getId() + "' for updates...");
 
-        Duration delay = Instant.now().until(lastFullUpdate.plus(fullUpdateInterval));
+        Duration delay = Duration.between(Instant.now(), lastFullUpdate.plus(fullUpdateInterval));
         if (delay.isNegative()) delay = Duration.ZERO;
         synchronized (MapUpdateService.class) {
             if (timer == null) timer = new Timer("BlueMap-MapUpdateService-Timer", true);

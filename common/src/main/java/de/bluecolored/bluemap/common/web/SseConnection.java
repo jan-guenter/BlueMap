@@ -91,7 +91,7 @@ public class SseConnection implements Closeable {
             while (!closed) {
                 try {
                     event = queue.take();
-                } catch (InterruptedException _) {
+                } catch (InterruptedException ignored) {
                     runningThread.interrupt();
                     break;
                 }

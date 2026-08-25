@@ -363,7 +363,7 @@ public class Plugin implements ServerEventListener {
                             .filter(map -> pluginState.getMapState(map).isUpdateEnabled())
                             .filter(map -> {
                                 Instant nextUpdate = pluginState.getMapState(map).getLastFullUpdate().plus(fullUpdateInterval);
-                                Duration delay = Instant.now().until(nextUpdate);
+                                Duration delay = Duration.between(Instant.now(), nextUpdate);
                                 return !delay.isPositive();
                             })
                             .sorted(Comparator.comparing(bmMap -> bmMap.getMapSettings().getSorting()))

@@ -48,7 +48,7 @@ public class PluginState {
     }
 
     public MapState getMapState(BmMap map) {
-        return maps.computeIfAbsent(map.getId(), _ -> new MapState());
+        return maps.computeIfAbsent(map.getId(), ignored -> new MapState());
     }
 
     public void addHiddenPlayer(UUID player) {

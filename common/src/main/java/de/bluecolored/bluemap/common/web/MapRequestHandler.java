@@ -66,7 +66,7 @@ public class MapRequestHandler extends RoutingRequestHandler {
         register(".*", new MapStorageRequestHandler(mapStorage));
 
         if (useSSE) {
-            register("live/sse", "", _ -> {
+            register("live/sse", "", ignored -> {
                 HttpResponse response = new HttpResponse(HttpStatusCode.OK);
                 response.addHeader("Content-Type", "text/event-stream");
                 response.addHeader("Cache-Control", "no-cache");
