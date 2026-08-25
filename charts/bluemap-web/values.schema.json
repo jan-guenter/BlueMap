@@ -62,6 +62,46 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "autoscaling": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["autoscaling"]
+      },
+      "then": {
+        "properties": {
+          "storage": {
+            "properties": {
+              "type": {
+                "const": "sql"
+              },
+              "sql": {
+                "properties": {
+                  "databaseType": {
+                    "enum": ["mariadb", "mysql", "postgresql"]
+                  }
+                }
+              }
+            }
+          },
+          "persistence": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "properties": {
@@ -82,6 +122,84 @@
     },
     "service": {
       "$ref": "#/definitions/service"
+    },
+    "webserver": {
+      "type": "object",
+      "properties": {
+        "maxActiveConnections": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum public HTTP connections and denominator for connection-utilization metrics."
+        }
+      },
+      "required": ["maxActiveConnections"]
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "bindAddress": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "annotations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": ["annotations"]
+        }
+      },
+      "required": ["enabled", "bindAddress", "port", "service"]
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "minReplicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxReplicas": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "utilizationMetricName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Per-pod custom metric whose values are connection-utilization ratios in the range 0..1."
+        },
+        "targetAverageConnectionUtilizationPercentage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "behavior": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "enabled",
+        "minReplicas",
+        "maxReplicas",
+        "utilizationMetricName",
+        "targetAverageConnectionUtilizationPercentage",
+        "behavior"
+      ]
     },
     "storage": {
       "type": "object",
@@ -249,6 +367,9 @@
     "shutdownGracePeriodSeconds",
     "image",
     "service",
+    "webserver",
+    "metrics",
+    "autoscaling",
     "storage",
     "config",
     "secretConfig",

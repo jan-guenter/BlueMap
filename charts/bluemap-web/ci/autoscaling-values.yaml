@@ -1,0 +1,29 @@
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  utilizationMetricName: bluemap_web_http_connection_utilization_average_1m_ratio
+  targetAverageConnectionUtilizationPercentage: 65
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+
+storage:
+  id: sql
+  type: sql
+  compression: zstd
+  sql:
+    databaseType: postgresql
+    host: postgresql.database.svc
+    port: 5432
+    database: bluemap
+    maxConnections: 12
+    credentials:
+      existingSecret: bluemap-database
+      usernameKey: username
+      passwordKey: password
+    driver:
+      className: org.postgresql.Driver
+      existingConfigMap:
+        name: bluemap-jdbc-driver
+        key: driver.jar

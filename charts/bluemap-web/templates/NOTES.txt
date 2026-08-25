@@ -4,8 +4,20 @@ BlueMap Web is available inside the cluster at:
 Health endpoints:
   /health/live
   /health/ready
-{{- if gt (int .Values.replicaCount) 1 }}
+{{- if or .Values.autoscaling.enabled (gt (int .Values.replicaCount) 1) }}
 
-The {{ .Values.replicaCount }} web replicas use external SQL storage and
-pod-local web roots, so requests can be distributed without session affinity.
+The web deployment uses external SQL storage and pod-local web roots, so
+requests can be distributed without session affinity.
+{{- end }}
+{{- if include "bluemap-web.metricsEnabled" . }}
+
+OpenMetrics is available inside the cluster at:
+  http://{{ include "bluemap-web.metricsServiceName" . }}.{{ .Release.Namespace }}.svc:{{ .Values.metrics.port }}/metrics
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+
+The HPA targets {{ .Values.autoscaling.utilizationMetricName }} at
+{{ .Values.autoscaling.targetAverageConnectionUtilizationPercentage }}% average
+connection-slot utilization. Verify that your custom-metrics adapter publishes
+one value for every Ready BlueMap web pod.
 {{- end }}

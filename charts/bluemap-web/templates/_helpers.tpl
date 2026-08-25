@@ -60,6 +60,14 @@ app.kubernetes.io/component: web
 {{- if or .Values.storage.sql.driver.existingConfigMap.name .Values.storage.sql.driver.download.url -}}true{{- end -}}
 {{- end }}
 
+{{- define "bluemap-web.metricsEnabled" -}}
+{{- if or .Values.metrics.enabled .Values.autoscaling.enabled -}}true{{- end -}}
+{{- end }}
+
+{{- define "bluemap-web.metricsServiceName" -}}
+{{- printf "%s-metrics" (include "bluemap-web.fullname" . | trunc 55 | trimSuffix "-") -}}
+{{- end }}
+
 {{- define "bluemap-web.sqlConnectionUrl" -}}
 {{- if .Values.storage.sql.connectionUrl -}}
 {{- .Values.storage.sql.connectionUrl -}}
@@ -77,6 +85,7 @@ app.kubernetes.io/component: web
 {{- $checksum := .Values.storage.sql.driver.download.sha256 -}}
 {{- $storagePath := printf "storages/%s.conf" .Values.storage.id -}}
 {{- $driverEnabled := include "bluemap-web.sqlDriverEnabled" . -}}
+{{- $horizontallyScaled := or .Values.autoscaling.enabled (gt (int .Values.replicaCount) 1) -}}
 {{- if lt (int .Values.shutdownGracePeriodSeconds) 0 -}}
 {{- fail "shutdownGracePeriodSeconds must not be negative" -}}
 {{- end -}}
@@ -128,14 +137,26 @@ app.kubernetes.io/component: web
 {{- if and .Values.persistence.enabled (ne .Values.storage.type "file") -}}
 {{- fail "persistence is supported only for single-replica file storage; SQL runtime data is pod-local" -}}
 {{- end -}}
-{{- if and (gt (int .Values.replicaCount) 1) (eq .Values.storage.type "sql") (eq .Values.storage.sql.databaseType "sqlite") -}}
-{{- fail "replicaCount greater than 1 requires an external SQL database; SQLite is pod-local" -}}
+{{- if and (include "bluemap-web.metricsEnabled" .) (eq (int .Values.metrics.port) 8100) -}}
+{{- fail "metrics.port must differ from the public webserver port 8100" -}}
 {{- end -}}
-{{- if and (gt (int .Values.replicaCount) 1) (ne .Values.storage.type "sql") -}}
-{{- fail "replicaCount greater than 1 requires external SQL storage so every replica is stateless and reads the same data" -}}
+{{- if and .Values.autoscaling.enabled (lt (int .Values.autoscaling.minReplicas) 1) -}}
+{{- fail "autoscaling.minReplicas must be at least 1" -}}
 {{- end -}}
-{{- if and (gt (int .Values.replicaCount) 1) .Values.persistence.enabled -}}
-{{- fail "replicaCount greater than 1 cannot use persistence; generated web files and runtime data must remain pod-local" -}}
+{{- if and .Values.autoscaling.enabled (lt (int .Values.autoscaling.maxReplicas) 2) -}}
+{{- fail "autoscaling.maxReplicas must be at least 2" -}}
+{{- end -}}
+{{- if and .Values.autoscaling.enabled (gt (int .Values.autoscaling.minReplicas) (int .Values.autoscaling.maxReplicas)) -}}
+{{- fail "autoscaling.minReplicas must not exceed autoscaling.maxReplicas" -}}
+{{- end -}}
+{{- if and $horizontallyScaled (eq .Values.storage.type "sql") (eq .Values.storage.sql.databaseType "sqlite") -}}
+{{- fail "horizontal scaling requires an external SQL database; SQLite is pod-local" -}}
+{{- end -}}
+{{- if and $horizontallyScaled (ne .Values.storage.type "sql") -}}
+{{- fail "horizontal scaling requires external SQL storage so every replica is stateless and reads the same data" -}}
+{{- end -}}
+{{- if and $horizontallyScaled .Values.persistence.enabled -}}
+{{- fail "horizontal scaling cannot use persistence; generated web files and runtime data must remain pod-local" -}}
 {{- end -}}
 {{- range .Values.extraVolumes -}}
 {{- if eq (default "" .name) "webroot" -}}

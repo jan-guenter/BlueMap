@@ -6,11 +6,13 @@ metadata:
   labels:
     {{- include "bluemap-web.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   strategy:
     {{- if .Values.strategy }}
     {{- toYaml .Values.strategy | nindent 4 }}
-    {{- else if gt (int .Values.replicaCount) 1 }}
+    {{- else if or .Values.autoscaling.enabled (gt (int .Values.replicaCount) 1) }}
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
@@ -111,6 +113,20 @@ spec:
             - name: http
               containerPort: 8100
               protocol: TCP
+            {{- if include "bluemap-web.metricsEnabled" . }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          {{- if include "bluemap-web.metricsEnabled" . }}
+          args:
+            - --config
+            - /config
+            - --metrics-port
+            - {{ .Values.metrics.port | quote }}
+            - --metrics-ip
+            - {{ .Values.metrics.bindAddress | quote }}
+          {{- end }}
           {{- if or (and (eq .Values.storage.type "sql") (ne .Values.storage.sql.databaseType "sqlite")) .Values.extraEnv }}
           env:
             {{- if and (eq .Values.storage.type "sql") (ne .Values.storage.sql.databaseType "sqlite") }}

@@ -1,0 +1,15 @@
+autoscaling:
+  enabled: true
+
+storage:
+  id: sql
+  type: sql
+  sql:
+    databaseType: sqlite
+    database: /data/bluemap.db
+    maxConnections: 10
+    driver:
+      className: org.sqlite.JDBC
+      existingConfigMap:
+        name: bluemap-jdbc-driver
+        key: driver.jar

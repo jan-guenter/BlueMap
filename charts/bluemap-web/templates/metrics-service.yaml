@@ -1,0 +1,25 @@
+{{- if include "bluemap-web.metricsEnabled" . }}
+{{- include "bluemap-web.validate" . }}
+{{- $annotations := dict
+      "prometheus.io/path" "/metrics"
+      "prometheus.io/port" (toString .Values.metrics.port)
+      "prometheus.io/scrape" "true" -}}
+{{- $annotations = mergeOverwrite $annotations .Values.metrics.service.annotations -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bluemap-web.metricsServiceName" . }}
+  labels:
+    {{- include "bluemap-web.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "bluemap-web.webSelectorLabels" . | nindent 4 }}
+{{- end }}

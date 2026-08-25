@@ -1,0 +1,20 @@
+autoscaling:
+  enabled: true
+
+storage:
+  id: sql
+  type: sql
+  sql:
+    databaseType: postgresql
+    host: postgresql.database.svc
+    database: bluemap
+    credentials:
+      existingSecret: bluemap-database
+    driver:
+      className: org.postgresql.Driver
+      existingConfigMap:
+        name: bluemap-jdbc-driver
+        key: driver.jar
+
+persistence:
+  enabled: true

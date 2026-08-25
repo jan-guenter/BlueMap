@@ -1,0 +1,6 @@
+metrics:
+  enabled: true
+  port: 9191
+  service:
+    annotations:
+      example.com/scrape: enabled

@@ -35,6 +35,141 @@ deployment, in addition to renderers and other database users. When the limit
 is reached, map-data reads fail quickly with `503 Service Unavailable` instead
 of building an unbounded queue.
 
+## Connection metrics and autoscaling
+
+The standalone server can expose connection-capacity metrics on a separate
+OpenMetrics listener. The listener is disabled by default and is never added to
+the public Service or Ingress. Enable it without autoscaling when a collector
+should scrape the metrics for observation:
+
+```yaml
+metrics:
+  enabled: true
+  bindAddress: 0.0.0.0
+  port: 9090
+```
+
+The rendered `<release>-bluemap-web-metrics` ClusterIP Service selects every
+web pod and serves `/metrics`. The endpoint is unauthenticated and is reachable
+cluster-wide unless a NetworkPolicy narrows access. Its default Prometheus
+scrape annotations can be replaced or extended through
+`metrics.service.annotations`. An OpenTelemetry Collector can scrape the
+endpoint with its Prometheus receiver.
+
+The endpoint publishes these label-free gauges:
+
+- `bluemap_web_http_connections`
+- `bluemap_web_http_connections_limit`
+- `bluemap_web_http_connections_average_1m`
+- `bluemap_web_http_connections_average_5m`
+- `bluemap_web_http_connection_utilization_ratio`
+- `bluemap_web_http_connection_utilization_average_1m_ratio`
+- `bluemap_web_http_connection_utilization_average_5m_ratio`
+
+The current count comes from the same connection semaphore governed by
+`max-active-connections`. It includes active requests and idle keep-alive
+connections, so it measures connection-slot pressure rather than CPU usage or
+request throughput. The one-minute and five-minute values are elapsed-time
+weighted from one-second samples. During process startup they cover the history
+available so far instead of assuming zero load before startup.
+
+Enable the optional HPA only with external MariaDB, MySQL, or PostgreSQL
+storage:
+
+```yaml
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  utilizationMetricName: bluemap_web_http_connection_utilization_average_1m_ratio
+  targetAverageConnectionUtilizationPercentage: 70
+
+webserver:
+  maxActiveConnections: 64
+
+storage:
+  type: sql
+  sql:
+    databaseType: mariadb
+    # host, credentials, and JDBC driver omitted
+```
+
+Autoscaling enables the metrics listener automatically. The
+`autoscaling/v2` HPA uses a per-pod custom metric and an `AverageValue` target;
+the default 70 percent target is emitted as the Kubernetes quantity `700m`.
+The one-minute ratio smooths brief connection spikes while retaining 30
+percent headroom. `utilizationMetricName` is configurable because a metrics
+adapter may rename the OpenMetrics series. It must resolve to a 0..1 ratio; the
+absolute connection-count gauges are not compatible with the percentage
+target.
+
+An application endpoint does not implement Kubernetes' `metrics.k8s.io` API.
+Before enabling the HPA, install and configure a metrics pipeline that scrapes
+every pod and publishes the selected gauge through
+`custom.metrics.k8s.io`. Metrics Server supplies CPU and memory resource
+metrics only and is not sufficient. The chart intentionally does not install a
+cluster-wide collector or adapter.
+
+For example, a Prometheus Adapter rule can retain pod identity and collapse
+duplicate scrape targets as follows. The collector must add the `namespace`
+and `pod` labels through Kubernetes service discovery:
+
+```yaml
+rules:
+  - seriesQuery: 'bluemap_web_http_connection_utilization_average_1m_ratio{namespace!="",pod!=""}'
+    resources:
+      overrides:
+        namespace: {resource: namespace}
+        pod: {resource: pod}
+    name:
+      matches: '^bluemap_web_http_connection_utilization_average_1m_ratio$'
+      as: bluemap_web_http_connection_utilization_average_1m_ratio
+    metricsQuery: 'max by (namespace, pod) (<<.Series>>{<<.LabelMatchers>>})'
+```
+
+Confirm that the custom API returns one value for every Ready web pod before
+relying on autoscaling:
+
+First discover the API version served by the installed adapter:
+
+```shell
+kubectl api-versions | grep '^custom.metrics.k8s.io/'
+```
+
+Then substitute that version below:
+
+```shell
+kubectl get --raw \
+  "/apis/custom.metrics.k8s.io/SERVED_VERSION/namespaces/BLUEMAP_NAMESPACE/pods/*/bluemap_web_http_connection_utilization_average_1m_ratio"
+```
+
+The adapter must retain Kubernetes namespace and pod identity; scraping one
+load-balanced ClusterIP target is not enough. If the metric disappears, the
+HPA keeps the current replica count and reports the fetch failure in its
+conditions. Persistent client connections do not move to new pods after a
+scale-up, so the ingress or load balancer must distribute new connections
+across Ready replicas.
+
+When autoscaling is enabled, `minReplicas` and `maxReplicas` replace
+`replicaCount`, and the Deployment defaults to a zero-unavailable rolling
+update unless `strategy` overrides it. The chart rejects file storage, SQLite,
+and persistence because any configured maximum can create multiple replicas.
+Size database capacity for at most
+`autoscaling.maxReplicas * storage.sql.maxConnections` connections from web
+pods, plus writers and other readers.
+
+The HPA measures connection-slot pressure only. Set
+`webserver.maxActiveConnections` so sustained pressure on the first relevant
+per-pod bottleneck is visible in the ratio. If the SQL pool, CPU, or another
+resource saturates while connection utilization remains low, this metric will
+not scale early enough; use a metric for that bottleneck or lower the HTTP
+connection limit after observing the workload. Idle keep-alive connections are
+included, so the HTTP and SQL limits do not have a universal one-to-one ratio.
+`webserver.maxActiveConnections` affects the chart-generated
+`config.files.webserver.conf`; a replacement file or `config.existingConfigMap`
+must set `max-active-connections` itself. The exported limit and ratios always
+reflect the configuration loaded by the server.
+
 ## Structured storage configuration
 
 The chart generates one `storages/<id>.conf` file from `storage`. Do not add

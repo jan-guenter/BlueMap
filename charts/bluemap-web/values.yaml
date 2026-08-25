@@ -41,6 +41,31 @@ service:
   port: 8100
   annotations: {}
 
+webserver:
+  # This is the denominator for the exported connection-utilization metrics.
+  # Tune it to the first meaningful per-pod bottleneck before enabling the HPA.
+  maxActiveConnections: 256
+
+# The metrics listener is separate from the public HTTP listener and Service.
+# Enabling autoscaling also enables this listener.
+metrics:
+  enabled: false
+  # The chart's ClusterIP Service needs a pod-reachable listener. The standalone
+  # CLI defaults this address to 127.0.0.1 instead.
+  bindAddress: 0.0.0.0
+  port: 9090
+  service:
+    annotations: {}
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  # This must resolve to a per-pod 0..1 utilization ratio, not a connection count.
+  utilizationMetricName: bluemap_web_http_connection_utilization_average_1m_ratio
+  targetAverageConnectionUtilizationPercentage: 70
+  behavior: {}
+
 ingress:
   enabled: false
   className: ""
@@ -112,7 +137,7 @@ config:
       port: 8100
       sse-enabled: false
       tile-cache-max-age: 60
-      max-active-connections: 256
+      max-active-connections: {{ .Values.webserver.maxActiveConnections }}
       connection-idle-timeout-seconds: 60
       shutdown-grace-period-seconds: {{ .Values.shutdownGracePeriodSeconds }}
       max-request-line-bytes: 8192
