@@ -1,0 +1,21 @@
+replicaCount: 3
+
+storage:
+  id: sql
+  type: sql
+  compression: zstd
+  sql:
+    databaseType: postgresql
+    host: postgresql.database.svc
+    port: 5432
+    database: bluemap
+    maxConnections: 12
+    credentials:
+      existingSecret: bluemap-database
+      usernameKey: username
+      passwordKey: password
+    driver:
+      className: org.postgresql.Driver
+      existingConfigMap:
+        name: bluemap-jdbc-driver
+        key: driver.jar

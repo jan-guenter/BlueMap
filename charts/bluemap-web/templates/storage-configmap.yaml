@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bluemap-web.storageConfigName" . }}
+  labels:
+    {{- include "bluemap-web.labels" . | nindent 4 }}
+data:
+  storage.conf: |
+    {{- if eq .Values.storage.type "file" }}
+    storage-type: file
+    root: {{ .Values.storage.file.root | quote }}
+    compression: {{ .Values.storage.compression }}
+    {{- else }}
+    storage-type: sql
+    read-only: true
+    connection-url: {{ include "bluemap-web.sqlConnectionUrl" . | quote }}
+    {{- if ne .Values.storage.sql.databaseType "sqlite" }}
+    connection-properties: {
+      user: ${BLUEMAP_SQL_USERNAME}
+      password: ${BLUEMAP_SQL_PASSWORD}
+      {{- range $key, $value := .Values.storage.sql.properties }}
+      {{ $key | quote }}: {{ $value | toJson }}
+      {{- end }}
+    }
+    {{- else if .Values.storage.sql.properties }}
+    connection-properties: {
+      {{- range $key, $value := .Values.storage.sql.properties }}
+      {{ $key | quote }}: {{ $value | toJson }}
+      {{- end }}
+    }
+    {{- end }}
+    max-connections: {{ .Values.storage.sql.maxConnections }}
+    {{- if include "bluemap-web.sqlDriverEnabled" . }}
+    driver-jar: "/drivers/jdbc-driver.jar"
+    {{- end }}
+    {{- with .Values.storage.sql.driver.className }}
+    driver-class: {{ . | quote }}
+    {{- end }}
+    compression: {{ .Values.storage.compression }}
+    {{- end }}

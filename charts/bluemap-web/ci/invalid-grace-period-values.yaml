@@ -1,0 +1,2 @@
+terminationGracePeriodSeconds: 20
+shutdownGracePeriodSeconds: 20

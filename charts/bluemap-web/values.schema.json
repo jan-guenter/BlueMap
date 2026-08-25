@@ -1,0 +1,345 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "replicaCount": {
+            "minimum": 2
+          }
+        },
+        "required": ["replicaCount"]
+      },
+      "then": {
+        "properties": {
+          "storage": {
+            "properties": {
+              "type": {
+                "const": "sql"
+              },
+              "sql": {
+                "properties": {
+                  "databaseType": {
+                    "enum": ["mariadb", "mysql", "postgresql"]
+                  }
+                }
+              }
+            }
+          },
+          "persistence": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "storage": {
+            "properties": {
+              "type": {
+                "const": "sql"
+              }
+            },
+            "required": ["type"]
+          }
+        },
+        "required": ["storage"]
+      },
+      "then": {
+        "properties": {
+          "persistence": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "shutdownGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "image": {
+      "$ref": "#/definitions/image"
+    },
+    "service": {
+      "$ref": "#/definitions/service"
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "type": {
+          "enum": ["file", "sql"]
+        },
+        "compression": {
+          "enum": ["none", "gzip", "deflate", "zstd", "lz4"]
+        },
+        "file": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": ["root"]
+        },
+        "sql": {
+          "type": "object",
+          "properties": {
+            "databaseType": {
+              "enum": ["mariadb", "mysql", "postgresql", "sqlite"]
+            },
+            "host": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "database": {
+              "type": "string"
+            },
+            "connectionUrl": {
+              "type": "string"
+            },
+            "maxConnections": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "properties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": ["string", "number", "integer", "boolean"]
+              }
+            },
+            "credentials": {
+              "type": "object",
+              "properties": {
+                "existingSecret": {
+                  "type": "string"
+                },
+                "usernameKey": {
+                  "$ref": "#/definitions/secretKey"
+                },
+                "passwordKey": {
+                  "$ref": "#/definitions/secretKey"
+                },
+                "username": {
+                  "type": "string"
+                },
+                "password": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "existingSecret",
+                "usernameKey",
+                "passwordKey",
+                "username",
+                "password"
+              ]
+            },
+            "driver": {
+              "type": "object",
+              "properties": {
+                "className": {
+                  "type": "string"
+                },
+                "existingConfigMap": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "key": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["name", "key"]
+                },
+                "download": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "anyOf": [
+                        {
+                          "const": ""
+                        },
+                        {
+                          "type": "string",
+                          "format": "uri"
+                        }
+                      ]
+                    },
+                    "sha256": {
+                      "anyOf": [
+                        {
+                          "const": ""
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^[A-Fa-f0-9]{64}$"
+                        }
+                      ]
+                    },
+                    "image": {
+                      "$ref": "#/definitions/image"
+                    }
+                  },
+                  "required": ["url", "sha256", "image"]
+                }
+              },
+              "required": ["className", "existingConfigMap", "download"]
+            }
+          },
+          "required": [
+            "databaseType",
+            "host",
+            "port",
+            "database",
+            "connectionUrl",
+            "maxConnections",
+            "properties",
+            "credentials",
+            "driver"
+          ]
+        }
+      },
+      "required": ["id", "type", "compression", "file", "sql"]
+    },
+    "config": {
+      "$ref": "#/definitions/configSource"
+    },
+    "secretConfig": {
+      "$ref": "#/definitions/configSource"
+    },
+    "persistence": {
+      "$ref": "#/definitions/persistence"
+    }
+  },
+  "required": [
+    "replicaCount",
+    "terminationGracePeriodSeconds",
+    "shutdownGracePeriodSeconds",
+    "image",
+    "service",
+    "storage",
+    "config",
+    "secretConfig",
+    "persistence"
+  ],
+  "definitions": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pullPolicy": {
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "required": ["repository", "pullPolicy", "tag"]
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["port", "type"]
+    },
+    "secretKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "minLength": 1
+    },
+    "configSource": {
+      "type": "object",
+      "properties": {
+        "existingConfigMap": {
+          "type": "string"
+        },
+        "existingSecret": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array"
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["items", "files"]
+    },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "existingClaim": {
+          "type": "string"
+        },
+        "storageClass": {
+          "type": "string"
+        },
+        "accessModes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"]
+          }
+        },
+        "size": {
+          "type": "string",
+          "minLength": 1
+        },
+        "annotations": {
+          "type": "object"
+        }
+      },
+      "required": ["enabled", "existingClaim", "storageClass", "accessModes", "size", "annotations"]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+storage:
+  id: sql
+  type: sql
+  sql:
+    databaseType: postgresql
+    host: postgresql.database.svc
+    port: 5432
+    database: bluemap
+    maxConnections: 10
+    credentials:
+      existingSecret: bluemap-database
