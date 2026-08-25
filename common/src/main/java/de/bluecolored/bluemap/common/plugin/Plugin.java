@@ -132,7 +132,13 @@ public class Plugin implements ServerEventListener {
             synchronized (this) {
 
                 if (loaded) return;
-                unload(); //ensure nothing is left running (from a failed load or something)
+                // Ensure nothing is left running from a failed load. Never
+                // overwrite the only handles to tasks that still use storage.
+                if (!tryUnload()) {
+                    throw new IOException(
+                            "BlueMap could not finish cleaning up its previous state"
+                    );
+                }
 
                 //load addons
                 Path packsFolder = serverInterface.getConfigFolder().resolve("packs");
@@ -199,7 +205,11 @@ public class Plugin implements ServerEventListener {
 
                     Logger.global.logInfo("If you have changed the config you can simply reload the plugin using: /bluemap reload");
 
-                    unload();
+                    if (!tryUnload()) {
+                        throw new IOException(
+                                "BlueMap could not finish cleanup after missing resources"
+                        );
+                    }
                     return;
                 }
 
@@ -232,10 +242,15 @@ public class Plugin implements ServerEventListener {
                                     null;
                             LiveMarkersDataSupplier liveMarkersDataSupplier = new LiveMarkersDataSupplier(map.getMarkerSets());
 
-                            mapRequestHandler = new MapRequestHandler(map, livePlayersDataSupplier, liveMarkersDataSupplier, webserverConfig.isSseEnabled());
+                            mapRequestHandler = new MapRequestHandler(
+                                    map, livePlayersDataSupplier, liveMarkersDataSupplier,
+                                    webserverConfig.isSseEnabled(), webserverConfig.getTileCacheMaxAge()
+                            );
                         } else {
                             Storage storage = blueMap.getOrLoadStorage(mapConfig.getStorage());
-                            mapRequestHandler = new MapRequestHandler(storage.map(id));
+                            mapRequestHandler = new MapRequestHandler(
+                                    storage.map(id), webserverConfig.getTileCacheMaxAge()
+                            );
                         }
 
                         webRequestHandler.register(
@@ -259,11 +274,13 @@ public class Plugin implements ServerEventListener {
                     try {
                         webServer = new HttpServer(
                                 "BlueMap-Webserver",
-                                new LoggingRequestHandler(
+                                LoggingRequestHandler.wrap(
                                         webRequestHandler,
                                         webserverConfig.getLog().getFormat(),
-                                        webLogger
-                                )
+                                        webLogger,
+                                        !webLoggerList.isEmpty()
+                                ),
+                                webserverConfig.createHttpServerSettings()
                         );
                         webServer.bind(new InetSocketAddress(
                                 webserverConfig.resolveIp(),
@@ -432,10 +449,18 @@ public class Plugin implements ServerEventListener {
     }
 
     public void unload() {
-        this.unload(false);
+        tryUnload(false);
     }
 
     public void unload(boolean keepWebserver) {
+        tryUnload(keepWebserver);
+    }
+
+    private boolean tryUnload() {
+        return tryUnload(false);
+    }
+
+    private boolean tryUnload(boolean keepWebserver) {
         loadingLock.interruptAndLock();
         try {
             synchronized (this) {
@@ -488,6 +513,10 @@ public class Plugin implements ServerEventListener {
                         webServer.close();
                     } catch (IOException ex) {
                         Logger.global.logError("Failed to close the webserver!", ex);
+                        Logger.global.logWarning(
+                                "BlueMap storage will remain open because HTTP request tasks may still be using it. Retry shutdown after those tasks stop."
+                        );
+                        return false;
                     }
                     webServer = null;
                 }
@@ -519,6 +548,7 @@ public class Plugin implements ServerEventListener {
 
                 //done
                 loaded = false;
+                return true;
             }
         } finally {
             loadingLock.unlock();
@@ -526,7 +556,11 @@ public class Plugin implements ServerEventListener {
     }
 
     public void reload() throws IOException {
-        unload();
+        if (!tryUnload()) {
+            throw new IOException(
+                    "BlueMap reload aborted because shutdown is incomplete"
+            );
+        }
         load();
     }
 
@@ -546,7 +580,11 @@ public class Plugin implements ServerEventListener {
                 // hold and reuse loaded resourcepack
                 ResourcePack preloadedResourcePack = this.blueMap.getResourcePack();
 
-                unload();
+                if (!tryUnload()) {
+                    throw new IOException(
+                            "BlueMap reload aborted because shutdown is incomplete"
+                    );
+                }
                 load(preloadedResourcePack);
 
             }

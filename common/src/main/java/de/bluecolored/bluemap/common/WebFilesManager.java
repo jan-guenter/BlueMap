@@ -40,9 +40,16 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFileAttributes;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.*;
 
 public class WebFilesManager {
+
+    private static final Set<PosixFilePermission> DEFAULT_SETTINGS_PERMISSIONS =
+            PosixFilePermissions.fromString("rw-r--r--");
 
     private static final Gson GSON = ResourcesGson.addAdapter(new GsonBuilder())
             .setFieldNamingPolicy(FieldNamingPolicy.IDENTITY)
@@ -68,11 +75,50 @@ public class WebFilesManager {
     }
 
     public void saveSettings() throws IOException {
-        FileHelper.createDirectories(getSettingsFile().getParent());
-        try (BufferedWriter writer = Files.newBufferedWriter(getSettingsFile(),
-                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-            GSON.toJson(this.settings, writer);
+        Path settingsFile = getSettingsFile();
+        Path parent = settingsFile.getParent();
+        FileHelper.createDirectories(parent);
+
+        PosixFileAttributes existingAttributes = readPosixAttributes(settingsFile);
+        Path temporaryFile = Files.createTempFile(parent, "settings.json.", ".tmp");
+        boolean moved = false;
+        try {
+            try (BufferedWriter writer = Files.newBufferedWriter(
+                    temporaryFile,
+                    StandardOpenOption.TRUNCATE_EXISTING
+            )) {
+                GSON.toJson(this.settings, writer);
+            }
+            applyPosixAttributes(temporaryFile, existingAttributes);
+            FileHelper.atomicMove(temporaryFile, settingsFile);
+            moved = true;
+        } finally {
+            if (!moved) Files.deleteIfExists(temporaryFile);
         }
+    }
+
+    private static PosixFileAttributes readPosixAttributes(Path file) throws IOException {
+        if (!Files.exists(file)) return null;
+
+        PosixFileAttributeView attributes = Files.getFileAttributeView(file, PosixFileAttributeView.class);
+        return attributes == null ? null : attributes.readAttributes();
+    }
+
+    private static void applyPosixAttributes(Path file, PosixFileAttributes source) throws IOException {
+        PosixFileAttributeView target = Files.getFileAttributeView(file, PosixFileAttributeView.class);
+        if (target == null) return;
+
+        if (source == null) {
+            target.setPermissions(DEFAULT_SETTINGS_PERMISSIONS);
+            return;
+        }
+
+        // The replacement is intentionally owned by the process that created
+        // it. A standalone webserver commonly updates a shared webroot whose
+        // previous settings file was written by a different container UID.
+        // Restoring that owner or group would require CAP_CHOWN even when the
+        // directory is correctly group-writable.
+        target.setPermissions(source.permissions());
     }
 
     public Set<String> getScripts() {
