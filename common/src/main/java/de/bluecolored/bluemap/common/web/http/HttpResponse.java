@@ -40,52 +40,50 @@ public class HttpResponse implements Closeable, HttpHeaderCarrier {
     private @NonNull String version = "HTTP/1.1";
     private @NonNull HttpStatusCode statusCode;
     private @NonNull @Singular Map<String, HttpHeader> headers = new LinkedHashMap<>();
-    private @Nullable HttpResponseStreamWriter body;
+    @Setter(AccessLevel.NONE)
+    private @Nullable InputStream body;
+    @Setter(AccessLevel.NONE)
+    private @Nullable HttpResponseStreamWriter streamWriter;
+    private boolean bodySuppressed;
+    private boolean flushAfterEachChunk;
+    private boolean longLived;
 
     public void setBody(@Nullable InputStream body) {
-        this.body = body == null ? null : asStreamWriter(body);
+        this.body = body;
+        this.streamWriter = null;
     }
 
     public void setBody(byte[] data) {
-        setBody(data == null ? null : new ByteArrayInputStream(data));
+        if (data == null) {
+            setBody((InputStream) null);
+            return;
+        }
+
+        setBody(new ByteArrayInputStream(data));
     }
 
     public void setBody(String data) {
-        setBody(data == null ? null : data.getBytes(StandardCharsets.UTF_8));
+        if (data == null) {
+            setBody((InputStream) null);
+            return;
+        }
+
+        setBody(data.getBytes(StandardCharsets.UTF_8));
     }
 
     public void setBody(@Nullable HttpResponseStreamWriter streamWriter) {
-        this.body = streamWriter;
+        this.body = null;
+        this.streamWriter = streamWriter;
+    }
+
+    public boolean hasBody() {
+        return body != null || streamWriter != null;
     }
 
     @Override
     public void close() throws IOException {
         if (body != null) body.close();
-    }
-
-    /**
-     * Adapt an {@link InputStream} body into a {@link HttpResponseStreamWriter}
-     * that writes the data to the client in chunks.
-     */
-    private static HttpResponseStreamWriter asStreamWriter(InputStream body) {
-        return new HttpResponseStreamWriter() {
-            private final byte[] byteBuffer = new byte[1024];
-
-            @Override
-            public void write(ChunkedOutputStream out) throws IOException {
-                while (true) {
-                    int read = body.read(byteBuffer);
-                    if (read == -1) break;
-                    if (read == 0) continue;
-                    out.writeChunk(byteBuffer, 0, read);
-                }
-            }
-
-            @Override
-            public void close() throws IOException {
-                body.close();
-            }
-        };
+        if (streamWriter != null) streamWriter.close();
     }
 
 }

@@ -24,48 +24,25 @@
  */
 package de.bluecolored.bluemap.common.web.http;
 
-import lombok.RequiredArgsConstructor;
+public record HttpRequestLimits(
+        int maxRequestLineBytes,
+        int maxHeaderCount,
+        int maxHeaderBytes,
+        int maxBodyBytes
+) {
 
-@RequiredArgsConstructor
-public enum HttpStatusCode {
+    public static final HttpRequestLimits DEFAULT = new HttpRequestLimits(
+            8 * 1024,
+            100,
+            32 * 1024,
+            1024 * 1024
+    );
 
-    CONTINUE (100, "Continue"),
-    PROCESSING (102, "Processing"),
-
-    OK (200, "OK"),
-    NO_CONTENT (204, "No Content"),
-
-    MOVED_PERMANENTLY (301, "Moved Permanently"),
-    FOUND (302, "Found"),
-    SEE_OTHER (303, "See Other"),
-    NOT_MODIFIED (304, "Not Modified"),
-
-    BAD_REQUEST (400, "Bad Request"),
-    UNAUTHORIZED (401, "Unauthorized"),
-    FORBIDDEN (403, "Forbidden"),
-    NOT_FOUND (404, "Not Found"),
-    METHOD_NOT_ALLOWED (405, "Method Not Allowed"),
-    NOT_ACCEPTABLE (406, "Not Acceptable"),
-
-    INTERNAL_SERVER_ERROR (500, "Internal Server Error"),
-    NOT_IMPLEMENTED (501, "Not Implemented"),
-    SERVICE_UNAVAILABLE (503, "Service Unavailable"),
-    HTTP_VERSION_NOT_SUPPORTED (505, "HTTP Version not supported");
-
-    private final int code;
-    private final String message;
-
-    public int getCode(){
-        return code;
-    }
-
-    public String getMessage(){
-        return message;
-    }
-
-    @Override
-    public String toString() {
-        return getCode() + " " + getMessage();
+    public HttpRequestLimits {
+        if (maxRequestLineBytes < 1) throw new IllegalArgumentException("maxRequestLineBytes must be positive");
+        if (maxHeaderCount < 1) throw new IllegalArgumentException("maxHeaderCount must be positive");
+        if (maxHeaderBytes < 1) throw new IllegalArgumentException("maxHeaderBytes must be positive");
+        if (maxBodyBytes < 0) throw new IllegalArgumentException("maxBodyBytes must not be negative");
     }
 
 }

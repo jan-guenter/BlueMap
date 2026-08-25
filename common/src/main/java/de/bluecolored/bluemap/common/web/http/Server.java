@@ -98,8 +98,15 @@ public abstract class Server extends Thread implements Closeable, Runnable {
         }
     }
 
-    @Override
-    public void close() throws IOException {
+    protected void trackConnection(SocketChannel connection) {
+        connections.add(connection);
+    }
+
+    protected void untrackConnection(SocketChannel connection) {
+        connections.remove(connection);
+    }
+
+    public void stopAccepting() throws IOException {
         IOException exception = null;
 
         try {
@@ -118,7 +125,12 @@ public abstract class Server extends Thread implements Closeable, Runnable {
             }
         }
 
-        // close active connections
+        if (exception != null) throw exception;
+    }
+
+    protected void closeActiveConnections() throws IOException {
+        IOException exception = null;
+
         synchronized (this.connections) {
             for (SocketChannel channel : this.connections) {
                 try {
@@ -130,6 +142,23 @@ public abstract class Server extends Thread implements Closeable, Runnable {
             }
         }
 
+        if (exception != null) throw exception;
+    }
+
+    @Override
+    public void close() throws IOException {
+        IOException exception = null;
+        try {
+            stopAccepting();
+        } catch (IOException ex) {
+            exception = ex;
+        }
+        try {
+            closeActiveConnections();
+        } catch (IOException ex) {
+            if (exception == null) exception = ex;
+            else exception.addSuppressed(ex);
+        }
         if (exception != null) throw exception;
     }
 

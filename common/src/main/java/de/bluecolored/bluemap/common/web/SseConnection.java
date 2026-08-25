@@ -30,6 +30,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import lombok.SneakyThrows;
 
@@ -45,6 +46,7 @@ public class SseConnection implements Closeable {
 
     // how many messages can be queued up for sending before being dropped
     private static final int QUEUE_CAPACITY = 64;
+    private static final long HEARTBEAT_INTERVAL_MILLIS = 250;
 
     private final BlockingQueue<String[]> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
     private volatile boolean closed = false;
@@ -90,12 +92,20 @@ public class SseConnection implements Closeable {
         try {
             while (!closed) {
                 try {
-                    event = queue.take();
+                    event = queue.poll(
+                            HEARTBEAT_INTERVAL_MILLIS,
+                            TimeUnit.MILLISECONDS
+                    );
                 } catch (InterruptedException _) {
                     runningThread.interrupt();
                     break;
                 }
-                send(out, event[0], event[1]);
+                if (event == null) {
+                    out.write(": keepalive\n\n".getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                } else {
+                    send(out, event[0], event[1]);
+                }
             }
         } finally {
             close();
