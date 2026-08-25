@@ -44,10 +44,13 @@ import de.bluecolored.bluemap.core.BlueMap;
 import de.bluecolored.bluemap.core.logger.Logger;
 import de.bluecolored.bluemap.core.storage.MapStorage;
 import de.bluecolored.bluemap.core.util.FileHelper;
+import de.bluecolored.bluemap.webserver.metrics.ConnectionMetricsEndpoint;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.net.BindException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.file.Files;
@@ -70,9 +73,11 @@ public final class BlueMapWebServer implements Closeable {
             Duration.ofSeconds(5);
 
     private static final String DEFAULT_CONFIG_FOLDER = "config";
+    private static final String DEFAULT_METRICS_IP = "127.0.0.1";
 
     private final BlueMapService blueMap;
     private final HttpServer webServer;
+    private final @Nullable ConnectionMetricsEndpoint metricsEndpoint;
     private final ExecutorService connectionExecutor;
     private final Logger webLogger;
     private final Path webRoot;
@@ -82,6 +87,7 @@ public final class BlueMapWebServer implements Closeable {
     private BlueMapWebServer(
             BlueMapService blueMap,
             HttpServer webServer,
+            @Nullable ConnectionMetricsEndpoint metricsEndpoint,
             ExecutorService connectionExecutor,
             Logger webLogger,
             Path webRoot,
@@ -90,6 +96,7 @@ public final class BlueMapWebServer implements Closeable {
     ) {
         this.blueMap = blueMap;
         this.webServer = webServer;
+        this.metricsEndpoint = metricsEndpoint;
         this.connectionExecutor = connectionExecutor;
         this.webLogger = webLogger;
         this.webRoot = webRoot;
@@ -99,7 +106,31 @@ public final class BlueMapWebServer implements Closeable {
 
     public static BlueMapWebServer create(Path configFolder, boolean verbose)
             throws IOException, ConfigurationException, InterruptedException {
+        return create(configFolder, verbose, null);
+    }
+
+    static BlueMapWebServer create(
+            Path configFolder,
+            boolean verbose,
+            @Nullable Integer metricsPort
+    ) throws IOException, ConfigurationException, InterruptedException {
+        return create(
+                configFolder,
+                verbose,
+                metricsPort,
+                DEFAULT_METRICS_IP
+        );
+    }
+
+    static BlueMapWebServer create(
+            Path configFolder,
+            boolean verbose,
+            @Nullable Integer metricsPort,
+            String metricsIp
+    ) throws IOException, ConfigurationException, InterruptedException {
         BlueMapService blueMap = null;
+        HttpServer webServer = null;
+        ConnectionMetricsEndpoint metricsEndpoint = null;
         ExecutorService connectionExecutor = null;
         Logger webLogger = null;
         AtomicBoolean started = new AtomicBoolean();
@@ -171,7 +202,7 @@ public final class BlueMapWebServer implements Closeable {
             );
 
             connectionExecutor = Executors.newVirtualThreadPerTaskExecutor();
-            HttpServer webServer = new HttpServer(
+            webServer = new HttpServer(
                     "BlueMap-Webserver",
                     requestHandler,
                     connectionExecutor,
@@ -179,7 +210,30 @@ public final class BlueMapWebServer implements Closeable {
             );
 
             try {
-                webServer.bind(new InetSocketAddress(config.resolveIp(), config.getPort()));
+                var bindAddress = config.resolveIp();
+                webServer.bind(new InetSocketAddress(bindAddress, config.getPort()));
+                if (metricsPort != null) {
+                    if (metricsPort == config.getPort()) {
+                        throw new ConfigurationException(
+                                "The metrics port must differ from the public webserver port."
+                        );
+                    }
+                    InetAddress metricsBindAddress;
+                    try {
+                        metricsBindAddress = InetAddress.getByName(metricsIp);
+                    } catch (UnknownHostException ex) {
+                        throw new ConfigurationException(
+                                "BlueMap failed to resolve the metrics bind address.",
+                                ex
+                        );
+                    }
+                    metricsEndpoint = new ConnectionMetricsEndpoint(
+                            webServer,
+                            config.getMaxActiveConnections(),
+                            metricsBindAddress,
+                            metricsPort
+                    );
+                }
             } catch (UnknownHostException ex) {
                 throw new ConfigurationException(
                         "BlueMap failed to resolve the ip in webserver.conf.",
@@ -187,7 +241,7 @@ public final class BlueMapWebServer implements Closeable {
                 );
             } catch (BindException ex) {
                 throw new ConfigurationException(
-                        "BlueMap failed to bind the configured webserver port " + config.getPort() + ".",
+                        "BlueMap failed to bind a configured webserver or metrics port.",
                         ex
                 );
             }
@@ -195,6 +249,7 @@ public final class BlueMapWebServer implements Closeable {
             return new BlueMapWebServer(
                     blueMap,
                     webServer,
+                    metricsEndpoint,
                     connectionExecutor,
                     webLogger,
                     webRoot,
@@ -204,7 +259,14 @@ public final class BlueMapWebServer implements Closeable {
                     )
             );
         } catch (IOException | ConfigurationException | InterruptedException | RuntimeException ex) {
-            closeAfterFailedCreate(blueMap, connectionExecutor, webLogger, ex);
+            closeAfterFailedCreate(
+                    blueMap,
+                    webServer,
+                    metricsEndpoint,
+                    connectionExecutor,
+                    webLogger,
+                    ex
+            );
             throw ex;
         }
     }
@@ -244,10 +306,26 @@ public final class BlueMapWebServer implements Closeable {
 
     private static void closeAfterFailedCreate(
             BlueMapService blueMap,
+            HttpServer webServer,
+            ConnectionMetricsEndpoint metricsEndpoint,
             ExecutorService connectionExecutor,
             Logger webLogger,
             Exception original
     ) {
+        if (metricsEndpoint != null) {
+            try {
+                metricsEndpoint.close();
+            } catch (IOException closeException) {
+                original.addSuppressed(closeException);
+            }
+        }
+        if (webServer != null) {
+            try {
+                webServer.close();
+            } catch (IOException closeException) {
+                original.addSuppressed(closeException);
+            }
+        }
         if (connectionExecutor != null) connectionExecutor.shutdownNow();
 
         if (blueMap != null) {
@@ -269,6 +347,7 @@ public final class BlueMapWebServer implements Closeable {
 
     public void start() {
         webServer.start();
+        if (metricsEndpoint != null) metricsEndpoint.start();
         started.set(true);
     }
 
@@ -282,10 +361,19 @@ public final class BlueMapWebServer implements Closeable {
         started.set(false);
         boolean drained = false;
 
+        if (metricsEndpoint != null) {
+            try {
+                metricsEndpoint.close();
+            } catch (IOException ex) {
+                exception = ex;
+            }
+        }
+
         try {
             drained = webServer.closeGracefully(shutdownGracePeriod);
         } catch (IOException ex) {
-            exception = ex;
+            if (exception == null) exception = ex;
+            else exception.addSuppressed(ex);
         }
 
         boolean executorTerminated;
@@ -374,7 +462,12 @@ public final class BlueMapWebServer implements Closeable {
         }
 
         try {
-            BlueMapWebServer server = create(options.configFolder(), options.verbose());
+            BlueMapWebServer server = create(
+                    options.configFolder(),
+                    options.verbose(),
+                    options.metricsPort(),
+                    options.metricsIp()
+            );
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 try {
                     server.close();
@@ -405,16 +498,28 @@ public final class BlueMapWebServer implements Closeable {
 
                   -c, --config <folder>  BlueMap configuration folder (default: config)
                   -b, --verbose          Log HTTP requests to stdout
+                      --metrics-port <n> Start a separate OpenMetrics listener
+                      --metrics-ip <ip>  Metrics bind address (default: 127.0.0.1)
                   -V, --version          Print the BlueMap version
                   -h, --help             Show this help
                 """);
     }
 
-    record Options(Path configFolder, boolean verbose, boolean version, boolean help) {
+    record Options(
+            Path configFolder,
+            boolean verbose,
+            @Nullable Integer metricsPort,
+            String metricsIp,
+            boolean version,
+            boolean help
+    ) {
 
         static Options parse(String[] args) {
             Path configFolder = Path.of(DEFAULT_CONFIG_FOLDER);
             boolean verbose = false;
+            Integer metricsPort = null;
+            String metricsIp = DEFAULT_METRICS_IP;
+            boolean metricsIpConfigured = false;
             boolean version = false;
             boolean help = false;
 
@@ -427,13 +532,54 @@ public final class BlueMapWebServer implements Closeable {
                         configFolder = Path.of(args[i]);
                     }
                     case "-b", "--verbose" -> verbose = true;
+                    case "--metrics-port" -> {
+                        if (++i >= args.length) {
+                            throw new IllegalArgumentException(
+                                    "Missing port after " + args[i - 1] + "."
+                            );
+                        }
+                        try {
+                            metricsPort = Integer.parseInt(args[i]);
+                        } catch (NumberFormatException ex) {
+                            throw new IllegalArgumentException(
+                                    "Invalid metrics port: " + args[i], ex
+                            );
+                        }
+                        if (metricsPort < 1 || metricsPort > 65535) {
+                            throw new IllegalArgumentException(
+                                    "Metrics port must be between 1 and 65535."
+                            );
+                        }
+                    }
+                    case "--metrics-ip" -> {
+                        if (++i >= args.length) {
+                            throw new IllegalArgumentException(
+                                    "Missing address after " + args[i - 1] + "."
+                            );
+                        }
+                        metricsIp = args[i];
+                        metricsIpConfigured = true;
+                    }
                     case "-V", "--version" -> version = true;
                     case "-h", "--help" -> help = true;
                     default -> throw new IllegalArgumentException("Unknown option: " + args[i]);
                 }
             }
 
-            return new Options(configFolder, verbose, version, help);
+            if (metricsIpConfigured && metricsPort == null) {
+                throw new IllegalArgumentException(
+                        "--metrics-ip requires --metrics-port."
+                );
+            }
+
+            return new Options(
+                    configFolder,
+                    verbose,
+                    metricsPort,
+                    metricsIp,
+                    version,
+                    help
+            );
         }
     }
 }

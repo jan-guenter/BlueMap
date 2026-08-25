@@ -62,6 +62,35 @@ leave service without triggering a liveness restart.
 pool limit. During shutdown the server becomes unready, stops accepting new
 connections, and drains active responses up to the configured grace period.
 
+## Optional connection metrics
+
+Pass `--metrics-port <port>` after the image name to start a separate
+OpenMetrics listener. It binds to `127.0.0.1` by default; set an explicit
+address only when a collector must reach it over another interface:
+
+```shell
+docker run --rm \
+  --publish 8100:8100 \
+  --publish 127.0.0.1:9090:9090 \
+  --volume "$PWD/config:/config:ro" \
+  --volume bluemap-web-data:/data \
+  ghcr.io/bluemap-minecraft/bluemap-web:latest \
+  --config /config --metrics-port 9090 --metrics-ip 0.0.0.0
+```
+
+`/metrics` reports the current public HTTP connection count, its configured
+limit, elapsed-time-weighted one-minute and five-minute averages, and the
+corresponding utilization ratios. The rolling values use one-second samples;
+the current gauge is read directly from the public listener. Collection has no
+request-path or client labels and creates no sampler or listener when the
+option is omitted.
+
+Keep the metrics port restricted. A Prometheus-compatible collector or an
+OpenTelemetry Collector Prometheus receiver can scrape the endpoint. A
+Kubernetes HPA needs a custom-metrics adapter to publish the selected per-pod
+series through `custom.metrics.k8s.io`; Metrics Server does not publish
+application metrics.
+
 ## Live data
 
 The standalone process does not receive in-process events from the Minecraft
