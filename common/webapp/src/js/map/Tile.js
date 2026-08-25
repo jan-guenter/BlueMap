@@ -44,6 +44,7 @@ export class Tile {
 
         this.unloaded = true;
         this.loading = false;
+        this.loadController = null;
     }
 
     /**
@@ -53,30 +54,55 @@ export class Tile {
     load(tileLoader, force = false) {
         if (this.loading) return Promise.reject("tile is already loading!");
         this.loading = true;
+        const loadController = new AbortController();
+        this.loadController = loadController;
 
         this.unloaded = false;
-        return tileLoader.load(this.x, this.z, () => this.unloaded, force)
+        return tileLoader.load(
+            this.x,
+            this.z,
+            () => this.unloaded,
+            force,
+            loadController.signal
+        )
             .then(model => {
-                if (this.unloaded){
+                if (this.unloaded || loadController.signal.aborted) {
                     Tile.disposeModel(model);
-                    return;
+                    throw {status: "cancelled"};
                 }
 
+                if (this.loadController === loadController) {
+                    this.loadController = null;
+                }
                 this.unload();
                 this.unloaded = false;
 
                 this.model = model;
                 this.onLoad(this);
-            }, () => {
-                this.unload();
+            }, error => {
+                const cancelled =
+                    loadController.signal.aborted ||
+                    error?.name === "AbortError" ||
+                    error?.status === "cancelled";
+                if (this.loadController === loadController) {
+                    this.loadController = null;
+                }
+                if (!this.model) this.unload();
+                if (cancelled) throw {status: "cancelled"};
+                throw error;
             })
             .finally(() => {
+                if (this.loadController === loadController) {
+                    this.loadController = null;
+                }
                 this.loading = false;
             });
     }
 
     unload() {
         this.unloaded = true;
+        this.loadController?.abort();
+        this.loadController = null;
         if (this.model) {
             this.onUnload(this);
 

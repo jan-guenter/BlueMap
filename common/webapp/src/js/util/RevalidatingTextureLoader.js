@@ -1,4 +1,4 @@
-import {Loader, ImageLoader, Texture} from "three";
+import {Loader, Texture} from "three";
 import {RevalidatingFileLoader} from "./RevalidatingFileLoader";
 
 /**
@@ -9,8 +9,7 @@ import {RevalidatingFileLoader} from "./RevalidatingFileLoader";
  * An alternative to {@link TextureLoader} for loading textures with support for
  * forcing revalidation like {@link RevalidatingFileLoader}.
  *
- * Images are internally loaded via {@link ImageLoader} or
- * {@link RevalidatingFileLoader} if an uncached request is made.
+ * Images are internally loaded via {@link RevalidatingFileLoader}.
  *
  * ```js
  * const loader = new RevalidatingTextureLoader();
@@ -23,7 +22,6 @@ export class RevalidatingTextureLoader extends Loader {
     /** @type {Set<string> | undefined} */
     #revalidatedUrls;
     #revalidatingFileLoader = new RevalidatingFileLoader(this.manager);
-    #imageLoader = new ImageLoader(this.manager);
 
     /**
      * @param {Set<string> | undefined} revalidatedUrls - If set to a Set, this
@@ -54,37 +52,28 @@ export class RevalidatingTextureLoader extends Loader {
 
         const texture = new Texture();
 
-        if (revalidatedUrls && !revalidatedUrls.has(url)) {
-            const loader = this.#revalidatingFileLoader;
-            loader.setResponseType('blob');
-            loader.setWithCredentials(this.withCredentials);
-            loader.setCrossOrigin(this.crossOrigin);
-            loader.setPath(this.path);
+        const loader = this.#revalidatingFileLoader;
+        loader.setResponseType('blob');
+        loader.setWithCredentials(this.withCredentials);
+        loader.setCrossOrigin(this.crossOrigin);
+        loader.setPath(this.path);
 
-            loader.loadAsync(url, onProgress)
-                .then(async blob => {
-                    revalidatedUrls.add(url);
+        loader.loadAsync(url, onProgress)
+            .then(async blob => {
+                revalidatedUrls?.add(url);
 
-                    const imageBitmap = await createImageBitmap(blob, {colorSpaceConversion: 'none'});
-                    texture.image = imageBitmap;
-                    texture.needsUpdate = true;
-                    return texture;
-                })
-                .then(onLoad, onError)
-        } else {
-            const loader = this.#imageLoader;
-            loader.setCrossOrigin(this.crossOrigin);
-            loader.setPath(this.path);
-
-            loader.loadAsync(url, onProgress)
-                .then(image => {
-                    texture.image = image;
-                    texture.needsUpdate = true;
-                    return texture;
-                })
-                .then(onLoad, onError);
-        }
+                const imageBitmap = await createImageBitmap(blob, {colorSpaceConversion: 'none'});
+                texture.image = imageBitmap;
+                texture.needsUpdate = true;
+                return texture;
+            })
+            .then(onLoad, onError);
 
         return texture;
+    }
+
+    abort() {
+        this.#revalidatingFileLoader.abort();
+        return this;
     }
 }

@@ -272,7 +272,11 @@ export class Map {
             loader.load(this.data.settingsUrl,
                 resolve,
                 () => {},
-                () => reject(`Failed to load the settings.json for map: ${this.data.id}`)
+                error => reject(
+                    error instanceof Error
+                        ? error
+                        : new Error(`Failed to load the settings.json for map: ${this.data.id}`)
+                )
             )
         });
     }
@@ -292,7 +296,11 @@ export class Map {
 			loader.load(this.data.texturesUrl,
 				resolve,
 				() => {},
-				() => reject(`Failed to load the textures.json for map: ${this.data.id}`)
+				error => reject(
+					error instanceof Error
+						? error
+						: new Error(`Failed to load the textures.json for map: ${this.data.id}`)
+				)
 			)
 		});
 	}

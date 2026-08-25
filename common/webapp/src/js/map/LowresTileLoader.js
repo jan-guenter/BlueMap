@@ -22,7 +22,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-import {pathFromCoords} from "../util/Utils";
+import {pathFromCoords} from "../util/Utils.js";
 import {
     Mesh,
     PlaneGeometry,
@@ -33,7 +33,7 @@ import {
     NearestMipMapLinearFilter,
     Vector2
 } from "three";
-import {RevalidatingTextureLoader} from "../util/RevalidatingTextureLoader";
+import {RevalidatingTextureLoader} from "../util/RevalidatingTextureLoader.js";
 
 export class LowresTileLoader {
 
@@ -50,8 +50,6 @@ export class LowresTileLoader {
         this.fragmentShader = fragmentShader;
         this.uniforms = uniforms;
 
-        this.textureLoader = new RevalidatingTextureLoader();
-        this.textureLoader.setRevalidatedUrls(this.revalidatedUrls);
         this.geometry = new PlaneGeometry(
             tileSettings.tileSize.x + 1, tileSettings.tileSize.z + 1,
             Math.ceil(100 / (lod * 2)), Math.ceil(100 / (lod * 2))
@@ -62,76 +60,110 @@ export class LowresTileLoader {
         this.geometry.translate(tileSettings.tileSize.x / 2 + 1, 0, tileSettings.tileSize.x / 2 + 1);
     }
 
-    load = (tileX, tileZ, cancelCheck = () => false, force = false) => {
+    load = (
+        tileX,
+        tileZ,
+        cancelCheck = () => false,
+        force = false,
+        signal = undefined
+    ) => {
         let tileUrl = this.tilePath + this.lod + "/" + pathFromCoords(tileX, tileZ) + '.png';
 
         //await this.loadBlocker();
         return new Promise((resolve, reject) => {
+            const textureLoader = new RevalidatingTextureLoader();
+            textureLoader.setRevalidatedUrls(this.revalidatedUrls);
+
+            let settled = false;
+            const finish = (callback, value) => {
+                if (settled) return;
+                settled = true;
+                signal?.removeEventListener("abort", onAbort);
+                callback(value);
+            };
+            const onAbort = () => {
+                textureLoader.abort();
+                finish(reject, {status: "cancelled"});
+            };
+
+            if (signal?.aborted) {
+                finish(reject, {status: "cancelled"});
+                return;
+            }
+            signal?.addEventListener("abort", onAbort, {once: true});
+
             if (force) this.revalidatedUrls?.delete(tileUrl);
-            this.textureLoader.setRevalidatedUrls(this.revalidatedUrls);
-            this.textureLoader.load(tileUrl,
+            textureLoader.load(tileUrl,
                 async texture => {
-                    texture.anisotropy = 1;
-                    texture.generateMipmaps = false;
-                    texture.magFilter = NearestFilter;
-                    texture.minFilter = texture.generateMipmaps ? NearestMipMapLinearFilter : NearestFilter;
-                    texture.wrapS = ClampToEdgeWrapping;
-                    texture.wrapT = ClampToEdgeWrapping;
-                    texture.flipY = false;
-                    texture.flatShading = true;
+                    try {
+                        texture.anisotropy = 1;
+                        texture.generateMipmaps = false;
+                        texture.magFilter = NearestFilter;
+                        texture.minFilter = texture.generateMipmaps ? NearestMipMapLinearFilter : NearestFilter;
+                        texture.wrapS = ClampToEdgeWrapping;
+                        texture.wrapT = ClampToEdgeWrapping;
+                        texture.flipY = false;
+                        texture.flatShading = true;
 
-                    await this.loadBlocker();
-                    if (cancelCheck()){
+                        await this.loadBlocker();
+                        if (cancelCheck() || signal?.aborted) {
+                            texture.dispose();
+                            finish(reject, {status: "cancelled"});
+                            return;
+                        }
+
+                        const scale = Math.pow(this.tileSettings.lodFactor, this.lod - 1);
+
+                        let material = new ShaderMaterial({
+                            uniforms: {
+                                ...this.uniforms,
+                                tileSize: {
+                                    value: new Vector2(this.tileSettings.tileSize.x, this.tileSettings.tileSize.z)
+                                },
+                                textureSize: {
+                                    value: new Vector2(texture.image.width, texture.image.height)
+                                },
+                                textureImage: {
+                                    type: 't',
+                                    value: texture
+                                },
+                                lod: {
+                                    value: this.lod
+                                },
+                                lodScale: {
+                                    value: scale
+                                }
+                            },
+                            vertexShader: this.vertexShader,
+                            fragmentShader: this.fragmentShader,
+                            depthWrite: true,
+                            depthTest: true,
+                            vertexColors: true,
+                            side: FrontSide,
+                            wireframe: false,
+                        });
+
+                        let object = new Mesh(this.geometry, material);
+
+                        object.position.set(tileX * this.tileSettings.tileSize.x * scale, 0, tileZ * this.tileSettings.tileSize.z * scale);
+                        object.scale.set(scale, 1, scale);
+
+                        object.userData.tileUrl = tileUrl;
+                        object.userData.tileType = "lowres";
+
+                        object.updateMatrixWorld(true);
+
+                        finish(resolve, object);
+                    } catch (error) {
                         texture.dispose();
-                        reject({status: "cancelled"});
-                        return;
+                        finish(reject, error);
                     }
-
-                    const scale = Math.pow(this.tileSettings.lodFactor, this.lod - 1);
-
-                    let material = new ShaderMaterial({
-                        uniforms: {
-                            ...this.uniforms,
-                            tileSize: {
-                                value: new Vector2(this.tileSettings.tileSize.x, this.tileSettings.tileSize.z)
-                            },
-                            textureSize: {
-                                value: new Vector2(texture.image.width, texture.image.height)
-                            },
-                            textureImage: {
-                                type: 't',
-                                value: texture
-                            },
-                            lod: {
-                                value: this.lod
-                            },
-                            lodScale: {
-                                value: scale
-                            }
-                        },
-                        vertexShader: this.vertexShader,
-                        fragmentShader: this.fragmentShader,
-                        depthWrite: true,
-                        depthTest: true,
-                        vertexColors: true,
-                        side: FrontSide,
-                        wireframe: false,
-                    });
-
-                    let object = new Mesh(this.geometry, material);
-
-                    object.position.set(tileX * this.tileSettings.tileSize.x * scale, 0, tileZ * this.tileSettings.tileSize.z * scale);
-                    object.scale.set(scale, 1, scale);
-
-                    object.userData.tileUrl = tileUrl;
-                    object.userData.tileType = "lowres";
-
-                    object.updateMatrixWorld(true);
-
-                    resolve(object);
                 },
                 undefined,
-                reject
+                error => finish(
+                    reject,
+                    signal?.aborted ? {status: "cancelled"} : error
+                )
             );
         });
     }

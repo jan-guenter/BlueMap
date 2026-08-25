@@ -24,11 +24,20 @@ node {
 }
 
 tasks.register("buildWebapp", type = NpmTask::class) {
-    dependsOn ("npmInstall")
+    dependsOn ("npmInstall", "testWebapp")
     args = listOf("run", "build")
 
     inputs.dir("webapp/")
     outputs.dir("webapp/dist/")
+}
+
+tasks.register("testWebapp", type = NpmTask::class) {
+    dependsOn ("npmInstall")
+    args = listOf("run", "test")
+
+    inputs.dir("webapp/src/")
+    inputs.dir("webapp/test/")
+    inputs.file("webapp/package.json")
 }
 
 tasks.register("zipWebapp", type = Zip::class) {

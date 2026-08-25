@@ -3,16 +3,307 @@
 import {Loader, Cache} from "three";
 /** @import {LoadingManager} from "three" */
 
-/** @type {Record<string, {revalidatedUrls: Set<string> | undefined, callbacks: Array<{onLoad: function, onProgress: function, onError: function}>>}} */
+/**
+ * @typedef {{
+ *     onLoad: function,
+ *     onProgress: function,
+ *     onError: function,
+ *     abortListeners: Array<{signal: AbortSignal, listener: function}>
+ * }} LoadingCallback
+ */
+
+/**
+ * @typedef {{
+ *     revalidatedUrls: Set<string> | undefined,
+ *     signature: string,
+ *     callbacks: Array<LoadingCallback>,
+ *     abortController: AbortController
+ * }} LoadingEntry
+ */
+
+/** @type {Record<string, LoadingEntry>} */
 const loading = Object.create(null);
+const shownRequiredEncodings = new Set();
+
+const REQUIRED_ENCODING_HEADER = "X-BlueMap-Required-Content-Encoding";
+const OVERLOAD_HEADER = "X-BlueMap-Overload";
+const BASE_RETRY_DELAY_MILLIS = 250;
+const MAX_RETRY_DELAY_MILLIS = 5000;
+const MAX_PROBLEM_BODY_LENGTH = 1024;
+const MAX_RETRY_AFTER_SECONDS = MAX_RETRY_DELAY_MILLIS / 1000;
 
 const warn = console.warn;
 
-class HttpError extends Error {
-    constructor(message, response) {
-        super(message);
-        this.response = response;
+function problemContentType(response) {
+    return response.headers.get("Content-Type")
+        ?.split(";", 1)[0]
+        .trim()
+        .toLowerCase() === "application/problem+json";
+}
+
+async function problemDetails(response) {
+    if (!problemContentType(response)) return null;
+
+    const declaredLength = response.headers.get("Content-Length")?.trim();
+    if (
+        declaredLength &&
+        (!/^\d+$/.test(declaredLength) ||
+            Number(declaredLength) > MAX_PROBLEM_BODY_LENGTH)
+    ) {
+        cancelBody(response.body);
+        return null;
     }
+
+    const reader = response.body?.getReader?.();
+    if (!reader) return null;
+
+    try {
+        const chunks = [];
+        let length = 0;
+
+        while (length <= MAX_PROBLEM_BODY_LENGTH) {
+            const {done, value} = await reader.read();
+            if (done) break;
+
+            const remaining = MAX_PROBLEM_BODY_LENGTH + 1 - length;
+            const chunk = value.subarray(0, remaining);
+            chunks.push(chunk);
+            length += chunk.byteLength;
+
+            if (value.byteLength > remaining || length > MAX_PROBLEM_BODY_LENGTH) {
+                cancelReader(reader);
+                return null;
+            }
+        }
+
+        const bytes = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.byteLength;
+        }
+
+        const body = new TextDecoder("utf-8", {fatal: true}).decode(bytes);
+        const details = JSON.parse(body);
+        if (!details || Array.isArray(details) || typeof details !== "object") {
+            return null;
+        }
+        return details;
+    } catch {
+        cancelReader(reader);
+        return null;
+    }
+}
+
+function cancelBody(body) {
+    try {
+        body?.cancel()?.catch?.(() => {});
+    } catch {
+        // The body may already be locked or cancelled. It is no longer read here.
+    }
+}
+
+function cancelReader(reader) {
+    try {
+        reader.cancel()?.catch?.(() => {});
+    } catch {
+        // The reader may already be closed. It is no longer read here.
+    }
+}
+
+function abortError() {
+    if (typeof DOMException === "function") {
+        return new DOMException("The operation was aborted.", "AbortError");
+    }
+
+    const error = new Error("The operation was aborted.");
+    error.name = "AbortError";
+    return error;
+}
+
+function removeAbortListeners(callback) {
+    for (const {signal, listener} of callback.abortListeners) {
+        signal.removeEventListener("abort", listener);
+    }
+    callback.abortListeners.length = 0;
+}
+
+function invokeCallback(callback, value) {
+    if (!callback) return;
+    try {
+        callback(value);
+    } catch (error) {
+        setTimeout(() => {
+            throw error;
+        }, 0);
+    }
+}
+
+function abortLoadingCallback(url, loadingEntry, callback) {
+    const index = loadingEntry.callbacks.indexOf(callback);
+    if (index < 0) return;
+
+    loadingEntry.callbacks.splice(index, 1);
+    removeAbortListeners(callback);
+
+    if (loadingEntry.callbacks.length === 0) {
+        if (loading[url] === loadingEntry) delete loading[url];
+        loadingEntry.abortController.abort();
+    }
+
+    invokeCallback(callback.onError, abortError());
+}
+
+function addLoadingCallback(url, loadingEntry, loader, onLoad, onProgress, onError) {
+    const callback = {onLoad, onProgress, onError, abortListeners: []};
+    loadingEntry.callbacks.push(callback);
+
+    const signals = [loader._abortController.signal];
+    const managerSignal = loader.manager.abortController?.signal;
+    if (managerSignal && managerSignal !== signals[0]) signals.push(managerSignal);
+
+    const listener = () => abortLoadingCallback(url, loadingEntry, callback);
+    for (const signal of signals) {
+        callback.abortListeners.push({signal, listener});
+        signal.addEventListener("abort", listener, {once: true});
+        if (signal.aborted) {
+            listener();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function takeLoadingCallbacks(loadingEntry) {
+    const callbacks = loadingEntry.callbacks.splice(0);
+    for (const callback of callbacks) removeAbortListeners(callback);
+    return callbacks;
+}
+
+function representationSignature(loader) {
+    return JSON.stringify({
+        clientDecompression: loader.clientDecompression,
+        credentials: loader.withCredentials ? "include" : "same-origin",
+        headers: [...new Headers(loader.requestHeader).entries()],
+        mimeType: loader.mimeType,
+        responseType: loader.responseType
+    });
+}
+
+function loadingSignature(representation, forceNoCacheRequest) {
+    return JSON.stringify({
+        cache: forceNoCacheRequest ? "no-cache" : "default",
+        representation
+    });
+}
+
+function retryAfterMillis(response) {
+    const value = response.headers.get("Retry-After")?.trim();
+    if (!value || !/^\d+$/.test(value)) return null;
+    const seconds = Number(value);
+    if (!Number.isSafeInteger(seconds) || seconds > MAX_RETRY_AFTER_SECONDS) {
+        return null;
+    }
+    return seconds * 1000;
+}
+
+export function retryDelayMillis(error, retry, random = Math.random) {
+    const baseDelay = error?.code === "bluemap_overload"
+        ? error.retryAfterMillis
+        : BASE_RETRY_DELAY_MILLIS * (2 ** retry);
+    const boundedDelay = Math.min(
+        Math.max(baseDelay ?? BASE_RETRY_DELAY_MILLIS, 0),
+        MAX_RETRY_DELAY_MILLIS
+    );
+    const jitter = Math.floor(random() * Math.max(1, boundedDelay / 4));
+    return Math.min(boundedDelay + jitter, MAX_RETRY_DELAY_MILLIS);
+}
+
+function networkError(error) {
+    if (error?.name === "AbortError") return error;
+    const wrapped = new Error(error?.message || "Network request failed");
+    wrapped.name = "NetworkError";
+    wrapped.code = "bluemap_network_error";
+    wrapped.cause = error;
+    return wrapped;
+}
+
+class HttpError extends Error {
+    constructor(message, response, code, details = {}) {
+        super(message);
+        this.name = "HttpError";
+        this.response = response;
+        this.status = response.status;
+        this.code = code;
+        Object.assign(this, details);
+    }
+}
+
+async function httpError(response) {
+    const genericMessage =
+        `fetch for "${response.url}" responded with ${response.status}: ${response.statusText}`;
+    const details = await problemDetails(response);
+
+    if (response.status === 406 && details) {
+        const requiredEncoding = response.headers
+            .get(REQUIRED_ENCODING_HEADER)?.trim();
+        if (
+            requiredEncoding &&
+            details.code === "bluemap_required_content_encoding" &&
+            details.requiredEncoding === requiredEncoding
+        ) {
+            return new HttpError(
+                `This BlueMap server stores map data with '${requiredEncoding}' encoding, ` +
+                    "but this browser did not advertise support for it. " +
+                    "Ask the server administrator to choose a browser-supported map-data encoding.",
+                response,
+                "bluemap_required_content_encoding",
+                {requiredEncoding}
+            );
+        }
+    }
+
+    if (
+        response.status === 503 &&
+        response.headers.get(OVERLOAD_HEADER)?.trim() === "capacity" &&
+        details?.code === "bluemap_overloaded" &&
+        details.status === 503
+    ) {
+        const delay = retryAfterMillis(response);
+        if (delay !== null) {
+            return new HttpError(
+                genericMessage,
+                response,
+                "bluemap_overload",
+                {retryAfterMillis: delay}
+            );
+        }
+    }
+
+    return new HttpError(genericMessage, response);
+}
+
+export function isRequiredEncodingError(error) {
+    return error?.code === "bluemap_required_content_encoding";
+}
+
+export function isRetryableLoadError(error) {
+    return error?.code === "bluemap_overload" ||
+        error?.code === "bluemap_network_error";
+}
+
+export function rethrowRequiredEncodingError(error) {
+    if (isRequiredEncodingError(error)) throw error;
+}
+
+export function showRequiredEncodingError(error) {
+    if (!isRequiredEncodingError(error)) return false;
+
+    const key = error.requiredEncoding || error.message;
+    if (shownRequiredEncodings.has(key)) return false;
+    shownRequiredEncodings.add(key);
+    return true;
 }
 
 /**
@@ -112,9 +403,12 @@ export class RevalidatingFileLoader extends Loader {
         const forceNoCacheRequest = revalidatedUrls
             ? !revalidatedUrls.has(url)
             : false;
+        const representation = representationSignature(this);
+        const signature = loadingSignature(representation, forceNoCacheRequest);
+        const cacheKey = `file:${url}:${representation}`;
 
         if (!forceNoCacheRequest) {
-            const cached = Cache.get(`file:${url}`);
+            const cached = Cache.get(cacheKey);
 
             if (cached !== undefined) {
                 this.manager.itemStart(url);
@@ -134,33 +428,42 @@ export class RevalidatingFileLoader extends Loader {
 
         if (
             loadingEntry !== undefined &&
-            (!revalidatedUrls ||
-                loadingEntry.revalidatedUrls === revalidatedUrls)
+            loadingEntry.revalidatedUrls === revalidatedUrls &&
+            loadingEntry.signature === signature
         ) {
-            loadingEntry.callbacks.push({onLoad, onProgress, onError});
+            addLoadingCallback(
+                url,
+                loadingEntry,
+                this,
+                onLoad,
+                onProgress,
+                onError
+            );
             return;
         }
 
         // Create new loading entry (replacing if duplicate with different revalidatedUrls)
         loadingEntry = loading[url] = {
             revalidatedUrls,
-            callbacks: [{onLoad, onProgress, onError}],
+            signature,
+            callbacks: [],
+            abortController: new AbortController(),
         };
+        if (!addLoadingCallback(
+            url,
+            loadingEntry,
+            this,
+            onLoad,
+            onProgress,
+            onError
+        )) return;
 
         // create request
         const req = new Request(url, {
             headers: new Headers(this.requestHeader),
             cache: forceNoCacheRequest ? "no-cache" : undefined,
             credentials: this.withCredentials ? "include" : "same-origin",
-            signal:
-                // future versions of LoadingManager have an abortController property
-                typeof AbortSignal.any === "function" &&
-                this.manager.abortController?.signal
-                    ? AbortSignal.any([
-                          this._abortController.signal,
-                          this.manager.abortController.signal,
-                      ])
-                    : this._abortController.signal,
+            signal: loadingEntry.abortController.signal,
         });
 
         // record states ( avoid data race )
@@ -169,7 +472,10 @@ export class RevalidatingFileLoader extends Loader {
 
         // start the fetch
         fetch(req)
-            .then((response) => {
+            .catch(error => {
+                throw networkError(error);
+            })
+            .then(async (response) => {
                 if (response.status === 200 || response.status === 0) {
                     // Some browsers return HTTP Status 0 when using non-http protocol
                     // e.g. 'file://' or 'data://'. Handle as success.
@@ -220,18 +526,13 @@ export class RevalidatingFileLoader extends Loader {
                                                     total,
                                                 }
                                             );
-                                            for (
-                                                let i = 0,
-                                                    il =
-                                                        loadingEntry.callbacks
-                                                            .length;
-                                                i < il;
-                                                i++
-                                            ) {
-                                                const callback =
-                                                    loadingEntry.callbacks[i];
-                                                if (callback.onProgress)
-                                                    callback.onProgress(event);
+                                            for (const callback of [
+                                                ...loadingEntry.callbacks
+                                            ]) {
+                                                invokeCallback(
+                                                    callback.onProgress,
+                                                    event
+                                                );
                                             }
 
                                             controller.enqueue(value);
@@ -239,7 +540,7 @@ export class RevalidatingFileLoader extends Loader {
                                         }
                                     },
                                     (e) => {
-                                        controller.error(e);
+                                        controller.error(networkError(e));
                                     }
                                 );
                             }
@@ -247,16 +548,13 @@ export class RevalidatingFileLoader extends Loader {
                     });
 
                     return new Response(stream);
-                } else {
-                    throw new HttpError(
-                        `fetch for "${response.url}" responded with ${response.status}: ${response.statusText}`,
-                        response
-                    );
                 }
+
+                throw await httpError(response);
             })
             .then(async (response) => {
                 if (this.clientDecompression) {
-                    const ds = new DecompressionStream("gzip");
+                    const ds = new globalThis.DecompressionStream("gzip");
                     const decompressedStream = (await response.blob()).stream().pipeThrough(ds);
                     const decompressedResponse = new Response(decompressedStream);
                     return decompressedResponse;
@@ -299,21 +597,22 @@ export class RevalidatingFileLoader extends Loader {
                 }
             })
             .then((data) => {
+                const callbacks = takeLoadingCallbacks(loadingEntry);
+                if (
+                    loadingEntry.abortController.signal.aborted ||
+                    callbacks.length === 0
+                ) return;
+
                 // Add to cache only on HTTP success, so that we do not cache
                 // error response bodies as proper responses to requests.
-                Cache.add(`file:${url}`, data);
+                Cache.add(cacheKey, data);
 
                 if (loading[url] === loadingEntry) {
                     delete loading[url];
                 }
 
-                for (
-                    let i = 0, il = loadingEntry.callbacks.length;
-                    i < il;
-                    i++
-                ) {
-                    const callback = loadingEntry.callbacks[i];
-                    if (callback.onLoad) callback.onLoad(data);
+                for (const callback of callbacks) {
+                    invokeCallback(callback.onLoad, data);
                 }
             })
             .catch((err) => {
@@ -323,13 +622,8 @@ export class RevalidatingFileLoader extends Loader {
                     delete loading[url];
                 }
 
-                for (
-                    let i = 0, il = loadingEntry.callbacks.length;
-                    i < il;
-                    i++
-                ) {
-                    const callback = loadingEntry.callbacks[i];
-                    if (callback.onError) callback.onError(err);
+                for (const callback of takeLoadingCallbacks(loadingEntry)) {
+                    invokeCallback(callback.onError, err);
                 }
                 this.manager.itemError(url);
             })

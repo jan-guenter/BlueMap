@@ -22,10 +22,10 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-import {pathFromCoords} from "../util/Utils";
+import {pathFromCoords} from "../util/Utils.js";
 import {BufferGeometryLoader, Mesh, Material} from "three";
-import {PRBMLoader} from "./hires/PRBMLoader";
-import {RevalidatingFileLoader} from "../util/RevalidatingFileLoader";
+import {PRBMLoader} from "./hires/PRBMLoader.js";
+import {RevalidatingFileLoader} from "../util/RevalidatingFileLoader.js";
 
 export class TileLoader {
 
@@ -52,52 +52,83 @@ export class TileLoader {
 
         this.loadBlocker = loadBlocker;
 
-        this.fileLoader = new RevalidatingFileLoader();
-        this.fileLoader.setResponseType('arraybuffer');
-        this.fileLoader.setRevalidatedUrls(this.revalidatedUrls);
-        this.fileLoader.setClientDecompression(clientDecompression);
         this.clientDecompression = clientDecompression;
 
         this.bufferGeometryLoader = new PRBMLoader();
     }
 
-    load = (tileX, tileZ, cancelCheck = () => false, force = false) => {
+    load = (
+        tileX,
+        tileZ,
+        cancelCheck = () => false,
+        force = false,
+        signal = undefined
+    ) => {
         let tileUrl = this.tilePath + pathFromCoords(tileX, tileZ) + '.prbm';
         if (this.clientDecompression) {
             tileUrl += '.gz';
         }
 
         return new Promise((resolve, reject) => {
+            const fileLoader = new RevalidatingFileLoader();
+            fileLoader.setResponseType('arraybuffer');
+            fileLoader.setRevalidatedUrls(this.revalidatedUrls);
+            fileLoader.setClientDecompression(this.clientDecompression);
+
+            let settled = false;
+            const finish = (callback, value) => {
+                if (settled) return;
+                settled = true;
+                signal?.removeEventListener("abort", onAbort);
+                callback(value);
+            };
+            const onAbort = () => {
+                fileLoader.abort();
+                finish(reject, {status: "cancelled"});
+            };
+
+            if (signal?.aborted) {
+                finish(reject, {status: "cancelled"});
+                return;
+            }
+            signal?.addEventListener("abort", onAbort, {once: true});
+
             if (force) this.revalidatedUrls?.delete(tileUrl);
-            this.fileLoader.setRevalidatedUrls(this.revalidatedUrls);
-            this.fileLoader.load(tileUrl,
+            fileLoader.load(
+                tileUrl,
                 async data => {
+                    try {
+                        await this.loadBlocker();
+                        if (cancelCheck() || signal?.aborted) {
+                            finish(reject, {status: "cancelled"});
+                            return;
+                        }
 
-                    await this.loadBlocker();
-                    if (cancelCheck()){
-                        reject({status: "cancelled"});
-                        return;
+                        let geometry = this.bufferGeometryLoader.parse(data);
+
+                        let object = new Mesh(geometry, this.material);
+
+                        let tileSize = this.tileSettings.tileSize;
+                        let translate = this.tileSettings.translate;
+                        let scale = this.tileSettings.scale;
+                        object.position.set(tileX * tileSize.x + translate.x, 0, tileZ * tileSize.z + translate.z);
+                        object.scale.set(scale.x, 1, scale.z);
+
+                        object.userData.tileUrl = tileUrl;
+                        object.userData.tileType = "hires";
+
+                        object.updateMatrixWorld(true);
+
+                        finish(resolve, object);
+                    } catch (error) {
+                        finish(reject, error);
                     }
-
-                    let geometry = this.bufferGeometryLoader.parse(data);
-
-                    let object = new Mesh(geometry, this.material);
-
-                    let tileSize = this.tileSettings.tileSize;
-                    let translate = this.tileSettings.translate;
-                    let scale = this.tileSettings.scale;
-                    object.position.set(tileX * tileSize.x + translate.x, 0, tileZ * tileSize.z + translate.z);
-                    object.scale.set(scale.x, 1, scale.z);
-
-                    object.userData.tileUrl = tileUrl;
-                    object.userData.tileType = "hires";
-
-                    object.updateMatrixWorld(true);
-
-                    resolve(object);
                 },
                 () => {},
-                reject
+                error => finish(
+                    reject,
+                    signal?.aborted ? {status: "cancelled"} : error
+                )
             );
         });
     }
