@@ -1,11 +1,11 @@
-# BlueMap 5.22 backport
+# BlueMap 5.23 backport
 
-This fork backports BlueMap 5.22 to the All the Mons 1.2.0 server baseline:
+This fork backports BlueMap 5.23 to the All the Mons 1.2.0 server baseline:
 
 - All the Mons: `1.2.0`
 - Pack repository commit: `c7bb230f21d14d26859d0b92548f089b3a493ad9`
-- BlueMap upstream tag: `v5.22`
-- Upstream commit: `fe5115d5548a30d34175b8e0449aaca280af199f`
+- BlueMap upstream tag: `v5.23`
+- Upstream commit: `4c4cbc291b361ceff6ee239448e9f988f9019dbb`
 - BlueMapAPI 2.8 upstream base:
   `e20166d5ac93feab653392cf30a305a3e255754e`
 - Java 21 BlueMapAPI fork commit:
@@ -14,7 +14,7 @@ This fork backports BlueMap 5.22 to the All the Mons 1.2.0 server baseline:
 - NeoForge: 21.1.248
 - Java: 21
 
-The fork retains the BlueMap 5.22 API, core, common code, renderer, resource
+The fork retains the BlueMap 5.23 API, core, common code, renderer, resource
 system, and web application. It provides a dedicated NeoForge 1.21.1 platform
 adapter and intentionally does not claim compatibility with BlueMap's other
 platform targets.
@@ -83,7 +83,7 @@ An unrelated Ars Nouveau watchdog crash was observed before BlueMap was
 installed as well as during an earlier staging start; the final clean restart
 completed without it.
 
-The public API remains BlueMapAPI 2.8 from the exact BlueMap 5.22 dependency,
+The public API remains BlueMapAPI 2.8 from the exact BlueMap 5.23 dependency,
 retargeted only from Java 22 to Java 21. Building and loading the future
 FramedBlocks renderer add-on is intentionally deferred to that add-on's
 separate development session.
@@ -102,3 +102,11 @@ expected AE2 spatial-storage dimension metadata fallback remained unchanged.
 
 This validates the server-side loader refresh. An unmodified All the Mons 1.2.0
 client connection was not repeated as part of this loader-only update.
+
+### BlueMap 5.23 rebase
+
+The current branch rebases the NeoForge 1.21.1 and Java 21 adaptation onto the
+exact upstream BlueMap 5.23 tag. Upstream 5.23 uses the same BlueMapAPI commit
+as 5.22, so the existing Java 21 API fork remains the exact matching API base.
+The 5.23 build and runtime results are recorded only after their corresponding
+checks have run on the rebased branch.
