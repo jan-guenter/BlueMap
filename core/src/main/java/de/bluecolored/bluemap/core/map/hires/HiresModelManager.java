@@ -38,6 +38,7 @@ import lombok.Getter;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -81,15 +82,12 @@ public class HiresModelManager {
                 for (RenderPass renderPass : renderPasses.get()) {
                     renderPass.render(world, modelMin, modelMax, modelAnchor, modelView.initialize(), tileMetaConsumer);
                 }
-            } catch (MaxCapacityReachedException ex) {
-                Logger.global.noFloodWarning("max-capacity-reached",
-                        "One or more map-tiles are too complex to be completed (@~ %s to %s): %s".formatted(modelMin, modelMax, ex));
+
+                model.sort();
+                save(model, tile);
+            } finally {
+                ArrayTileModel.instancePool().recycleInstance(model);
             }
-
-            model.sort();
-            save(model, tile);
-
-            ArrayTileModel.instancePool().recycleInstance(model);
         } else {
             TileModelView modelView = new TileModelView(VoidTileModel.INSTANCE);
             for (RenderPass renderPass : renderPasses.get()) {
@@ -125,19 +123,32 @@ public class HiresModelManager {
     }
 
     private void save(final ArrayTileModel model, Vector2i tile) {
+        writeModel(storage, model, tile);
+
+        // notify listeners that the tile changed
+        for (Consumer<Vector2i> listener : this.tileUpdateListeners) {
+            listener.accept(tile);
+        }
+    }
+
+    static void writeModel(
+            GridStorage storage,
+            final ArrayTileModel model,
+            Vector2i tile
+    ) {
         try (
                 OutputStream out = storage.write(tile.getX(), tile.getY());
                 PRBMWriter modelWriter = new PRBMWriter(out)
         ) {
             modelWriter.write(model);
         } catch (IOException e){
+            try {
+                storage.delete(tile.getX(), tile.getY());
+            } catch (IOException deleteFailure) {
+                e.addSuppressed(deleteFailure);
+            }
             Logger.global.logError("Failed to save hires model: " + tile, e);
-            return;
-        }
-
-        // notify listeners that the tile changed
-        for (Consumer<Vector2i> listener : this.tileUpdateListeners) {
-            listener.accept(tile);
+            throw new UncheckedIOException("Failed to save hires model: " + tile, e);
         }
     }
 
